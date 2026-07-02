@@ -1,0 +1,24 @@
+# Multi-repo index config for `sourcerer index --config repos.example.yml`.
+#
+# A YAML list, one entry per repo. `branches` and `tags` are lists of glob patterns
+# (fnmatch: *, ?, [seq] -- not regex) matched against the remote's ref names. Newly
+# published tags matching a pattern are discovered and indexed automatically on each run.
+#
+# An omitted or empty ([]) list selects nothing for that ref type. "*" matches all.
+# Bound how far back tags go with the pattern itself (e.g. v[89].*) -- there is no
+# separate date/version cutoff field.
+
+- org: elastic
+  repo: docs-content
+  branches: [ "docs-content" ]
+  tags: []
+
+- org: elastic
+  repo: elasticsearch
+  branches: []
+  tags: [ "v9.*" ]
+
+- org: elastic
+  repo: kibana
+  branches: []
+  tags: [ "v9.*" ]

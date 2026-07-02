@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sourcerer"
+version = "0.1.0"
+description = "Index and search source code in Elasticsearch."
+requires-python = ">=3.10"
+dependencies = [
+    "click==8.1.8",
+    "elasticsearch==8.17.1",
+    "python-dotenv==1.0.1",
+    "pyyaml==6.0.2",
+    "requests==2.34.2",
+    "rich==13.9.4",
+]
+
+[project.scripts]
+sourcerer = "sourcerer.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sourcerer = [
+    "elastic/index_templates/*.json",
+    "elastic/agent_builder_tools/*.yml",
+    "elastic/agent_builder_tools/*.yaml",
+    "elastic/agent_builder_agents/*.yml",
+    "elastic/agent_builder_agents/*.yaml",
+]

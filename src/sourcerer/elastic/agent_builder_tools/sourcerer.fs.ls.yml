@@ -1,0 +1,98 @@
+id: sourcerer.fs.ls
+type: esql
+description: ls files and directories under a given path or glob pattern in a repository
+tags: []
+configuration:
+  query: |-
+    // Scope the search
+    FROM sourcerer-v1-files*
+    | WHERE MATCH(git.org, ?git_org)
+        AND MATCH(git.repo, ?git_repo)
+        AND git.commit LIKE ?git_commit
+
+    // Normalize the input file_path by stripping any trailing slash
+    // (e.g. "src/" and "src" are equivalent)
+    | EVAL fp = CASE(ENDS_WITH(?file_path, "/"), LEFT(?file_path, LENGTH(?file_path) - 1), ?file_path)
+
+    // Flag whether the input pattern is recursive (e.g. "src/**")
+    | EVAL is_recursive = fp != REPLACE(fp, "[*][*]", "")
+    
+    // Count the segments in the input pattern. Examples:
+    //   "src"                      = 1
+    //   "src/test/resources"       = 3
+    //   "src/test/resources/*.xml" = 4
+    | EVAL num_input_segments = LENGTH(fp) - LENGTH(REPLACE(fp, "/", "")) + 1
+
+    // Split the indexed file.path into segments. Example:
+    //   "src/test/resources/log4j.xml" = [ "src", "test", "resources", "log4j.xml" ]
+    | EVAL segments = SPLIT(file.path, "/")
+
+    // Count the segments of the indexed file.path. Example:
+    //   [ "src", "test", "resources", "log4j.xml" ] = 4
+    | EVAL num_segments = MV_COUNT(segments)
+
+    // Truncate the indexed file.path to the input pattern's depth,
+    // so we compare like-for-like. This is also what confines a "*" to a
+    // single segment: prefix holds exactly num_input_segments parts,
+    // so there's no extra "/" for a wildcard to span. Example:
+    //   "src/test/resources/log4j.xml" = "src/test/resources"
+    | EVAL prefix = MV_CONCAT(MV_SLICE(segments, 0, num_input_segments - 1), "/")
+    
+    // Keep files at or below the input pattern's depth whose prefix matches the
+    // pattern. ">=" (not ">") lets the pattern match a file at its own depth,
+    // e.g. "src/test/resources/*.xml" matching log4j.xml directly.
+    | WHERE num_segments >= num_input_segments
+      AND CASE(ENDS_WITH(?file_path, "/"), CONCAT(prefix, "/"), prefix) LIKE ?file_path
+    
+    // Decide what to emit for each matched file:
+    // If recursive ("**"), emit the full descendant path.
+    // If file sits at pattern dept, emit the matched file's path (a file glob hit).
+    // If file sits below, emit the single child directly under the target level.
+    | EVAL name = CASE(
+      is_recursive, file.path,
+      num_segments == num_input_segments, file.path,
+      MV_CONCAT(MV_SLICE(segments, 0, num_input_segments), "/") // absolute path of the immediate child
+    )
+    
+    // Flag whether each emitted name is a directory. A one-level-down child is
+    // a directory only if the file lives deeper still (num_segments > depth + 1).
+    // Recursive paths and direct file-glob hits are always files.
+    | EVAL is_dir = CASE(
+      is_recursive, false,
+      num_segments == num_input_segments, false,
+      num_segments > num_input_segments + 1
+    )
+    
+    // Collapse to one row per entry (e.g. many files under "main/" become
+    // a single "main/" row, with counts). This is what turns raw paths into
+    // an ls listing.
+    | STATS files = COUNT(*), bytes = SUM(file.size) BY name, is_dir
+
+    // Append a trailing "/" to directory entries so they read like ls output.
+    | EVAL name = CASE(is_dir, CONCAT(name, "/"), name)
+
+    // Format response
+    | SORT is_dir DESC, name
+    | KEEP name
+    | LIMIT 1000000
+  params:
+    git_org:
+      type: string
+      description: Filter by git org(s)
+      optional: true
+      defaultValue: "*"
+    git_repo:
+      type: string
+      description: Filter by git repo(s)
+      optional: true
+      defaultValue: "*"
+    git_commit:
+      type: string
+      description: Filter by git commit(s)
+      optional: true
+      defaultValue: "*"
+    file_path:
+      type: string
+      description: File path to ls (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)
+      optional: true
+      defaultValue: "*"

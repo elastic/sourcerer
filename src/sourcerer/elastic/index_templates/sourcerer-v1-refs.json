@@ -1,0 +1,48 @@
+{
+  "_meta": {
+    "description": "sourcerer-v1-refs"
+  },
+  "index_patterns": [
+    "sourcerer-v1-refs*"
+  ],
+  "template": {
+    "mappings": {
+      "properties": {
+        "git": {
+          "properties": {
+            "org": {
+              "type": "keyword"
+            },
+            "repo": {
+              "type": "keyword"
+            },
+            "commit": {
+              "type": "keyword"
+            },
+            "branch": {
+              "type": "keyword"
+            },
+            "tag": {
+              "type": "keyword"
+            },
+            "ref": {
+              "type": "keyword"
+            }
+          }
+        },
+        "status": {
+          "type": "keyword"
+        },
+        "files_count": {
+          "type": "long"
+        },
+        "lines_count": {
+          "type": "long"
+        },
+        "indexed_at": {
+          "type": "date"
+        }
+      }
+    }
+  }
+}

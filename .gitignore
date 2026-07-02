@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.egg-info/
+
+# Build artifacts
+build/
+dist/
+
+# Virtual environments & uv
+.venv/
+uv.lock
+
+# Secrets & local config
+.env
+
+# macOS
+.DS_Store

@@ -1,0 +1,47 @@
+id: sourcerer.refs.list
+type: esql
+description: list the git refs (commits, branches, tags) indexed for org(s)/repo(s)
+tags: []
+configuration:
+  query: |-
+    // List the indexed refs. Every filter is wildcard-friendly and defaults to "*",
+    // so calling with no params lists every ref in every repo. Narrow with any combo
+    // of org / repo / branch / tag / commit to browse what's available to
+    // cat/head/tail/termsearch.
+    FROM sourcerer-v1-refs*
+    | WHERE git.org LIKE ?git_org
+        AND git.repo LIKE ?git_repo
+        AND git.commit LIKE ?git_commit
+        AND COALESCE(git.branch, "") LIKE ?git_branch
+        AND COALESCE(MV_CONCAT(git.tag, ","), "") LIKE ?git_tag
+
+    // Most recent first so a moved branch's current commit leads
+    | KEEP git.org, git.repo, git.ref, git.commit, git.branch, git.tag, status, files_count, lines_count, indexed_at
+    | SORT indexed_at DESC
+    | LIMIT 1000
+  params:
+    git_org:
+      type: string
+      description: Filter by git org(s)
+      optional: true
+      defaultValue: "*"
+    git_repo:
+      type: string
+      description: Filter by git repo(s)
+      optional: true
+      defaultValue: "*"
+    git_commit:
+      type: string
+      description: Filter by git commit(s)
+      optional: true
+      defaultValue: "*"
+    git_branch:
+      type: string
+      description: Filter by branch(es)
+      optional: true
+      defaultValue: "*"
+    git_tag:
+      type: string
+      description: Filter by tag(s)
+      optional: true
+      defaultValue: "*"

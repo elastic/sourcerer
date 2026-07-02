@@ -1,0 +1,56 @@
+id: sourcerer.fs.head
+type: esql
+description: head repo file(s)
+tags: []
+configuration:
+  query: |-
+    // Scope the search
+    FROM sourcerer-v1-lines*
+    | WHERE MATCH(git.org, ?git_org)
+        AND MATCH(git.repo, ?git_repo)
+        AND git.commit LIKE ?git_commit
+        AND file.path LIKE ?file_path
+        AND MATCH(file.path, ?file_path)
+    
+    // Construct the output for each file based on its lines
+    // Prefix each line with its zero-padded line number so: (a) duplicate lines stay unique; and (b) lexical sort = line order
+    | EVAL pair = CONCAT(RIGHT(CONCAT("0000000000", TO_STRING(line.number)), 10), line.content)
+
+    // Collapse each file's lines into one ordered, deduped-safe list (the prefix prevents VALUES from dropping repeated lines)
+    | STATS pairs = MV_SORT(VALUES(pair))
+        BY git.org, git.repo, git.commit, file.path
+
+    // Keep only the first n lines
+    | EVAL sliced = MV_SLICE(pairs, 0, ?n - 1)
+
+    // Join lines with newlines, then strip the 10-digit prefix off each line
+    | EVAL content = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(sliced, "\n")), "\n[0-9]{10}", "\n"), 2)
+
+    // Format the response
+    | KEEP git.org, git.repo, git.commit, file.path, content
+    | SORT git.org, git.repo, git.commit, file.path
+  params:
+    git_org:
+      type: string
+      description: Filter by git org(s)
+      optional: true
+      defaultValue: "*"
+    git_repo:
+      type: string
+      description: Filter by git repo(s)
+      optional: true
+      defaultValue: "*"
+    git_commit:
+      type: string
+      description: Filter by git commit(s)
+      optional: true
+      defaultValue: "*"
+    file_path:
+      type: string
+      description: File path(s) to head
+      optional: false
+    n:
+      type: integer
+      description: Number of lines to return
+      optional: true
+      defaultValue: 10

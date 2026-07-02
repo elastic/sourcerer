@@ -1,0 +1,33 @@
+id: sourcerer.refs.resolve
+type: esql
+description: resolve a git ref (branch or tag) to its indexed commit(s) in repo(s)
+tags: []
+configuration:
+  query: |-
+    // Look up the ref marker(s). Branches are stored only here (not on file/line docs),
+    // so resolve a branch like `main` to its commit, then pass that commit to
+    // cat/head/tail/termsearch.
+    FROM sourcerer-v1-refs*
+    | WHERE git.org LIKE ?git_org
+        AND git.repo LIKE ?git_repo
+        AND COALESCE(git.ref, "") LIKE ?git_ref
+
+    // Most recent first so a moved branch's current commit leads
+    | KEEP git.org, git.repo, git.ref, git.branch, git.commit, indexed_at
+    | SORT indexed_at DESC
+    | LIMIT 1000
+  params:
+    git_org:
+      type: string
+      description: Filter by git org(s)
+      optional: true
+      defaultValue: "*"
+    git_repo:
+      type: string
+      description: Filter by git repo(s)
+      optional: true
+      defaultValue: "*"
+    git_ref:
+      type: string
+      description: The ref name to resolve (branch or tag), e.g. "main" or "v1.2.3"
+      optional: false

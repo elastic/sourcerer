@@ -1,0 +1,59 @@
+id: sourcerer.code.grep
+type: esql
+description: grep code in repo file(s) with regex
+tags: []
+configuration:
+  query: |-
+    // Scope the search
+    FROM sourcerer-v1-lines*
+    | WHERE MATCH(git.org, ?git_org)
+        AND MATCH(git.repo, ?git_repo)
+        AND git.commit LIKE ?git_commit
+        AND file.path LIKE ?file_path
+        AND line.content RLIKE ?regex
+
+    // Flag whether the file path pattern is recursive (e.g. "src/**/*.java")
+    | EVAL fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")
+
+    // Count the segments in the pattern and in the indexed file.path.
+    // For non-recursive patterns, depth must match exactly — this is what
+    // confines a "*" to a single segment (if depths differ, a "*" must
+    // have crossed a "/" to match, which we don't want).
+    | EVAL fp_num_input_segments = LENGTH(?file_path) - LENGTH(REPLACE(?file_path, "/", "")) + 1
+    | EVAL fp_num_segments = MV_COUNT(SPLIT(file.path, "/"))
+    | WHERE fp_is_recursive OR fp_num_segments == fp_num_input_segments
+
+    // Format the response
+    | KEEP git.org, git.repo, git.commit, file.path, line.number, line.content
+    | SORT git.org, git.repo, git.commit, file.path, line.number
+    | LIMIT ?n
+  params:
+    git_org:
+      type: string
+      description: Filter by git org(s)
+      optional: true
+      defaultValue: "*"
+    git_repo:
+      type: string
+      description: Filter by git repo(s)
+      optional: true
+      defaultValue: "*"
+    git_commit:
+      type: string
+      description: Filter by git commit(s)
+      optional: true
+      defaultValue: "*"
+    file_path:
+      type: string
+      description: File path(s) to grep (supports * and ** glob syntax)
+      optional: true
+      defaultValue: "**"
+    regex:
+      type: string
+      description: Regex to grep (must wrap with greedy wildcards to match substrings, e.g. .*public static void main.*)
+      optional: false
+    n:
+      type: integer
+      description: Number of search results
+      optional: true
+      defaultValue: 100

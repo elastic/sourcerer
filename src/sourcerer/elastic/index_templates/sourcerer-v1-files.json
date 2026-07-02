@@ -1,0 +1,65 @@
+{
+  "_meta": {
+    "description": "sourcerer-v1-files"
+  },
+  "index_patterns": [
+    "sourcerer-v1-files*"
+  ],
+  "template": {
+    "settings": {
+      "index": {
+        "sort.field": [
+          "git.org",
+          "git.repo",
+          "git.commit",
+          "file.path"
+        ],
+        "sort.order": [
+          "asc",
+          "asc",
+          "asc",
+          "asc"
+        ]
+      }
+    },
+    "mappings": {
+      "properties": {
+        "git": {
+          "properties": {
+            "org": {
+              "type": "keyword"
+            },
+            "repo": {
+              "type": "keyword"
+            },
+            "commit": {
+              "type": "keyword"
+            }
+          }
+        },
+        "file": {
+          "properties": {
+            "path": {
+              "type": "keyword"
+            },
+            "directory": {
+              "type": "keyword"
+            },
+            "name": {
+              "type": "keyword"
+            },
+            "extension": {
+              "type": "keyword"
+            },
+            "size": {
+              "type": "long"
+            },
+            "attributes": {
+              "type": "keyword"
+            }
+          }
+        }
+      }
+    }
+  }
+}
