@@ -17,7 +17,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 # Third-party packages
 import click
 import yaml
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from elastic_transport import TransportError
 from elasticsearch import ApiError, Elasticsearch, NotFoundError
 from elasticsearch.helpers import BulkIndexError
@@ -27,7 +27,9 @@ from elasticsearch.helpers import parallel_bulk as es_parallel_bulk
 from ..progress import ProgressReporter, Unit, make_reporter
 from ..utils import make_client, make_doc_id
 
-load_dotenv()
+# Resolve `.env` from the working directory, not this package's install location
+# (see cli.py). Matters when sourcerer runs as an installed uv tool.
+load_dotenv(find_dotenv(usecwd=True))
 
 GITHUB_URL_TEMPLATE = "https://github.com/{org}/{repo}.git"
 FILES_INDEX_PREFIX = "sourcerer-v1-files"

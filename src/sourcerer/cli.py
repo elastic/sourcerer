@@ -1,12 +1,15 @@
 # Third-party packages
 import click
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 # App packages
 from .commands import index as index_cmd
 from .commands import setup as setup_cmd
 
-load_dotenv()
+# Resolve `.env` from the current working directory (and its parents) rather than
+# from this package's install location. A bare load_dotenv() walks up from this
+# file, which finds nothing when sourcerer is installed as a uv tool in its own venv.
+load_dotenv(find_dotenv(usecwd=True))
 
 
 def auth_options(f):
