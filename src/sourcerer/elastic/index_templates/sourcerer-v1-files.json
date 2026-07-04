@@ -8,18 +8,21 @@
   "template": {
     "settings": {
       "index": {
-        "sort.field": [
-          "git.org",
-          "git.repo",
-          "git.commit",
-          "file.path"
-        ],
-        "sort.order": [
-          "asc",
-          "asc",
-          "asc",
-          "asc"
-        ]
+        "codec": "best_compression",
+        "sort": {
+          "field": [
+            "git.org",
+            "git.repo",
+            "git.commit",
+            "file.path"
+          ],
+          "order": [
+            "asc",
+            "asc",
+            "asc",
+            "asc"
+          ]
+        }
       }
     },
     "mappings": {

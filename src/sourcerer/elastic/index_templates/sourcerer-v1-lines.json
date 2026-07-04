@@ -7,6 +7,25 @@
   ],
   "template": {
     "settings": {
+      "index": {
+        "codec": "best_compression",
+        "sort": {
+          "field": [
+            "git.org",
+            "git.repo",
+            "git.commit",
+            "file.path",
+            "line.number"
+          ],
+          "order": [
+            "asc",
+            "asc",
+            "asc",
+            "asc",
+            "asc"
+          ]
+        }
+      },
       "analysis": {
         "analyzer": {
           "code_index": {
@@ -39,22 +58,6 @@
             "catenate_words": false
           }
         }
-      },
-      "index": {
-        "sort.field": [
-          "git.org",
-          "git.repo",
-          "git.commit",
-          "file.path",
-          "line.number"
-        ],
-        "sort.order": [
-          "asc",
-          "asc",
-          "asc",
-          "asc",
-          "asc"
-        ]
       },
       "similarity": {
         "code_bm25": {
