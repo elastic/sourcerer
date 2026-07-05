@@ -30,10 +30,12 @@
         "git": {
           "properties": {
             "org": {
-              "type": "keyword"
+              "type": "keyword",
+              "normalizer": "lowercase"
             },
             "repo": {
-              "type": "keyword"
+              "type": "keyword",
+              "normalizer": "lowercase"
             },
             "commit": {
               "type": "keyword"
