@@ -680,6 +680,23 @@ def index_repo(
     return files_count, lines_count
 
 
+def force_merge_lines_index(es: Elasticsearch, org: str, repo: str, commit_sha: str) -> None:
+    """Kick off a force-merge of a commit's lines index down to a single segment, once all of
+    that commit's line docs have been written. The lines index is write-once per commit (content
+    is keyed by (org, repo, commit, path) and never rewritten for that commit), so merging to one
+    segment after the load trades a one-off merge cost for smaller, faster-to-search segments.
+
+    Fired with wait_for_completion=False so it runs as a background task on the cluster and the
+    indexing run doesn't block on the (potentially long) merge. Best-effort: a cluster that
+    rejects or can't schedule the merge just keeps its default segmenting rather than failing
+    the ref."""
+    index = lines_index(org, repo, commit_sha)
+    try:
+        es.indices.forcemerge(index=index, max_num_segments=1, wait_for_completion=False)
+    except ES_ERRORS as e:
+        click.echo(f"Note: could not force-merge {index}: {e}", err=True)
+
+
 def build_ref_id(org: str, repo: str, ref_for_id: str) -> str:
     # One marker per (org, repo, ref name): a mutable branch overwrites its single marker
     # when it moves, while an immutable tag keeps a stable one. The commit is a field, not
@@ -856,6 +873,11 @@ def index_ref_in_dir(
             es, org, repo, repo_dir, commit_sha,
             on_progress=lambda f, l: reporter.update_counts(unit, f, l),
         )
+        # All of this commit's line docs are now written; merge its lines index to a single
+        # segment in the background (see force_merge_lines_index). Only on the freshly-indexed
+        # path -- the tagged/recorded branch means another ref already indexed (and merged) this
+        # same commit's content.
+        force_merge_lines_index(es, org, repo, commit_sha)
         status = "indexed"
     write_ref_marker(es, org, repo, ref_for_id, commit_sha, branch, tag, files_count, lines_count)
     reporter.finish(unit, status, files_count, lines_count)
