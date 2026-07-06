@@ -749,9 +749,38 @@ def count_commit_docs(es: Elasticsearch, index: str, org: str, repo: str, commit
         return 0
 
 
-def commit_indexed(es: Elasticsearch, org: str, repo: str, commit_sha: str) -> bool:
-    """True if a commit's content is already present (any ref may have indexed it)."""
+def content_present(es: Elasticsearch, org: str, repo: str, commit_sha: str) -> bool:
+    """True if ANY content doc exists for this commit. A cheap presence probe -- NOT proof of a
+    complete snapshot, since an interrupted run (Ctrl-C) leaves a partial set of docs behind with
+    no marker (see commit_fully_indexed). Used only to detect content GC'd out from under a
+    surviving complete marker."""
     return count_commit_docs(es, files_index(org, repo), org, repo, commit_sha) > 0
+
+
+def commit_fully_indexed(es: Elasticsearch, org: str, repo: str, commit_sha: str) -> bool:
+    """True if a `status: complete` ref marker references this commit -- i.e. some ref finished
+    indexing this exact snapshot end to end.
+
+    The completeness signal is the marker, not the mere presence of content docs. write_ref_marker
+    is written only after index_repo returns (line-by-line ingest complete), so a commit whose
+    content came from an aborted run -- partial docs, no marker -- is NOT fully indexed here and
+    gets re-indexed (safe: doc ids are idempotent, so re-ingest just fills the gaps and overwrites
+    in place). This is the guard that stops a Ctrl-C'd ref from being wrongly recorded as
+    "already indexed" on the next run."""
+    query = {
+        "bool": {
+            "filter": [
+                {"term": {"git.org": org}},
+                {"term": {"git.repo": repo}},
+                {"term": {"git.commit": commit_sha}},
+                {"term": {"status": "complete"}},
+            ]
+        }
+    }
+    try:
+        return int(es.count(index=REFS_INDEX, query=query)["count"]) > 0
+    except NotFoundError:
+        return False
 
 
 def should_index(es: Elasticsearch, org: str, repo: str, ref_type: str, ref: str, commit_sha: str) -> bool:
@@ -768,7 +797,7 @@ def should_index(es: Elasticsearch, org: str, repo: str, ref_type: str, ref: str
         return True
     if marker.get("status") != "complete":
         return True
-    return not commit_indexed(es, org, repo, commit_sha)
+    return not content_present(es, org, repo, commit_sha)
 
 
 def write_ref_marker(
@@ -889,9 +918,12 @@ def index_ref_in_dir(
         reporter.finish(unit, "skipped")
         return
 
-    if not force and commit_indexed(es, org, repo, commit_sha):
-        # Content is keyed by commit, so another ref already indexed this exact
+    if not force and commit_fully_indexed(es, org, repo, commit_sha):
+        # Content is keyed by commit, so another ref already fully indexed this exact
         # snapshot. Don't rewrite the (large) content docs -- just record the ref marker.
+        # "Fully" is load-bearing: an aborted run leaves partial content but no complete
+        # marker, so it falls through to the else branch and re-indexes rather than
+        # recording a half-populated commit as done.
         status = "tagged" if tag else "recorded"
         files_count = count_commit_docs(es, files_index(org, repo), org, repo, commit_sha)
         lines_count = count_commit_docs(es, lines_index(org, repo, commit_sha), org, repo, commit_sha)
@@ -1543,9 +1575,11 @@ def _dry_run_repo(
             if f"{ref_type}:{unit.ref}" in doomed:
                 rows.append((unit, "skip", "pruned by retain", sha, cd))
                 continue
-            # Content is keyed by commit: if another ref already indexed this exact commit (and
-            # we're not forcing a rewrite), a real run only records the marker -- no re-ingest.
-            shared = not force and commit_indexed(es, org, repo, sha)
+            # Content is keyed by commit: if another ref already fully indexed this exact commit
+            # (and we're not forcing a rewrite), a real run only records the marker -- no
+            # re-ingest. A commit with only partial content from an aborted run has no complete
+            # marker, so it shows as "index" (re-ingest), matching what the real run will do.
+            shared = not force and commit_fully_indexed(es, org, repo, sha)
             rows.append((unit, "reuse" if shared else "index", "content shared" if shared else "", sha, cd))
             synth.append(Marker(
                 id=build_ref_id(org, repo, ref_type, unit.ref, sha),
