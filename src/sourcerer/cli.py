@@ -4,6 +4,7 @@ from dotenv import find_dotenv, load_dotenv
 
 # App packages
 from .commands import index as index_cmd
+from .commands import prune as prune_cmd
 from .commands import setup as setup_cmd
 
 # Resolve `.env` from the current working directory (and its parents) rather than
@@ -68,8 +69,22 @@ def setup(url, api_key, username, password, kb_url):
     default=False,
     help="Clone into a throwaway temp dir and delete it afterwards, instead of using the cache.",
 )
+@click.option(
+    "--prune",
+    is_flag=True,
+    default=False,
+    help="After all indexing completes, prune indexed refs that fall outside the config's "
+    "retention policies (equivalent to running `sourcerer prune --config` afterwards). Requires --config.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Preview what would be indexed (and, with --prune, what would be pruned afterwards) "
+    "without writing to Elasticsearch. Clones/fetches the cached repos to resolve real commits. Requires --config.",
+)
 @auth_options
-def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, url, api_key, username, password):
+def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, prune, dry_run, url, api_key, username, password):
     """Index a remote GitHub repo's git-tracked files into Elasticsearch.
 
     Provide a REPO_SPEC ('<org>/<repo>') for a single repo, or --config to index multiple
@@ -82,11 +97,47 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
     if config_path:
         if repo_spec or branch or tag or commit:
             raise click.UsageError("--config cannot be combined with REPO_SPEC or -b/-t/-c")
-        index_cmd.run_config(config_path, url, api_key, username, password, force, quiet, cache_dir, ephemeral)
+        index_cmd.run_config(config_path, url, api_key, username, password, force, quiet, cache_dir, ephemeral, prune, dry_run)
     else:
+        if prune:
+            raise click.UsageError("--prune requires --config (there is no retention policy for a single ref)")
+        if dry_run:
+            raise click.UsageError("--dry-run requires --config")
         if not repo_spec:
             raise click.UsageError("provide a REPO_SPEC ('<org>/<repo>') or --config")
         index_cmd.run(repo_spec, branch, tag, commit, url, api_key, username, password, force, quiet, cache_dir, ephemeral)
+
+
+@cli.command()
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False),
+    required=True,
+    help="YAML config whose retain policies decide which indexed refs to delete.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what would be deleted without deleting anything.",
+)
+@click.option(
+    "--force-merge/--no-force-merge",
+    default=True,
+    help="After dropping content, force-merge the files index to reclaim deleted docs (default: on).",
+)
+@click.option("-q", "--quiet", is_flag=True, default=False, help="Suppress output for repos with nothing to prune.")
+@auth_options
+def prune(config_path, dry_run, force_merge, quiet, url, api_key, username, password):
+    """Delete indexed refs that fall outside their repos.yml retention policies.
+
+    Applies the same retain policies the `index` command uses to skip doomed refs,
+    but retroactively: refs already indexed that a policy would now delete are removed,
+    along with any content (lines/files) no surviving ref still references. Use --dry-run
+    to preview the plan first.
+    """
+    prune_cmd.run(config_path, url, api_key, username, password, dry_run, force_merge, quiet)
 
 
 if __name__ == "__main__":

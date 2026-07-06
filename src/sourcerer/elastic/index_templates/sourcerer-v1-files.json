@@ -38,7 +38,8 @@
               "normalizer": "lowercase"
             },
             "commit": {
-              "type": "keyword"
+              "type": "keyword",
+              "normalizer": "lowercase"
             }
           }
         },
@@ -54,13 +55,15 @@
               "type": "keyword"
             },
             "extension": {
-              "type": "keyword"
+              "type": "keyword",
+              "normalizer": "lowercase"
             },
             "size": {
               "type": "long"
             },
             "attributes": {
-              "type": "keyword"
+              "type": "keyword",
+              "normalizer": "lowercase"
             }
           }
         }

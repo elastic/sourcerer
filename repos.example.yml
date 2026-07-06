@@ -1,24 +1,64 @@
-# Multi-repo index config for `sourcerer index --config repos.example.yml`.
-#
-# A YAML list, one entry per repo. `branches` and `tags` are lists of glob patterns
-# (fnmatch: *, ?, [seq] -- not regex) matched against the remote's ref names. Newly
-# published tags matching a pattern are discovered and indexed automatically on each run.
-#
-# An omitted or empty ([]) list selects nothing for that ref type. "*" matches all.
-# Bound how far back tags go with the pattern itself (e.g. v[89].*) -- there is no
-# separate date/version cutoff field.
-
-- org: elastic
-  repo: docs-content
-  branches: [ "docs-content" ]
-  tags: []
-
 - org: elastic
   repo: elasticsearch
-  branches: []
-  tags: [ "v9.*" ]
+  refs:
+  - type: tag
 
-- org: elastic
-  repo: kibana
-  branches: []
-  tags: [ "v9.*" ]
+    # Start by gathering a unique set of refs (tags in this example) whose names
+    # match any of the given patterns (also supports a single string rather than
+    # an array of strings):
+    match:
+      - v{major}.{minor}.{patch}
+      - v{major}.{minor}.{patch}-{prerelease}
+
+    # From those, set the starting point for indexing based on ONE of these
+    # (setting multiple should raise an error; all four are shown for reference)
+    since:
+      age: 1y                       # age of commit relative to now (e.g. 1h, 1d, 1w, 1m, 1y) (starting point is the oldest matching commit)
+      date: YYYY-MM-DD              # specific date of commit (starting point is the oldest matching commit)
+      commit: cfefb3b2378ccbadefa7  # commit hash (starting point is the single matching commit)
+      ref: v8.17.0                  # name of tag or branch (starting point is the oldest matching commit)
+    
+    # Keep a ref when indexing (and preserve it when pruning) only while it
+    # satisfies EVERY criterion below; otherwise it is skipped/deleted.
+    # For each descendent field, impose no constraint if it is omitted or null.
+    # All values are inclusive (e.g. "count: 10" means keep the most recent 10 commits and prune the rest for that tag or branch)
+    retain:
+      age: 2y                       # keep commits within this age, prune older (e.g. 1h, 1d, 1w, 1m, 1y)
+      count: 10                     # keep the newest N commits since latest commit, regardless of date or version
+      version:                      # only allowed if the match pattern contains one or more semver values; otherwise raise an error
+        majors: 2                   # keep the newest 2 major VALUES (latest + n-1; e.g. keep v8.x once v9.x ships) (ignored if {major} isn't in "match")
+        minors: null                # newest N minors per (major) (ignored if {minor} isn't in "match")
+        patches: 1                  # newest patch per (major, minor) (ignored if {patch} isn't in "match")
+        builds: null                # (ignored if {build} isn't in "match")
+      prerelease: superseded        # sibling of version: drop -rc once its final ships (ignored if {prerelease} isn't in "match")
+  
+  # Example: Index the latest commit of an ad hoc tag and never prunes it
+  # (nor any future commits if the head moves).
+  - type: tag
+    match: my-dev-tag
+
+  # Example: Indexes the latest commit of an ad hoc branch and never prunes
+  # its commits as the head moves.
+  - type: branch
+    match: my-dev-branch
+
+  # Example: Index the latest commit of the main branch. As new commits are
+  # indexed, keep only the most recent five commits and prune the older ones.
+  - type: branch
+    match: main
+    retain:
+      count: 5
+  
+  # Example: Index the most recent commit of all feature branches and bug fix
+  # branches as of a week ago. Whenever a new commit is indexed for any of these
+  # branches, prune the older commit of that branch. Prune any of commits of
+  # these branches if the age of the commit is older than one month.
+  - type: branch
+    match:
+    - feat-*
+    - fix-*
+    since:
+      age: 1w
+    retain:
+      age: 1m
+      count: 1

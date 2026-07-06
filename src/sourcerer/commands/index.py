@@ -20,10 +20,12 @@ import yaml
 from dotenv import find_dotenv, load_dotenv
 from elastic_transport import TransportError
 from elasticsearch import ApiError, Elasticsearch, NotFoundError
-from elasticsearch.helpers import BulkIndexError
+from elasticsearch.helpers import BulkIndexError, bulk, scan
 from elasticsearch.helpers import parallel_bulk as es_parallel_bulk
 
 # App packages
+from ..config import RepoConfig, load_config
+from ..planner import Marker, content_delete_set, plan_repo
 from ..progress import ProgressReporter, Unit, make_reporter
 from ..utils import make_client, make_doc_id
 
@@ -697,11 +699,33 @@ def force_merge_lines_index(es: Elasticsearch, org: str, repo: str, commit_sha: 
         click.echo(f"Note: could not force-merge {index}: {e}", err=True)
 
 
-def build_ref_id(org: str, repo: str, ref_for_id: str) -> str:
-    # One marker per (org, repo, ref name): a mutable branch overwrites its single marker
-    # when it moves, while an immutable tag keeps a stable one. The commit is a field, not
-    # part of the id, so resolving a ref to its commit is a direct get.
-    return make_doc_id(org, repo, ref_for_id)
+def commit_date(repo_dir: pathlib.Path) -> str | None:
+    """Strict ISO-8601 committer date of the checked-out HEAD (git %cI), or None on failure.
+
+    The "age of the code" clock: used for max_age pruning and for head-ordering in
+    resolve_head. Distinct from indexed_at (rebuild recency, used by keep_recent) -- a tag
+    cut three years ago is old regardless of when it was indexed."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_dir), "show", "-s", "--format=%cI", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    return result.stdout.strip() or None
+
+
+def build_ref_id(org: str, repo: str, ref_type: str, ref: str, commit_sha: str) -> str:
+    """Content address of one indexed ref state.
+
+    (ref_type, ref) identifies the ref -- a branch and a same-named tag ("release",
+    "stable") are distinct, and multiple refs can resolve to one commit, so keying on commit
+    alone would collapse them and clobber one on the next run. Folding commit in makes a
+    moving branch append a new marker per commit (the append-only history that count/age
+    pruning needs), while an immutable tag re-hashes to the same id and stays idempotent."""
+    return make_doc_id(org, repo, ref_type, ref, commit_sha)
 
 
 def count_commit_docs(es: Elasticsearch, index: str, org: str, repo: str, commit_sha: str) -> int:
@@ -730,21 +754,19 @@ def commit_indexed(es: Elasticsearch, org: str, repo: str, commit_sha: str) -> b
     return count_commit_docs(es, files_index(org, repo), org, repo, commit_sha) > 0
 
 
-def should_index(es: Elasticsearch, org: str, repo: str, ref_for_id: str, commit_sha: str) -> bool:
+def should_index(es: Elasticsearch, org: str, repo: str, ref_type: str, ref: str, commit_sha: str) -> bool:
     """
-    True if this ref needs (re)indexing. Skippable only when the ref's marker is present,
-    complete, points at this same commit, and that commit's content is still in the index.
-    A moved branch (marker commit != resolved commit) or a surviving marker over GC'd
-    content => re-index. Tags are immutable, so they only ever skip once indexed.
+    True if this exact (ref_type, ref, commit) needs (re)indexing. The id now encodes the
+    commit, so a moved branch simply misses (NotFound -> index the new commit, old marker
+    retained). A present+complete marker is guaranteed to be this commit; the only remaining
+    reason to re-index is content GC'd out from under a surviving marker.
     """
-    ref_id = build_ref_id(org, repo, ref_for_id)
+    ref_id = build_ref_id(org, repo, ref_type, ref, commit_sha)
     try:
         marker = es.get(index=REFS_INDEX, id=ref_id)["_source"]
     except NotFoundError:
         return True
     if marker.get("status") != "complete":
-        return True
-    if marker.get("git", {}).get("commit") != commit_sha:
         return True
     return not commit_indexed(es, org, repo, commit_sha)
 
@@ -753,22 +775,26 @@ def write_ref_marker(
     es: Elasticsearch,
     org: str,
     repo: str,
-    ref_for_id: str,
+    ref_type: str,
+    ref: str,
     commit_sha: str,
-    branch: str | None,
-    tag: str | None,
+    commit_date_iso: str | None,
     files_count: int,
     lines_count: int,
 ) -> None:
-    ref_id = build_ref_id(org, repo, ref_for_id)
+    # (ref, ref_type) replaces the old git.branch/git.tag fields: those were write-only and
+    # fully reconstructable as `git.ref filtered by git.ref_type`. git.tag was an array that
+    # per the id scheme never held more than one element, so a single git.ref keyword is more
+    # honest. git.ref is intentionally un-normalized -- git ref names are case-sensitive.
+    ref_id = build_ref_id(org, repo, ref_type, ref, commit_sha)
     doc = {
         "git": {
             "org": org,
             "repo": repo,
-            "branch": branch,
+            "ref": ref,
+            "ref_type": ref_type,
             "commit": commit_sha,
-            "tag": [tag] if tag else None,
-            "ref": ref_for_id,
+            "commit_date": commit_date_iso,
         },
         "status": "complete",
         "files_count": files_count,
@@ -802,8 +828,9 @@ def pre_clone_skip(
     remote_sha, default_branch = resolve_remote(org, repo, branch, tag)
     if not remote_sha:
         return False, None, None
+    ref_type = "tag" if tag else "branch"  # branch, or the resolved remote HEAD (a branch)
     ref_for_id = branch or tag or default_branch
-    if ref_for_id and not should_index(es, org, repo, ref_for_id, remote_sha):
+    if ref_for_id and not should_index(es, org, repo, ref_type, ref_for_id, remote_sha):
         return True, ref_for_id, remote_sha
     return False, ref_for_id, remote_sha
 
@@ -852,11 +879,13 @@ def index_ref_in_dir(
         ref_for_id = tag
     else:  # commit
         ref_for_id = commit_sha
+    ref_type = "branch" if branch else "tag" if tag else "commit"
+    commit_date_iso = commit_date(repo_dir)
     unit.ref = ref_for_id
 
     # Post-clone guard: authoritative SHA check (covers -c and any ls-remote
     # peeling mismatch).
-    if not force and not should_index(es, org, repo, ref_for_id, commit_sha):
+    if not force and not should_index(es, org, repo, ref_type, ref_for_id, commit_sha):
         reporter.finish(unit, "skipped")
         return
 
@@ -879,8 +908,116 @@ def index_ref_in_dir(
         # same commit's content.
         force_merge_lines_index(es, org, repo, commit_sha)
         status = "indexed"
-    write_ref_marker(es, org, repo, ref_for_id, commit_sha, branch, tag, files_count, lines_count)
+    write_ref_marker(es, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso, files_count, lines_count)
     reporter.finish(unit, status, files_count, lines_count)
+
+
+def resolve_head(es: Elasticsearch, org: str, repo: str, ref_type: str, ref: str) -> dict | None:
+    """The current marker for a ref: the newest commit_date among its (possibly many)
+    markers. For a branch with retained history this is its live tip; for a tag it's the
+    sole marker. An agent searching `main` resolves branch -> this commit -> that commit's
+    content indices, so retained older snapshots never leak into search results. Returns the
+    marker _source, or None if the ref has no complete marker."""
+    resp = es.search(
+        index=REFS_INDEX,
+        size=1,
+        query={"bool": {"filter": [
+            {"term": {"git.org": org}},
+            {"term": {"git.repo": repo}},
+            {"term": {"git.ref_type": ref_type}},
+            {"term": {"git.ref": ref}},
+            {"term": {"status": "complete"}},
+        ]}},
+        sort=[{"git.commit_date": {"order": "desc"}}],
+    )
+    hits = resp["hits"]["hits"]
+    return hits[0]["_source"] if hits else None
+
+
+def _parse_dt(value: str | None) -> datetime.datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def fetch_markers(
+    es: Elasticsearch, org: str, repo: str,
+    ref_type: str | None = None, ref: str | None = None,
+) -> list[Marker]:
+    """Every ref marker for a repo (optionally narrowed to one ref), read via scan. Returns
+    [] if the refs index does not exist yet. Shared by `prune` and the inline head-only GC."""
+    filters = [{"term": {"git.org": org}}, {"term": {"git.repo": repo}}]
+    if ref_type is not None:
+        filters.append({"term": {"git.ref_type": ref_type}})
+    if ref is not None:
+        filters.append({"term": {"git.ref": ref}})
+    body = {"query": {"bool": {"filter": filters}}}
+    out: list[Marker] = []
+    try:
+        for hit in scan(es, index=REFS_INDEX, query=body, preserve_order=False):
+            src = hit["_source"]
+            g = src.get("git", {})
+            out.append(Marker(
+                id=hit["_id"],
+                ref=g.get("ref"),
+                ref_type=g.get("ref_type"),
+                commit=g.get("commit"),
+                commit_date=_parse_dt(g.get("commit_date")),
+                indexed_at=_parse_dt(src.get("indexed_at")),
+            ))
+    except NotFoundError:
+        return []
+    return out
+
+
+def execute_deletions(
+    es: Elasticsearch, org: str, repo: str, decisions, force_merge: bool = True,
+) -> tuple[int, int]:
+    """Apply a prune plan. Deletes the marker docs, then drops content ONLY for commits that
+    no surviving marker references (the commit-safety guard, in content_delete_set): the
+    per-commit lines index is dropped whole, and the shared per-repo files index is pruned by
+    a `git.commit` delete-by-query. Returns (markers_deleted, commits_content_dropped)."""
+    deletes = [d.marker for d in decisions if d.action == "delete"]
+    if not deletes:
+        return (0, 0)
+    drop_commits = content_delete_set(decisions)
+
+    bulk(
+        es,
+        ({"_op_type": "delete", "_index": REFS_INDEX, "_id": m.id} for m in deletes),
+        raise_on_error=False,
+        refresh=False,
+    )
+
+    for sha in drop_commits:
+        try:
+            es.indices.delete(index=lines_index(org, repo, sha), ignore_unavailable=True)
+        except NotFoundError:
+            pass
+        try:
+            es.delete_by_query(
+                index=files_index(org, repo),
+                query={"bool": {"filter": [
+                    {"term": {"git.org": org}},
+                    {"term": {"git.repo": repo}},
+                    {"term": {"git.commit": sha}},
+                ]}},
+                conflicts="proceed",
+                refresh=False,
+            )
+        except NotFoundError:
+            pass
+    if force_merge and drop_commits:
+        # Reclaim the deleted file docs from the shared files index. Best-effort: the marker
+        # and content deletes are already applied even if the merge can't be scheduled.
+        try:
+            es.indices.forcemerge(index=files_index(org, repo), only_expunge_deletes=True)
+        except (NotFoundError, *ES_ERRORS):
+            pass
+    return (len(deletes), len(drop_commits))
 
 
 def index_one(
@@ -1014,35 +1151,122 @@ def select_refs(names: list[str], patterns: list[str]) -> list[str]:
     return [n for n in names if any(fnmatch.fnmatch(n, p) for p in patterns)]
 
 
-def _resolve_entry(entry: dict) -> list[Unit]:
-    """Resolve one config entry into the Units it selects: list the remote branches/tags and
-    keep those matching the entry's globs. Pure network + filtering with no reporter calls, so
-    it is safe to run concurrently. list_remote_ref_names returns [] on any ls-remote failure,
-    so this never raises -- a bad/unreachable repo simply contributes no refs."""
-    org, repo = entry["org"], entry["repo"]
-    branches = select_refs(list_remote_ref_names(org, repo, "heads"), entry.get("branches") or [])
-    tags = select_refs(list_remote_ref_names(org, repo, "tags"), entry.get("tags") or [])
-    return [Unit(org=org, repo=repo, ref=n, kind="branch") for n in branches] + [
-        Unit(org=org, repo=repo, ref=n, kind="tag") for n in tags
-    ]
+def _resolve_entry(cfg: RepoConfig) -> list[Unit]:
+    """Resolve one RepoConfig into the Units it selects: list the remote branches/tags once
+    per kind and keep those matching a selector's version-aware pattern (+ min/max_version).
+    Pure network + filtering with no reporter calls, so it is safe to run concurrently.
+    list_remote_ref_names returns [] on any ls-remote failure, so this never raises -- a
+    bad/unreachable repo simply contributes no refs."""
+    remote_names: dict[str, list[str] | None] = {"branch": None, "tag": None}
+    seen: set[tuple[str, str]] = set()
+    units: list[Unit] = []
+    for sel in cfg.selectors:
+        rt = sel.ref_type
+        if remote_names[rt] is None:
+            remote_names[rt] = list_remote_ref_names(
+                cfg.org, cfg.repo, "heads" if rt == "branch" else "tags"
+            )
+        floor = sel.since_version_floor()  # version-based `since: {ref}`, name-only
+        for name in remote_names[rt]:
+            if (rt, name) in seen:
+                continue
+            v = sel.matches(rt, name)
+            if v is None:
+                continue
+            if floor is not None and v.components < floor:
+                continue  # below the since version floor
+            seen.add((rt, name))
+            units.append(Unit(org=cfg.org, repo=cfg.repo, ref=name, kind=rt))
+
+    # Drop refs that retain would delete on version/prerelease grounds alone. These are
+    # name-only (no commit dates), so applying them here shrinks the plan itself -- the user
+    # sees the true set, and we skip the clone/skip-check churn on doomed refs. count/age/since
+    # are date-based and refined post-clone (see process_group). Uses the same planner as
+    # `sourcerer prune`, so cross-selector keeps (e.g. a keep-forever selector) still win.
+    needs_filter = any(
+        sel.retain is not None
+        and (sel.retain.version is not None or sel.retain.prerelease == "superseded")
+        for sel in cfg.selectors
+    )
+    if needs_filter and units:
+        markers = [
+            Marker(id=f"{u.kind}:{u.ref}", ref=u.ref, ref_type=u.kind,
+                   commit="", commit_date=None, indexed_at=None)
+            for u in units
+        ]
+        doomed = {
+            d.marker.id for d in plan_repo(markers, cfg, date_independent_only=True)
+            if d.action == "delete"
+        }
+        units = [u for u in units if f"{u.kind}:{u.ref}" not in doomed]
+    return units
 
 
-def _load_config(config_path: str) -> list[dict]:
-    """Load and validate the multi-repo index config: a YAML list of repo entries."""
-    with open(config_path) as f:
-        data = yaml.safe_load(f)
-    if not isinstance(data, list):
-        raise ValueError("config must be a YAML list of repo entries")
-    for i, entry in enumerate(data):
-        if not isinstance(entry, dict):
-            raise ValueError(f"config entry {i} must be a mapping, got {type(entry).__name__}")
-        if not entry.get("org") or not entry.get("repo"):
-            raise ValueError(f"config entry {i} must set both 'org' and 'repo'")
-        for key in ("branches", "tags"):
-            val = entry.get(key)
-            if val is not None and not isinstance(val, list):
-                raise ValueError(f"config entry {i}: '{key}' must be a list of glob patterns")
-    return data
+def _commit_date_of(repo_dir: pathlib.Path, rev: str) -> datetime.datetime | None:
+    """Committer date of an arbitrary rev (SHA, tag, or branch) in the local clone, used to
+    resolve a `since: {ref|commit}` anchor to a date. Tries the rev as given, then as a
+    remote branch (origin/<rev>). Returns None if the rev can't be resolved."""
+    info = _rev_info(repo_dir, rev)
+    return info[1] if info else None
+
+
+def _rev_info(repo_dir: pathlib.Path, rev: str) -> tuple[str, datetime.datetime | None] | None:
+    """(commit_sha, committer_date) for a rev in the local clone, dereferencing tags to their
+    commit so the date matches what write_ref_marker stores (git %cI). Tries the rev as given,
+    then origin/<rev> for branches. None if the rev can't be resolved."""
+    for candidate in (rev, f"origin/{rev}"):
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(repo_dir), "log", "-1", "--format=%H%x09%cI", candidate],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (subprocess.CalledProcessError, OSError):
+            continue
+        parts = out.stdout.strip().split("\t")
+        if len(parts) == 2:
+            return parts[0], _parse_dt(parts[1])
+    return None
+
+
+def _resolve_since_floor(since, repo_dir: pathlib.Path, now: datetime.datetime) -> datetime.datetime | None:
+    """One selector's `since` -> a commit-date lower bound. age/date resolve directly;
+    ref/commit resolve to the committer date of their commit in the local clone."""
+    if since.kind == "age":
+        return now - since.value            # timedelta
+    if since.kind == "date":
+        return since.value                  # datetime
+    return _commit_date_of(repo_dir, str(since.value))  # ref | commit
+
+
+def _effective_since_floor(
+    cfg: RepoConfig | None, repo_dir: pathlib.Path, ref_type: str, ref: str, now: datetime.datetime,
+) -> datetime.datetime | None:
+    """The floor a ref must clear to be indexed, or None if unconstrained. A ref can match
+    several selectors; inclusion is a union, so a matching selector with no `since` (or the
+    most permissive floor) wins. An unresolvable anchor fails open (doesn't exclude)."""
+    if cfg is None:
+        return None
+    floors: list[datetime.datetime] = []
+    for sel in cfg.selectors:
+        if sel.matches(ref_type, ref) is None:
+            continue
+        # No since, or a version-based `since: {ref}` already enforced in Phase 1 -> this
+        # selector imposes no post-clone date floor, and inclusion is a union, so it wins.
+        if sel.since is None or sel.since_version_floor() is not None:
+            return None
+        floor = _resolve_since_floor(sel.since, repo_dir, now)
+        if floor is None:
+            return None
+        floors.append(floor)
+    return min(floors) if floors else None
+
+
+def _load_config(config_path: str) -> list[RepoConfig]:
+    """Load and validate repos.yml into RepoConfig entries (the new `index:` schema, shared
+    with `sourcerer prune`). Raises OSError/ValueError/yaml.YAMLError on a malformed file."""
+    return load_config(config_path)
 
 
 def run_config(
@@ -1055,12 +1279,22 @@ def run_config(
     quiet: bool = False,
     cache_dir: str | None = None,
     ephemeral: bool = False,
+    prune: bool = False,
+    dry_run: bool = False,
 ) -> None:
     """
     Index every (repo, ref) the config selects. First list the remote branches and tags for
     every entry and keep the ones matching its glob patterns (an omitted or empty list selects
     nothing for that ref type), building the full plan; then index each selected ref. One bad
     ref or repo is reported and the batch continues; the command exits non-zero if any failed.
+
+    With `prune` set, once ALL indexing is complete, run the prune step over the same config
+    (equivalent to a following `sourcerer prune --config`), deleting already-indexed refs that
+    now fall outside their retention policies. Skipped if the run was aborted (Ctrl-C).
+
+    With `dry_run` set, nothing is written to Elasticsearch: the cached repos are cloned/fetched
+    to resolve real commits + dates, and a combined report shows what would be indexed and (with
+    `prune`) what the post-index prune step would delete. See `dry_run_config`.
     """
     try:
         entries = _load_config(config_path)
@@ -1068,8 +1302,16 @@ def run_config(
         click.echo(f"Error: invalid config: {e}", err=True)
         sys.exit(1)
 
+    # Look up a repo's selectors when resolving each ref's `since` floor below.
+    cfg_by_repo = {(c.org, c.repo): c for c in entries}
+
     es = make_client(url, api_key, username, password)
     cache_root = None if ephemeral else resolve_cache_root(cache_dir)
+
+    if dry_run:
+        dry_run_config(es, entries, cfg_by_repo, cache_root, ephemeral, force, prune)
+        return
+
     reporter = make_reporter(quiet)
     failures = 0
 
@@ -1165,9 +1407,41 @@ def run_config(
                     # Reorder the reporter's unit list to match, so the live
                     # display and actual processing order stay consistent.
                     reporter.reorder_group(org, repo, dates)
+                    cfg = cfg_by_repo.get((org, repo))
+                    now = datetime.datetime.now(datetime.timezone.utc)
+
+                    # 2c. Prune-aware pre-filter. Among the pending refs, drop those `since`
+                    # excludes and those `retain` would immediately delete, so we never
+                    # pay to index a ref that prune would remove. This runs the SAME planner as
+                    # `sourcerer prune`, over the candidate refs, so "indexed" and "survives
+                    # prune" can't diverge. count/version/prerelease are cohort-relative, so the
+                    # whole group's refs are scored together (e.g. v8.14.0-.2 are dropped once
+                    # v8.14.3 is in the candidate set via patch:0).
+                    prospective: list[tuple[Unit, str | None, str | None, Marker]] = []
                     for unit, branch, tag in pending:
+                        ref_type = "branch" if branch else "tag"
+                        info = _rev_info(repo_dir, unit.ref)
+                        sha, cd = info if info else ("", None)
+                        floor = _effective_since_floor(cfg, repo_dir, ref_type, unit.ref, now)
+                        if floor is not None and cd is not None and cd < floor:
+                            reporter.finish(unit, "skipped", detail=f"before since floor {floor.date()}")
+                            continue
+                        prospective.append((unit, branch, tag, Marker(
+                            id=f"{ref_type}:{unit.ref}", ref=unit.ref, ref_type=ref_type,
+                            commit=sha, commit_date=cd, indexed_at=now,
+                        )))
+
+                    doomed: set[str] = set()
+                    if cfg is not None and prospective:
+                        decisions = plan_repo([m for *_, m in prospective], cfg, now)
+                        doomed = {d.marker.id for d in decisions if d.action == "delete"}
+
+                    for unit, branch, tag, marker in prospective:
                         if _aborted.is_set():
                             break
+                        if marker.id in doomed:
+                            reporter.finish(unit, "skipped", detail="pruned by retain")
+                            continue
                         try:
                             index_ref_in_dir(
                                 es, org, repo, repo_dir, branch, tag, None,
@@ -1194,6 +1468,216 @@ def run_config(
             # errors are handled inside process_group and counted in `failures`.
             list(pool.map(process_group, groups.items()))
 
+    # Prune only after ALL indexing is complete, so a ref newly indexed this run is present in
+    # the refs index before it's scored for retention (e.g. it can be the cohort-newest that
+    # supersedes an older sibling). Skipped on abort: the plan is incomplete, so its retention
+    # cohorts would be too. Lazy import breaks the prune<->index module import cycle.
+    if prune and not _aborted.is_set():
+        from . import prune as prune_cmd
+        prune_cmd.run(config_path, url, api_key, username, password, quiet=quiet)
+
+    if failures:
+        click.echo(f"Completed with {failures} failure(s)", err=True)
+        sys.exit(1)
+
+
+def _dry_run_repo(
+    es: Elasticsearch,
+    cfg: RepoConfig | None,
+    org: str,
+    repo: str,
+    group: list[Unit],
+    cache_root: pathlib.Path | None,
+    ephemeral: bool,
+    force: bool,
+    prune: bool,
+    now: datetime.datetime,
+) -> dict:
+    """Compute one repo's dry-run preview. Clones/fetches its cached clone to resolve each
+    planned ref's real commit + date (read-only -- writes nothing to ES), classifying every ref
+    exactly as a real run would (index / reuse content / up-to-date / skip), then, when `prune`,
+    plans the post-index prune over existing markers merged with the refs this run would add.
+    Returns a result dict consumed by `_print_dry_run_repo`."""
+    result: dict = {"org": org, "repo": repo, "rows": [], "prune": None, "locked": False}
+    with prepared_repo(org, repo, cache_root, ephemeral) as repo_dir:
+        if repo_dir is None:
+            result["locked"] = True
+            return result
+        rows = result["rows"]
+        synth: list[Marker] = []
+
+        # Pass 1: resolve each ref and classify the already-decided cases (unresolvable,
+        # already-indexed, below a `since` floor). Branches resolve to their fetched
+        # origin tip -- the same commit checkout_branch would land on -- not a stale local
+        # branch; tags dereference to their commit (matching write_ref_marker).
+        pending: list[tuple[Unit, str, str, datetime.datetime | None]] = []
+        for unit in group:
+            ref_type = unit.kind
+            rev = f"origin/{unit.ref}" if ref_type == "branch" else unit.ref
+            info = _rev_info(repo_dir, rev)
+            sha, cd = info if info else ("", None)
+            if not sha:
+                rows.append((unit, "error", "could not resolve ref", None, None))
+                continue
+            if not force and not should_index(es, org, repo, ref_type, unit.ref, sha):
+                rows.append((unit, "up-to-date", "already indexed", sha, cd))
+                continue
+            floor = _effective_since_floor(cfg, repo_dir, ref_type, unit.ref, now)
+            if floor is not None and cd is not None and cd < floor:
+                rows.append((unit, "skip", f"before since floor {floor.date()}", sha, cd))
+                continue
+            pending.append((unit, ref_type, sha, cd))
+
+        # Prune-aware pre-filter over the fresh candidates, exactly as process_group does before
+        # indexing: a ref this run would immediately re-prune (e.g. an older patch superseded by a
+        # newer one also new this run) is never indexed. Scored over the candidate set only.
+        doomed: set[str] = set()
+        if cfg is not None and pending:
+            candidates = [
+                Marker(id=f"{rt}:{u.ref}", ref=u.ref, ref_type=rt, commit=sha, commit_date=cd, indexed_at=now)
+                for (u, rt, sha, cd) in pending
+            ]
+            doomed = {d.marker.id for d in plan_repo(candidates, cfg, now) if d.action == "delete"}
+
+        for unit, ref_type, sha, cd in pending:
+            if f"{ref_type}:{unit.ref}" in doomed:
+                rows.append((unit, "skip", "pruned by retain", sha, cd))
+                continue
+            # Content is keyed by commit: if another ref already indexed this exact commit (and
+            # we're not forcing a rewrite), a real run only records the marker -- no re-ingest.
+            shared = not force and commit_indexed(es, org, repo, sha)
+            rows.append((unit, "reuse" if shared else "index", "content shared" if shared else "", sha, cd))
+            synth.append(Marker(
+                id=build_ref_id(org, repo, ref_type, unit.ref, sha),
+                ref=unit.ref, ref_type=ref_type, commit=sha, commit_date=cd, indexed_at=now,
+            ))
+
+        # Prune preview: the markers that would exist AFTER this run = existing markers (older
+        # refs a policy now retires, already-indexed refs) merged with the refs this run adds
+        # (dedup by id: a synthesized marker for an already-present ref collapses onto it). This
+        # is exactly the set the post-index `--prune` step plans over.
+        if prune and cfg is not None:
+            by_id = {m.id: m for m in fetch_markers(es, org, repo)}
+            for m in synth:
+                by_id.setdefault(m.id, m)
+            result["prune"] = plan_repo(list(by_id.values()), cfg, now)
+    return result
+
+
+# How each dry-run row's status renders; the padding keeps the ref columns aligned.
+_DRY_RUN_LABELS = {
+    "index": "would index",
+    "reuse": "reuse content",
+    "up-to-date": "up to date",
+    "skip": "skip",
+    "error": "error",
+}
+
+
+def _print_dry_run_repo(result: dict, prune: bool) -> tuple[int, int, int]:
+    """Print one repo's combined preview (what would be indexed, then what would be pruned) and
+    return (index_count, prune_markers, prune_commits) for the run summary."""
+    org, repo = result["org"], result["repo"]
+    if result["locked"]:
+        click.echo(f"{org}/{repo}: locked by another sourcerer run — skipped")
+        return (0, 0, 0)
+
+    click.echo(f"{org}/{repo}")
+    click.echo("  index:")
+    index_count = 0
+    for unit, status, detail, sha, cd in result["rows"]:
+        if status in ("index", "reuse"):
+            index_count += 1
+        label = _DRY_RUN_LABELS.get(status, status)
+        short = sha[:10] if sha else "-"
+        suffix = f"   ({detail})" if detail else ""
+        click.echo(f"    {label:14} {unit.kind:6} {unit.ref:28} {short}{suffix}")
+    if not result["rows"]:
+        click.echo("    (no refs selected)")
+
+    markers = commits = 0
+    if prune:
+        decisions = result["prune"] or []
+        deletes = [d for d in decisions if d.action == "delete"]
+        drop = content_delete_set(decisions)
+        keeps = sum(1 for d in decisions if d.action == "keep")
+        markers, commits = len(deletes), len(drop)
+        click.echo("  prune (after indexing):")
+        if not deletes:
+            click.echo("    (nothing to prune)")
+        for d in deletes:
+            content = "marker + content" if d.marker.commit in drop else "marker only (commit shared)"
+            click.echo(f"    would delete   {d.marker.ref_type:6} {d.marker.ref:28} "
+                       f"{d.marker.commit[:10]}  {content}   [{d.reason}]")
+        if deletes:
+            click.echo(f"    -> {markers} marker(s), {commits} commit(s) of content, {keeps} kept")
+    return (index_count, markers, commits)
+
+
+def dry_run_config(
+    es: Elasticsearch,
+    entries: list[RepoConfig],
+    cfg_by_repo: dict[tuple[str, str], RepoConfig],
+    cache_root: pathlib.Path | None,
+    ephemeral: bool,
+    force: bool,
+    prune: bool,
+) -> None:
+    """Preview an `index [--prune]` run without writing anything to Elasticsearch. Resolves the
+    plan (ls-remote), then per repo clones/fetches its cached clone to resolve real commits +
+    dates and classify each ref, and -- with `prune` -- plans the post-index prune. Prints one
+    combined report (what would be indexed, then what would be pruned) and exits non-zero if any
+    repo could not be previewed."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # refs is tiny; refresh once so the prune preview sees the latest existing markers.
+    es.indices.refresh(index=REFS_INDEX, ignore_unavailable=True)
+
+    # Phase 1: resolve the plan, identical to the real run (see run_config).
+    units: list[Unit] = []
+    with ThreadPoolExecutor(max_workers=max(1, min(RESOLVE_CONCURRENCY, len(entries) or 1))) as pool:
+        for fut in [pool.submit(_resolve_entry, entry) for entry in entries]:
+            units.extend(fut.result())
+    units.sort(key=lambda u: (u.org, u.repo, u.ref or "", u.kind))
+    groups: dict[tuple[str, str], list[Unit]] = {}
+    for unit in units:
+        groups.setdefault((unit.org, unit.repo), []).append(unit)
+
+    click.echo("DRY RUN — no changes will be made to Elasticsearch.\n")
+    if not groups:
+        click.echo("Nothing selected by the config.")
+        return
+
+    failures = 0
+
+    def work(item: tuple[tuple[str, str], list[Unit]]) -> dict:
+        (org, repo), group = item
+        cfg = cfg_by_repo.get((org, repo))
+        try:
+            return _dry_run_repo(es, cfg, org, repo, group, cache_root, ephemeral, force, prune, now)
+        except (FileNotFoundError, subprocess.CalledProcessError, ValueError, *ES_ERRORS) as e:
+            return {"org": org, "repo": repo, "error": str(e)}
+
+    # Clone/fetch + resolve repos concurrently (fetches release the GIL); collect all results and
+    # print in sorted plan order so the combined report is deterministic and never interleaved.
+    with ThreadPoolExecutor(max_workers=max(1, INDEX_REPO_CONCURRENCY)) as pool:
+        results = list(pool.map(work, groups.items()))
+
+    tot_index = tot_markers = tot_commits = 0
+    for r in results:
+        if r.get("error"):
+            failures += 1
+            click.echo(f"{r['org']}/{r['repo']}: error: {r['error']}", err=True)
+            continue
+        ci, mk, cm = _print_dry_run_repo(r, prune)
+        tot_index += ci
+        tot_markers += mk
+        tot_commits += cm
+        click.echo("")
+
+    summary = f"Summary: would index {tot_index} ref(s)"
+    if prune:
+        summary += f"; would prune {tot_markers} marker(s) and {tot_commits} commit(s) of content"
+    click.echo(summary + ".")
     if failures:
         click.echo(f"Completed with {failures} failure(s)", err=True)
         sys.exit(1)

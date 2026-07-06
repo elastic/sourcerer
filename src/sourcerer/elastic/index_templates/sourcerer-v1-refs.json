@@ -6,6 +6,22 @@
     "sourcerer-v1-refs*"
   ],
   "template": {
+    "settings": {
+      "index": {
+        "sort": {
+          "field": [
+            "git.org",
+            "git.repo",
+            "git.ref"
+          ],
+          "order": [
+            "asc",
+            "asc",
+            "asc"
+          ]
+        }
+      }
+    },
     "mappings": {
       "properties": {
         "git": {
@@ -18,22 +34,26 @@
               "type": "keyword",
               "normalizer": "lowercase"
             },
-            "commit": {
-              "type": "keyword"
-            },
-            "branch": {
-              "type": "keyword"
-            },
-            "tag": {
-              "type": "keyword"
-            },
             "ref": {
-              "type": "keyword"
+              "type": "keyword",
+              "normalizer": "lowercase"
+            },
+            "ref_type": {
+              "type": "keyword",
+              "normalizer": "lowercase"
+            },
+            "commit": {
+              "type": "keyword",
+              "normalizer": "lowercase"
+            },
+            "commit_date": {
+              "type": "date"
             }
           }
         },
         "status": {
-          "type": "keyword"
+          "type": "keyword",
+          "normalizer": "lowercase"
         },
         "files_count": {
           "type": "long"

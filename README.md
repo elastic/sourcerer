@@ -22,23 +22,36 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
    #ELASTICSEARCH_PASSWORD=
    EOF
    ```
-3. Choose repos to index — create a `repos.yml`, then edit it (globs match remote branch/tag names):
+3. Choose repos to index — create a `repos.yml`, then edit it (each `match` is a glob over remote branch/tag names):
    ```sh
    cat > repos.yml <<'EOF'
+   # https://github.com/elastic/docs-content
    - org: elastic
      repo: docs-content
-     branches: [ "main" ]
-     tags: []
+     refs:
+     - type: branch
+       match: main
+       retain:
+         count: 1  # Keep only the latest commit from the main branch
+
+   # https://github.com/elastic/elasticsearch
    - org: elastic
      repo: elasticsearch
-     branches: []
-     tags: [ "v9.*" ]
-   - org: elastic
-     repo: kibana
-     branches: []
-     tags: [ "v9.*" ]
+     refs:
+     - type: tag
+       match:
+         - v{major}.{minor}.{patch}
+         - v{major}.{minor}.{patch}-{prerelease}
+       since:
+         ref: v8.17.0  # Index everything from this point on
+       retain:
+         version:
+           majors: 2   # Keep only the latest 2 major release tags
+           patches: 1  # Keep only the most recent patch release tag for any minor release tag
+         prerelease: superseded  # Keep release candidate tags until their major tags are released
    EOF
    ```
+   See `repos.example.yml` (or [Indexing multiple repos with a config](AGENTS.md#indexing-multiple-repos-with-a-config)) for version-aware matching, `since` floors, and `retain` policies.
 4. Set up the indices and agent: `sourcerer setup`
 5. Index the repos: `sourcerer index --config repos.yml`
 6. Chat about your software with the Sourcerer agent in Kibana under "Agents".
