@@ -27,7 +27,7 @@ from elasticsearch.helpers import parallel_bulk as es_parallel_bulk
 from ..config import RepoConfig, load_config
 from ..planner import Marker, content_delete_set, plan_repo
 from ..progress import ProgressReporter, Unit, make_reporter
-from ..utils import make_client, make_doc_id
+from ..utils import make_client, make_doc_id, is_serverless
 
 # Resolve `.env` from the working directory, not this package's install location
 # (see cli.py). Matters when sourcerer runs as an installed uv tool.
@@ -691,7 +691,12 @@ def force_merge_lines_index(es: Elasticsearch, org: str, repo: str, commit_sha: 
     Fired with wait_for_completion=False so it runs as a background task on the cluster and the
     indexing run doesn't block on the (potentially long) merge. Best-effort: a cluster that
     rejects or can't schedule the merge just keeps its default segmenting rather than failing
-    the ref."""
+    the ref.
+
+    Skipped entirely on Elastic Cloud Serverless, which doesn't expose the force-merge API
+    (segment management is handled by the platform); calling it there only prints an error."""
+    if is_serverless(es):
+        return
     index = lines_index(org, repo, commit_sha)
     try:
         es.indices.forcemerge(index=index, max_num_segments=1, wait_for_completion=False)
@@ -1042,9 +1047,10 @@ def execute_deletions(
             )
         except NotFoundError:
             pass
-    if force_merge and drop_commits:
+    if force_merge and drop_commits and not is_serverless(es):
         # Reclaim the deleted file docs from the shared files index. Best-effort: the marker
         # and content deletes are already applied even if the merge can't be scheduled.
+        # Skipped on Serverless, which doesn't expose the force-merge API.
         try:
             es.indices.forcemerge(index=files_index(org, repo), only_expunge_deletes=True)
         except (NotFoundError, *ES_ERRORS):

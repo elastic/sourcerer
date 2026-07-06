@@ -2,7 +2,7 @@
 import hashlib
 
 # Elastic packages
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, ApiError, TransportError
 
 # Joins the fields of a document id before hashing. NUL is the only byte that cannot
 # appear in an org, repo, git ref, or file path (paths may contain any byte but NUL and
@@ -37,3 +37,23 @@ def make_client(url: str, api_key: str | None, username: str | None, password: s
     if username and password:
         return Elasticsearch(url, basic_auth=(username, password), **CLIENT_OPTS)
     return Elasticsearch(url, **CLIENT_OPTS)
+
+
+def is_serverless(es: Elasticsearch) -> bool:
+    """True if the target deployment is Elastic Cloud Serverless.
+
+    Serverless reports `build_flavor: "serverless"` in the root `info()` response, and it
+    rejects some stateful-only APIs (e.g. force-merge). Callers use this to skip those APIs
+    rather than emit a per-run error. Cached on the client instance so repeated checks in one
+    run cost a single round-trip; a failed probe returns False (assume stateful) without
+    caching, so a transient error doesn't stick for the rest of the run."""
+    cached = getattr(es, "_sourcerer_serverless", None)
+    if cached is not None:
+        return cached
+    try:
+        flavor = es.info().get("version", {}).get("build_flavor")
+    except (ApiError, TransportError):
+        return False
+    result = flavor == "serverless"
+    es._sourcerer_serverless = result
+    return result
