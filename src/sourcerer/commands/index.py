@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
@@ -82,8 +83,9 @@ INDEX_REPO_CONCURRENCY = int(os.environ.get("INDEX_REPO_CONCURRENCY", "2"))
 
 # The planning phase fires two `git ls-remote` calls per config entry to list its branches and
 # tags. They are independent, light, GIL-releasing network round-trips, so they resolve at
-# higher concurrency than the indexing phase.
-RESOLVE_CONCURRENCY = int(os.environ.get("RESOLVE_CONCURRENCY", "16"))
+# higher concurrency than the indexing phase. Kept below GitHub's effective concurrent
+# ls-remote limit to avoid rate-limiting that silently returns empty ref lists.
+RESOLVE_CONCURRENCY = int(os.environ.get("RESOLVE_CONCURRENCY", "4"))
 
 # Persistent clone cache. By default the index command keeps each repo cloned under a stable
 # cache dir and `git fetch`es it on later runs instead of re-cloning -- a regularly-scheduled
@@ -1158,16 +1160,23 @@ def run(
             sys.exit(1)
 
 
-def list_remote_ref_names(org: str, repo: str, kind: str) -> list[str]:
+def list_remote_ref_names(org: str, repo: str, kind: str) -> list[str] | None:
     """
     List the short names of a remote's refs of `kind` ("heads" or "tags") via `git ls-remote`,
     without cloning. Strips the `refs/<kind>/` prefix and the peeled `^{}` suffix (annotated
-    tags appear twice), dedupes, and returns them sorted. Returns [] on any failure.
+    tags appear twice), dedupes, and returns them sorted. Returns None on ls-remote failure
+    after retries (caller should warn); returns [] when the remote has no refs of that kind.
     """
     url = GITHUB_URL_TEMPLATE.format(org=org, repo=repo)
-    out = _ls_remote(url, flags=(f"--{kind}",))
-    if not out:
-        return []
+    out = None
+    for attempt in range(3):
+        out = _ls_remote(url, flags=(f"--{kind}",))
+        if out is not None:
+            break
+        if attempt < 2:
+            time.sleep(2 ** attempt)  # 1s, 2s backoff before retry
+    if out is None:
+        return None
     prefix = f"refs/{kind}/"
     names = set()
     for line in out.splitlines():
@@ -1193,19 +1202,22 @@ def _resolve_entry(cfg: RepoConfig) -> list[Unit]:
     """Resolve one RepoConfig into the Units it selects: list the remote branches/tags once
     per kind and keep those matching a selector's version-aware pattern (+ min/max_version).
     Pure network + filtering with no reporter calls, so it is safe to run concurrently.
-    list_remote_ref_names returns [] on any ls-remote failure, so this never raises -- a
-    bad/unreachable repo simply contributes no refs."""
-    remote_names: dict[str, list[str] | None] = {"branch": None, "tag": None}
+    ls-remote failures (after retries) are reported to stderr; that ref type contributes
+    no units so the run continues with the repos that did resolve."""
+    fetched: dict[str, list[str] | None] = {}  # kind -> names (None = ls-remote failed)
     seen: set[tuple[str, str]] = set()
     units: list[Unit] = []
     for sel in cfg.selectors:
         rt = sel.ref_type
-        if remote_names[rt] is None:
-            remote_names[rt] = list_remote_ref_names(
+        if rt not in fetched:
+            fetched[rt] = list_remote_ref_names(
                 cfg.org, cfg.repo, "heads" if rt == "branch" else "tags"
             )
+        names = fetched[rt]
+        if names is None:
+            continue  # ls-remote failed for this ref type, skip
         floor = sel.since_version_floor()  # version-based `since: {ref}`, name-only
-        for name in remote_names[rt]:
+        for name in names:
             if (rt, name) in seen:
                 continue
             v = sel.matches(rt, name)
@@ -1215,6 +1227,14 @@ def _resolve_entry(cfg: RepoConfig) -> list[Unit]:
                 continue  # below the since version floor
             seen.add((rt, name))
             units.append(Unit(org=cfg.org, repo=cfg.repo, ref=name, kind=rt))
+
+    failed_kinds = sorted(k for k, v in fetched.items() if v is None)
+    if failed_kinds:
+        click.echo(
+            f"Warning: {cfg.org}/{cfg.repo}: git ls-remote failed for "
+            f"{'/'.join(failed_kinds)} after retries — skipped",
+            err=True,
+        )
 
     # Drop refs that retain would delete on version/prerelease grounds alone. These are
     # name-only (no commit dates), so applying them here shrinks the plan itself -- the user
