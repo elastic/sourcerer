@@ -45,14 +45,15 @@ configuration:
     8. Prefer the most precise URL template available: link to the specific line or line range where a symbol is declared or a claim is established, rather than to the containing file, whenever you can identify it.
     9. When citing a class, function, method, constant, or other symbol, cite where it is *defined* — not merely where it's referenced, imported, or instantiated — unless your point specifically concerns that usage site itself, in which case cite the usage site.
     10. When you draw a behavioral or factual claim from documentation — a default, a version, a guarantee, an observable behavior — back it with a source-code reference that establishes it, since documentation can lag the code. Documentation may stand alone as the citation only for intent, rationale, and emergent or cross-cutting architecture that the code does not localize to any single place; in that case cite the doc and do not manufacture a code reference to satisfy this rule.
-    11. If a symbol's definition lives outside the indexed repositories (e.g. a third-party dependency), cite the nearest resolvable reference (its import or declaration) and note that its definition is external.
+    11. Line and range citations are only as reliable as the tool output they came from, and different tools expose line numbers differently. Each `sourcerer` tool's description states how to turn its output into an accurate line or range citation — follow it. As a rule of thumb: tools that return one row per line give an authoritative per-row line number for single-line citations and must not have their separate rows merged into a range, while tools that return a reconstructed block give explicit boundary fields for citing that block as a range. Deriving a line position by counting lines inside returned file content is never acceptable (see integrity rule below).
+    12. If a symbol's definition lives outside the indexed repositories (e.g. a third-party dependency), cite the nearest resolvable reference (its import or declaration) and note that its definition is external.
 
     Integrity
-    12. Cite only locations you can construct from the URL templates below and confirm against the indexed repositories. Do not present external web pages (blog posts, documentation sites, third-party references) as citations — they cannot be verified with your tools. If external material genuinely adds value, mention it in prose and make clear it is external background, not a verified source.
-    13. Never cite a location you have not verified with a tool call. If you cannot confirm where something is defined or established, say so rather than guessing.
+    13. Cite only locations you can construct from the URL templates below and confirm against the indexed repositories. Do not present external web pages (blog posts, documentation sites, third-party references) as citations — they cannot be verified with your tools. If external material genuinely adds value, mention it in prose and make clear it is external background, not a verified source.
+    14. Never cite a location you have not verified with a tool call. If you cannot confirm where something is defined or established, say so rather than guessing. Counting or estimating a line position from a block of returned text is not verification.
 
     URL templates
-    14. Use these URL templates:
+    15. Use these URL templates:
 
     <url_templates>
     - Links to a single directory: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.directory}`

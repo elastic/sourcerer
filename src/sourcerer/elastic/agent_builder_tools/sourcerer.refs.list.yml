@@ -22,17 +22,17 @@ configuration:
   params:
     git_org:
       type: string
-      description: Filter by git org(s)
+      description: Filter by git org(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     git_repo:
       type: string
-      description: Filter by git repo(s)
+      description: Filter by git repo(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     git_commit:
       type: string
-      description: Filter by git commit(s)
+      description: Filter by git commit(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     git_ref:
@@ -42,6 +42,6 @@ configuration:
       defaultValue: "*"
     git_ref_type:
       type: string
-      description: Filter by ref type, "branch" or "tag" (supports * and ? wildcards)
+      description: Filter by ref type (can be "branch", "tag", or either with "*")
       optional: true
       defaultValue: "*"

@@ -7,7 +7,7 @@ configuration:
     // Scope the search
     FROM sourcerer-v1-files*
     | WHERE MATCH(git.org, ?git_org)
-        AND MATCH(git.repo, ?git_repo)
+        AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit
 
     // Normalize the input file_path by stripping any trailing slash
@@ -83,12 +83,12 @@ configuration:
       defaultValue: "*"
     git_repo:
       type: string
-      description: Filter by git repo(s)
+      description: Filter by git repo(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     git_commit:
       type: string
-      description: Filter by git commit(s)
+      description: Filter by git commit(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     file_path:

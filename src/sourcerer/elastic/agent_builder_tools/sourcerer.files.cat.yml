@@ -7,7 +7,7 @@ configuration:
     // Scope the search
     FROM sourcerer-v1-lines*
     | WHERE MATCH(git.org, ?git_org)
-        AND MATCH(git.repo, ?git_repo)
+        AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit
         AND file.path LIKE ?file_path
         AND MATCH(file.path, ?file_path)
@@ -34,15 +34,15 @@ configuration:
       defaultValue: "*"
     git_repo:
       type: string
-      description: Filter by git repo(s)
+      description: Filter by git repo(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     git_commit:
       type: string
-      description: Filter by git commit(s)
+      description: Filter by git commit(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     file_path:
       type: string
-      description: File path(s) to cat
+      description: File path(s) to cat (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)
       optional: false

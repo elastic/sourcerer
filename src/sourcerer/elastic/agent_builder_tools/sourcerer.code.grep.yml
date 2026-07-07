@@ -7,7 +7,7 @@ configuration:
     // Scope the search
     FROM sourcerer-v1-lines*
     | WHERE MATCH(git.org, ?git_org)
-        AND MATCH(git.repo, ?git_repo)
+        AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit
         AND file.path LIKE ?file_path
         AND line.content RLIKE ?regex
@@ -35,22 +35,22 @@ configuration:
       defaultValue: "*"
     git_repo:
       type: string
-      description: Filter by git repo(s)
+      description: Filter by git repo(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     git_commit:
       type: string
-      description: Filter by git commit(s)
+      description: Filter by git commit(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     file_path:
       type: string
-      description: File path(s) to grep (supports * and ** glob syntax)
+      description: File path(s) to grep (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)
       optional: true
       defaultValue: "**"
     regex:
       type: string
-      description: Regex to grep (must wrap with greedy wildcards to match substrings, e.g. .*public static void main.*)
+      description: Regex to grep. Must wrap with greedy wildcards to match substrings (e.g. .*public static void main.*). Keep patterns simple to avoid errors. Avoid broad alternations like (a|b)* combined with large repetitions {N}, and avoid many consecutive ? wildcards after a *. Prefer anchored, specific patterns like .*keyword.* rather than (a|b)*keyword(a|b){10}
       optional: false
     n:
       type: integer
