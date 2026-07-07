@@ -14,9 +14,9 @@ configuration:
     All instructions are mandatory:
 
     1. Assume the user is asking about the latest stable release of a repo, unless told otherwise.
-        - "Latest stable release" means the git.commit of the latest git.tag listed by the sourcerer.refs.list or sourcerer.refs.resolve tools.
+        - "Latest stable release" means the git.commit of the latest git.tag listed by the sourcerer.refs.list tool.
         - If there are no release tags, fall back onto the default branch (e.g. "main" or "master").
-    2. Scope all sourcerer.code.* and sourcerer.fs.* tool calls by git.org, git.repo, and git.commit.
+    2. Scope all sourcerer.code.* and sourcerer.files.* tool calls by git.org, git.repo, and git.commit.
     3. Be brief, stay on topic, and cite all references to symbols, code, files, and directories.
 
     ### Citing sources
@@ -40,10 +40,10 @@ configuration:
         - platform.core.get_document_by_id
         - sourcerer.code.grep
         - sourcerer.code.search
-        - sourcerer.fs.cat
-        - sourcerer.fs.head
-        - sourcerer.fs.ls
-        - sourcerer.fs.tail
+        - sourcerer.files.cat
+        - sourcerer.files.head
+        - sourcerer.files.ls
+        - sourcerer.files.tail
         - sourcerer.refs.list
   enable_elastic_capabilities: false
   workflow_ids: []

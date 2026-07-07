@@ -1,4 +1,4 @@
-id: sourcerer.fs.ls
+id: sourcerer.files.ls
 type: esql
 description: ls files and directories under a given path or glob pattern in a repository
 tags: []

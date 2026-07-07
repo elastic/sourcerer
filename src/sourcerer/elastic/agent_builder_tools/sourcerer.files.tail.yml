@@ -1,4 +1,4 @@
-id: sourcerer.fs.tail
+id: sourcerer.files.tail
 type: esql
 description: tail repo file(s)
 tags: []
