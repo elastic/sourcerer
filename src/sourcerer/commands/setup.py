@@ -8,14 +8,9 @@ import sys
 import click
 import requests
 import yaml
-from dotenv import find_dotenv, load_dotenv
 
 # App packages
 from ..utils import make_client
-
-# Resolve `.env` from the working directory, not this package's install location
-# (see cli.py). Matters when sourcerer runs as an installed uv tool.
-load_dotenv(find_dotenv(usecwd=True))
 
 _ELASTIC = resources.files("sourcerer") / "elastic"
 ELASTICSEARCH_INDEX_TEMPLATES_DIR = _ELASTIC / "index_templates"

@@ -5,6 +5,7 @@ __pycache__/
 # Build artifacts
 build/
 dist/
+vendor/
 
 # Virtual environments & uv
 .venv/

@@ -3,6 +3,7 @@ import contextlib
 import datetime
 import fcntl
 import fnmatch
+import functools
 import os
 import pathlib
 import shutil
@@ -14,11 +15,11 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from types import SimpleNamespace
 
 # Third-party packages
 import click
 import yaml
-from dotenv import find_dotenv, load_dotenv
 from elastic_transport import TransportError
 from elasticsearch import ApiError, Elasticsearch, NotFoundError
 from elasticsearch.helpers import BulkIndexError, bulk, scan
@@ -30,9 +31,8 @@ from ..planner import Marker, content_delete_set, plan_repo
 from ..progress import ProgressReporter, Unit, make_reporter
 from ..utils import make_client, make_doc_id, is_serverless
 
-# Resolve `.env` from the working directory, not this package's install location
-# (see cli.py). Matters when sourcerer runs as an installed uv tool.
-load_dotenv(find_dotenv(usecwd=True))
+# Env-derived config (the `_tuning()` knobs below, and SOURCERER_CACHE_DIR in resolve_cache_root)
+# is read at call time, not import, so it observes whatever `.env` cli.py's --env callback loaded.
 
 GITHUB_URL_TEMPLATE = "https://github.com/{org}/{repo}.git"
 FILES_INDEX_PREFIX = "sourcerer-v1-files"
@@ -50,49 +50,40 @@ def lines_index(org: str, repo: str, commit_sha: str) -> str:
     return f"{LINES_INDEX_PREFIX}~{org.lower()}~{repo.lower()}~{commit_sha.lower()}"
 
 
-# Bulk indexing throughput knobs. parallel_bulk keeps BULK_THREAD_COUNT bulk requests in
-# flight so the client isn't blocked on a single round-trip at a time. Line docs are tiny and
-# metadata-heavy (~400-500 B each: repeated path/commit/org plus a short line of content),
-# so a larger chunk amortizes per-request + round-trip overhead. At ~450 B/doc the default 5000
-# is ~2.25 MB/request -- toward Elasticsearch's 5-15 MB bulk-size guidance while staying well
-# under the byte cap. BULK_MAX_BYTES caps the request body so a burst of very long lines (or
-# docs larger than estimated) can't produce an oversized batch -- whichever limit hits first
-# flushes, so the chunk count is only an upper bound, never a forced byte size. BULK_QUEUE_SIZE
-# buffers chunks ahead of the senders so the (parallel) document producer isn't blocked waiting
-# for a free thread. In-flight client memory scales as roughly
-# (BULK_THREAD_COUNT + BULK_QUEUE_SIZE) * BULK_CHUNK_SIZE * avg_doc_bytes (~54 MB at the
-# defaults); raising ELASTICSEARCH_BULK_CHUNK_SIZE toward 10000 on a capable cluster roughly doubles that.
-# All env-overridable for tuning against a given cluster/RTT (lower it for small/Serverless
-# clusters that return 429s).
-BULK_CHUNK_SIZE = int(os.environ.get("ELASTICSEARCH_BULK_CHUNK_SIZE", "5000"))
-BULK_THREAD_COUNT = int(os.environ.get("ELASTICSEARCH_BULK_THREADS", "8"))
-BULK_MAX_BYTES = int(os.environ.get("ELASTICSEARCH_BULK_MAX_BYTES", str(10 * 1024 * 1024)))
-BULK_QUEUE_SIZE = int(os.environ.get("ELASTICSEARCH_BULK_QUEUE_SIZE", str(BULK_THREAD_COUNT * 2)))
+@functools.lru_cache(maxsize=None)
+def _tuning():
+    """Bulk/index/resolve throughput knobs, read from the environment on first use.
 
-# Document generation is the real throughput ceiling: reading each file, decoding it, and
-# building+hashing one doc per line is CPU/IO work that runs under the GIL, so it is farmed
-# out to a pool of worker processes (true parallelism) that feed the bulk senders.
-# INDEX_WORKERS processes, INDEX_WORKER_CHUNKSIZE file paths dispatched per IPC round-trip.
-INDEX_WORKERS = int(os.environ.get("ELASTICSEARCH_INDEX_WORKERS", str(os.cpu_count() or 4)))
-INDEX_WORKER_CHUNKSIZE = int(os.environ.get("ELASTICSEARCH_INDEX_WORKER_CHUNKSIZE", "8"))
+    Deferred to first call (not import) so the values reflect whatever `.env` cli.py loaded
+    for this invocation; cached so every caller in a run sees one stable set. All are
+    env-overridable for tuning against a given cluster/RTT (lower them for small/Serverless
+    clusters that return 429s). See `.env-reference` for the full descriptions.
 
-# How many (org, repo) clones to process concurrently in the config-driven batch path, so one
-# repo's clone (network/disk, releases the GIL) overlaps another's indexing. Kept low by
-# default so concurrent repos don't oversubscribe the cluster or stack too many worker pools.
-INDEX_REPO_CONCURRENCY = int(os.environ.get("INDEX_REPO_CONCURRENCY", "2"))
+    - bulk_*: parallel_bulk keeps `bulk_threads` requests in flight so the client isn't blocked
+      on a single round-trip. Line docs are tiny/metadata-heavy (~400-500 B), so a larger chunk
+      amortizes per-request overhead (default 5000 ~= 2.25 MB/request). `bulk_max_bytes` caps the
+      body so a burst of long lines can't oversize a batch (whichever limit hits first flushes).
+      `bulk_queue_size` buffers chunks ahead of the senders. In-flight memory ~=
+      (bulk_threads + bulk_queue_size) * bulk_chunk_size * avg_doc_bytes (~54 MB at defaults).
+    - index_*: document generation (read/decode/hash one doc per line) is CPU/IO work under the
+      GIL, farmed out to `index_workers` processes, `index_worker_chunksize` paths per IPC hop.
+    - index_repo_concurrency: (org, repo) clones processed concurrently in the batch path, so one
+      repo's clone overlaps another's indexing. Low by default to avoid oversubscribing the cluster.
+    - resolve_concurrency: concurrent `git ls-remote` calls during planning; kept below GitHub's
+      effective limit to avoid rate-limiting that silently returns empty ref lists.
+    """
+    bulk_threads = int(os.environ.get("ELASTICSEARCH_BULK_THREADS", "8"))
+    return SimpleNamespace(
+        bulk_chunk_size=int(os.environ.get("ELASTICSEARCH_BULK_CHUNK_SIZE", "5000")),
+        bulk_threads=bulk_threads,
+        bulk_max_bytes=int(os.environ.get("ELASTICSEARCH_BULK_MAX_BYTES", str(10 * 1024 * 1024))),
+        bulk_queue_size=int(os.environ.get("ELASTICSEARCH_BULK_QUEUE_SIZE", str(bulk_threads * 2))),
+        index_workers=int(os.environ.get("ELASTICSEARCH_INDEX_WORKERS", str(os.cpu_count() or 4))),
+        index_worker_chunksize=int(os.environ.get("ELASTICSEARCH_INDEX_WORKER_CHUNKSIZE", "8")),
+        index_repo_concurrency=int(os.environ.get("INDEX_REPO_CONCURRENCY", "2")),
+        resolve_concurrency=int(os.environ.get("RESOLVE_CONCURRENCY", "4")),
+    )
 
-# The planning phase fires two `git ls-remote` calls per config entry to list its branches and
-# tags. They are independent, light, GIL-releasing network round-trips, so they resolve at
-# higher concurrency than the indexing phase. Kept below GitHub's effective concurrent
-# ls-remote limit to avoid rate-limiting that silently returns empty ref lists.
-RESOLVE_CONCURRENCY = int(os.environ.get("RESOLVE_CONCURRENCY", "4"))
-
-# Persistent clone cache. By default the index command keeps each repo cloned under a stable
-# cache dir and `git fetch`es it on later runs instead of re-cloning -- a regularly-scheduled
-# (e.g. nightly) run then transfers only the day's new objects rather than a full clone of a
-# large repo's history. Resolution precedence is --cache-dir flag > SOURCERER_CACHE_DIR env >
-# $XDG_CACHE_HOME/sourcerer > ~/.cache/sourcerer.
-SOURCERER_CACHE_DIR = os.environ.get("SOURCERER_CACHE_DIR")
 
 # Remote/transient Elasticsearch failures (read timeouts, dropped connections, API errors,
 # per-doc bulk failures) that should fail only the current ref -- so a long batch keeps going
@@ -173,8 +164,9 @@ def resolve_cache_root(cache_dir: str | None = None) -> pathlib.Path:
     sourcerer > ~/.cache/sourcerer. Returns the path; callers create the per-repo subdir lazily."""
     if cache_dir:
         return pathlib.Path(cache_dir).expanduser()
-    if SOURCERER_CACHE_DIR:
-        return pathlib.Path(SOURCERER_CACHE_DIR).expanduser()
+    env_cache_dir = os.environ.get("SOURCERER_CACHE_DIR")
+    if env_cache_dir:
+        return pathlib.Path(env_cache_dir).expanduser()
     xdg = os.environ.get("XDG_CACHE_HOME")
     base = pathlib.Path(xdg).expanduser() if xdg else pathlib.Path.home() / ".cache"
     return base / "sourcerer"
@@ -634,14 +626,15 @@ def index_repo(
     # so fan it out across worker processes; each returns one file's actions, which we flatten
     # into the lazy stream parallel_bulk consumes. Doc ids are deterministic and independent
     # (make_doc_id), so file/line docs need not stay adjacent or ordered.
+    t = _tuning()
     with ProcessPoolExecutor(
-        max_workers=max(1, INDEX_WORKERS),
+        max_workers=max(1, t.index_workers),
         initializer=_init_worker,
         initargs=(org, repo, commit_sha, str(repo_dir)),
     ) as executor:
         def generate_actions():
             for file_actions in executor.map(
-                build_file_actions, iter_tracked_files(repo_dir), chunksize=INDEX_WORKER_CHUNKSIZE
+                build_file_actions, iter_tracked_files(repo_dir), chunksize=t.index_worker_chunksize
             ):
                 yield from file_actions
 
@@ -654,10 +647,10 @@ def index_repo(
             for _ok, info in es_parallel_bulk(
                 es,
                 generate_actions(),
-                thread_count=BULK_THREAD_COUNT,
-                chunk_size=BULK_CHUNK_SIZE,
-                max_chunk_bytes=BULK_MAX_BYTES,
-                queue_size=BULK_QUEUE_SIZE,
+                thread_count=t.bulk_threads,
+                chunk_size=t.bulk_chunk_size,
+                max_chunk_bytes=t.bulk_max_bytes,
+                queue_size=t.bulk_queue_size,
             ):
                 # Ctrl-C reaches this (main or batch worker) thread either as a raised
                 # KeyboardInterrupt or, in a batch worker thread that never gets the signal,
@@ -1382,7 +1375,7 @@ def run_config(
         # order -- and Phase 2's grouping -- is identical to a serial resolve.
         units: list[Unit] = []
         with ThreadPoolExecutor(
-            max_workers=max(1, min(RESOLVE_CONCURRENCY, len(entries) or 1))
+            max_workers=max(1, min(_tuning().resolve_concurrency, len(entries) or 1))
         ) as pool:
             futures = [pool.submit(_resolve_entry, entry) for entry in entries]
             done = 0
@@ -1520,7 +1513,7 @@ def run_config(
                         reporter.finish(unit, "error", detail=str(e))
 
         with bulk_indexing_settings(es), ThreadPoolExecutor(
-            max_workers=max(1, INDEX_REPO_CONCURRENCY)
+            max_workers=max(1, _tuning().index_repo_concurrency)
         ) as pool:
             # Drain the iterator so any unexpected error surfaces; expected per-ref/clone
             # errors are handled inside process_group and counted in `failures`.
@@ -1694,7 +1687,7 @@ def dry_run_config(
 
     # Phase 1: resolve the plan, identical to the real run (see run_config).
     units: list[Unit] = []
-    with ThreadPoolExecutor(max_workers=max(1, min(RESOLVE_CONCURRENCY, len(entries) or 1))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(_tuning().resolve_concurrency, len(entries) or 1))) as pool:
         for fut in [pool.submit(_resolve_entry, entry) for entry in entries]:
             units.extend(fut.result())
     units.sort(key=lambda u: (u.org, u.repo, u.ref or "", u.kind))
@@ -1719,7 +1712,7 @@ def dry_run_config(
 
     # Clone/fetch + resolve repos concurrently (fetches release the GIL); collect all results and
     # print in sorted plan order so the combined report is deterministic and never interleaved.
-    with ThreadPoolExecutor(max_workers=max(1, INDEX_REPO_CONCURRENCY)) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, _tuning().index_repo_concurrency)) as pool:
         results = list(pool.map(work, groups.items()))
 
     tot_index = tot_markers = tot_commits = 0

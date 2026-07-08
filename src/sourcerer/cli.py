@@ -7,10 +7,37 @@ from .commands import index as index_cmd
 from .commands import prune as prune_cmd
 from .commands import setup as setup_cmd
 
-# Resolve `.env` from the current working directory (and its parents) rather than
-# from this package's install location. A bare load_dotenv() walks up from this
-# file, which finds nothing when sourcerer is installed as a uv tool in its own venv.
-load_dotenv(find_dotenv(usecwd=True))
+
+def _load_env(ctx, param, value):
+    """Eager option callback: load the chosen `.env` before other options resolve envvars.
+
+    All-or-nothing: with -e/--env, load *only* that file (`click.Path(resolve_path=True)`
+    has already resolved a bare filename or relative path against the current directory);
+    otherwise fall back to the default `.env` discovered from the cwd. `find_dotenv(usecwd=True)`
+    walks up from the cwd rather than this package's install location, which matters when
+    sourcerer runs as an installed uv tool in its own venv. Runs eagerly so the ELASTICSEARCH_*
+    envvars are populated before the auth options below read them.
+    """
+    if value:
+        load_dotenv(value)
+    else:
+        load_dotenv(find_dotenv(usecwd=True))
+    return value
+
+
+def env_option(f):
+    return click.option(
+        "-e",
+        "--env",
+        "env_file",
+        type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+        default=None,
+        is_eager=True,
+        expose_value=False,
+        callback=_load_env,
+        help="Path to a custom .env file to load instead of the default .env. "
+        "Relative paths are resolved against the current directory.",
+    )(f)
 
 
 def auth_options(f):
@@ -34,6 +61,7 @@ def help_cmd(ctx):
 
 
 @cli.command()
+@env_option
 @auth_options
 @click.option("--kb-url", envvar="KIBANA_URL", default=None, help="Kibana URL for agent builder setup.")
 def setup(url, api_key, username, password, kb_url):
@@ -83,6 +111,7 @@ def setup(url, api_key, username, password, kb_url):
     help="Preview what would be indexed (and, with --prune, what would be pruned afterwards) "
     "without writing to Elasticsearch. Clones/fetches the cached repos to resolve real commits. Requires --config.",
 )
+@env_option
 @auth_options
 def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, prune, dry_run, url, api_key, username, password):
     """Index a remote GitHub repo's git-tracked files into Elasticsearch.
@@ -128,6 +157,7 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
     help="After dropping content, force-merge the files index to reclaim deleted docs (default: on).",
 )
 @click.option("-q", "--quiet", is_flag=True, default=False, help="Suppress output for repos with nothing to prune.")
+@env_option
 @auth_options
 def prune(config_path, dry_run, force_merge, quiet, url, api_key, username, password):
     """Delete indexed refs that fall outside their repos.yml retention policies.
