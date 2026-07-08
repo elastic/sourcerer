@@ -7,7 +7,8 @@ content: |-
 
   ## When this applies
   - **At the start of a question**: confirm which repos are indexed and plan where to look before issuing any content queries.
-  - **Mid-conversation**: when the answer may live in a related, sibling, or upstream repo that hasn't been searched yet — expand scope incrementally rather than re-listing everything.
+  - **Mid-investigation**: when the trail leads into a dependency, upstream library, or sibling repo — expand scope before drawing conclusions.
+  - **When a dependency boundary is reached**: if the current repo's code delegates to an external dependency (e.g., an import resolves outside the repo, behavior is implemented in an upstream library), always check whether that dependency is indexed before concluding the answer can't be found. Never assume a dependency is unindexed without checking.
 
   ## Tool
   Use `sourcerer.refs.list` with wildcard `git_repo` and `git_org` patterns. Each result row is one indexed ref; the distinct `git.repo` values in the results are the repos available to query.
