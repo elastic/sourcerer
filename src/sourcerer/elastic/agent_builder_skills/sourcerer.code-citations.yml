@@ -1,0 +1,68 @@
+id: sourcerer-code-citations
+name: Code Citations
+description: |-
+  Use whenever an answer names a code symbol, class, function, config key, endpoint, file, directory, or file extension — or makes any checkable claim about repository behavior (a default value, a version, a recall/latency figure, a behavioral guarantee). This is nearly every substantive answer this agent produces, so treat it as the default path, not an edge case reserved for explicit "cite your sources" requests.
+content: |-
+  # Code Citations
+
+  ## When this applies
+  Trigger this on any answer where you:
+  - name a class, function, method, variable, constant, config key, endpoint, file path, directory, or file extension, or
+  - state a default, version, guarantee, or other checkable fact about repository behavior.
+
+  In practice that's almost every response from this agent — assume it applies unless you're doing pure chit-chat with no claims about the codebase.
+
+  ## Source hierarchy
+  Prefer sources in this order when a claim could be supported by more than one:
+  1. **Source code** — the primary source of truth for behavior. Any claim about actual behavior ultimately resolves here.
+  2. **Repository documentation** — secondary. Good for intent, rationale, and cross-cutting architecture that no single line of code expresses, but subordinate to code on behavior questions, and it can lag the code.
+  3. **Your own general knowledge** — weakest, and not citable. Use only to frame or explain; never as the basis for a factual claim about this specific software.
+
+  When sources conflict, the code wins — state the discrepancy rather than smoothing it over.
+
+  ## What to cite
+  - Cite the first mention of each notable symbol, file, or directory: classes, functions, methods, variables, constants, config keys, endpoints, file paths, directories, file extensions. No need to repeat the citation on later mentions of the same one.
+  - Cite claims, not only symbols. Any concrete, checkable assertion — a default value, a recall/latency figure, a version or license-availability statement, a behavioral guarantee — needs a citation to the line(s) that establish it, even with no backticked identifier in the sentence.
+  - Citing a class or file doesn't cover its members. If you go on to name specific fields, constants, methods, or defaults belonging to it, each needs its own first-mention citation.
+
+  ## Finding sources
+  - Use the `sourcerer-code-search` skill recursively to find sources if you don't have enough information to properly cite them
+
+  ## How to format
+  - Every citation is an inline Markdown link with the linked text in backticks, at the point of first mention — not a trailing "Source:" note. Example: `` [`AuthService`](url) ``.
+  - If you put a term in backticks — including inside tables, bullet lists, or parameter/default-value listings — it needs a citation, unless it's a generic language keyword, built-in type, or standard-library term not defined in the source under discussion.
+
+  ## Where to point
+  - Prefer the most precise URL you can construct: a specific line or line range where a symbol is declared or a claim is established, rather than the containing file.
+  - Cite where a symbol is *defined*, not merely referenced, imported, or instantiated — unless your point is specifically about that usage site.
+  - If a symbol's definition lives outside the indexed repos (e.g. a third-party dependency), cite the nearest resolvable reference (its import or declaration) and note that the definition is external.
+  - Line and range citations are only as reliable as the tool output they came from. Follow each sourcerer tool's own description for how to turn its output into an accurate citation:
+    - Tools that return one row per line give an authoritative per-row line number for single-line citations — don't merge separate rows into a range.
+    - Tools that return a reconstructed block give explicit boundary fields — use those to cite a range.
+    - Never derive a line position by counting lines inside returned file content (see Integrity below).
+
+  ## URL templates
+  - Directory: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.directory}`
+  - File: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}`
+  - Single line: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number}`
+  - Line range: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number}-L{line.number}`
+
+  ## Integrity
+  - Cite only locations you've verified with a tool call and can construct from the templates above. Never cite external web pages (blog posts, doc sites, third-party references) — they can't be verified with your tools. If external material genuinely adds value, mention it as external background in prose, not as a citation.
+  - If you can't confirm where something is defined, say so rather than guessing. Counting or estimating a line position from a block of returned text is not verification.
+
+  ## Examples
+
+  **Correct:**
+  The retry limit defaults to 3 ([`MAX_RETRIES`](https://github.com/acme/search-svc/blob/v2.4.1/src/config.py#L42)).
+
+  **Incorrect (missing citation on a checkable claim):**
+  The retry limit defaults to 3.
+
+  **Incorrect (merging separate per-line rows into a range):**
+  Citing lines 10–14 as one block when the tool returned five independent single-line rows for 10, 11, 12, 13, 14.
+
+  **Correct (documentation-only claim, no code citation manufactured):**
+  The project favors per-ref index isolation for operational simplicity, per the architecture notes in [`docs/design.md`](https://github.com/acme/search-svc/blob/v2.4.1/docs/design.md) — this is a design-intent claim, not a line-level behavior, so the doc stands alone as the citation.
+tool_ids: []
+referenced_content: []

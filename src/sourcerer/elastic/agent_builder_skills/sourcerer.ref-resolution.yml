@@ -1,0 +1,49 @@
+id: sourcerer-ref-resolution
+name: Ref Resolution
+description: |-
+  Use any time a branch, tag, or version in the user's question is ambiguous or unspecified — whether at the start of a question or mid-conversation (e.g. when comparing behavior across versions).
+content: |-
+  # Ref Resolution
+
+  ## When this applies
+  Apply whenever a ref is ambiguous or unspecified. This includes:
+  - No ref mentioned (resolve to a sensible default)
+  - A version range or partial version (e.g. "8.x", "latest 8")
+  - A relative reference ("before 8.17", "since 8.14")
+  - A comparison across versions ("how did this change between 8.x and 9.x?")
+  - A mid-conversation follow-up that introduces a new ref
+
+  ## Tool
+  Use `sourcerer.refs.list` to explore available refs. It accepts wildcards on `git_ref`:
+  - `git_ref: v8.*` — all refs starting with "v8."
+  - `git_ref: v8.17.*` — all 8.17.x tags
+  - `git_ref: main` — exact branch match
+
+  Combine with `git_ref_type: tag` or `git_ref_type: branch` to narrow further.
+
+  ## Resolution scenarios
+
+  ### No ref specified — default to latest stable
+  1. Call `refs.list` with `git_ref_type: tag` for the repo.
+  2. Exclude pre-release tags (suffixes like `-rc`, `-beta`, `-alpha`, `-SNAPSHOT`, `-M1`). A pre-release sorts *below* its final release (`v9.0.0 > v9.0.0-rc1`).
+  3. Pick the highest semver tag, comparing numerically (major → minor → patch). Do not sort lexically, and do not assume `indexed_at DESC` order equals semver order (`v9.0.0 > v8.14.3 > v8.2.0`).
+  4. Prefer the highest tag whose `status` is `ready` (the `status` field surfaced by `sourcerer-repo-discovery`). If the very latest tag is still indexing (status not `ready`), drop to the next-highest ready tag, or proceed but tell the user that release is only partially indexed.
+  5. If no stable tags exist, fall back to the default branch (`main`, `master`, `trunk`). If only pre-release tags exist, resolve to the highest pre-release and say so explicitly.
+  6. State the resolved tag or branch at the start of your answer.
+
+  ### Version range or partial version (e.g. "8.x", "latest 8")
+  Disambiguate based on context:
+  - **Single point in time** (the default): resolve to the *latest stable* within the range. Call `refs.list` with `git_ref: v8.*` and `git_ref_type: tag`, then pick the highest stable patch.
+  - **Comparison or history** (e.g. "how has X evolved across 8.x?"): resolve to *all matching commits*. Collect every stable tag in the range; query each one separately. Label findings clearly by version.
+
+  ### Comparison across versions (e.g. "8.x vs 9.x", "before and after 8.17")
+  Resolve each ref independently using the steps above. Run content queries against each commit, then compare results. Label each finding with its version.
+
+  ### Explicit ref (branch name, exact tag, commit hash)
+  Use as given. If it is a branch, call `refs.list` with `git_ref_type: branch` to confirm it exists and retrieve its current commit. If it is a tag, confirm and get its commit. If it is a commit hash, use it directly.
+
+  ## Pinning the commit
+  Once a ref resolves to a `git.commit`, use that commit in every subsequent `sourcerer.code.*` and `sourcerer.files.*` call for that repo and ref. Re-invoke this skill only when the question introduces a new or additional ref.
+tool_ids:
+- sourcerer.refs.list
+referenced_content: []

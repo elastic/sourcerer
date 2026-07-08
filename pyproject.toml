@@ -29,4 +29,6 @@ sourcerer = [
     "elastic/agent_builder_tools/*.yaml",
     "elastic/agent_builder_agents/*.yml",
     "elastic/agent_builder_agents/*.yaml",
+    "elastic/agent_builder_skills/*.yml",
+    "elastic/agent_builder_skills/*.yaml",
 ]

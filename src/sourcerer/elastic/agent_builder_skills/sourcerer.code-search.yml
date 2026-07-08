@@ -1,0 +1,90 @@
+id: sourcerer-code-search
+name: Code Search
+description: |-
+  Use when you need to find where something is defined, understand how a feature is implemented, or explore an unfamiliar repo. Guides which tools to use and in what order.
+content: |-
+  # Code Search
+
+  ## Choosing the right tool
+
+  ### `code.search` — BM25 keyword/concept search
+  Use when you know *what* you're looking for but not *where*:
+  - Concept or feature names ("circuit breaker", "token refresh", "shard allocation")
+  - Natural-language descriptions of behavior
+  - When exact spelling is uncertain (BM25 scores partial matches)
+
+  Returns the top-N highest-scoring lines. Default n=10; increase to 25–50 for broader coverage. Results are ranked by relevance, not by file or line order.
+
+  ### `code.grep` — regex search
+  Use when you know the exact identifier or pattern:
+  - Symbol definitions: class names, function names, constants, config keys
+  - Import statements, annotation usages, string literals
+  - Structural patterns (`public.*interface.*Service`, `@Override`)
+
+  Returns all matching lines up to n. Default n=100; lower for focused lookups, raise if you expect many matches. Results are in file/line order.
+
+  ### `files.ls` — directory listing
+  Use to orient yourself or confirm a path before reading:
+  - Explore an unfamiliar repo's top-level structure
+  - Find which subdirectory contains a feature (e.g. `src/main/java/org/elasticsearch/*/`)
+  - Verify a file path exists before passing it to cat/head/grep
+
+  Supports `*` (one path segment) and `**` (recursive) glob patterns. A bare `*` lists the top level.
+
+  ### `files.cat` — full file contents
+  Use for small, complete files where you need all the context:
+  - Config files, build descriptors, short modules
+  - Avoid on large source files — use grep/search with a narrow `file_path` instead
+
+  Returns the entire file; no line limit.
+
+  ### `files.head` — first N lines of a file
+  Use when the top of the file is sufficient:
+  - Package/module declarations, imports, class-level structure
+  - File headers
+
+  Default n=10; increase for longer preambles.
+
+  ### `files.tail` — last N lines of a file
+  Use when the bottom of the file is what matters:
+  - Closing blocks, trailing configuration entries
+
+  Default n=10.
+
+  ## Iterating toward an answer
+
+  **Pattern 1 — concept → file → definition:**
+  1. `code.search` on the concept to identify candidate files
+  2. `files.ls` on a promising directory to confirm the layout
+  3. `code.grep` with a specific symbol pattern (e.g. `.*class CircuitBreaker.*`) to find the definition
+  4. `files.cat` or `files.head` for surrounding context
+
+  **Pattern 2 — known symbol → definition:**
+  1. `code.grep` with an anchored regex scoped to `**` or a known subdirectory
+  2. If context is needed beyond the match lines, `files.cat` the file or widen the grep pattern
+
+  **Pattern 3 — explore unfamiliar repo:**
+  1. `files.ls` at `*` to see the top-level structure
+  2. `files.ls` into the relevant subdirectory
+  3. `files.head` on key files (entry points, primary config)
+  4. `code.search` or `code.grep` to locate the specific feature
+
+  ## Narrowing with `file_path`
+  All content tools accept a `file_path` glob. Narrowing it cuts noise and speeds results:
+  - `**/*.java` — all Java files
+  - `src/main/**` — source tree only, excluding tests
+  - `src/main/java/org/elasticsearch/index/**` — one subsystem
+  - `config/elasticsearch.yml` — a specific file (exact match)
+
+  A bare `*` matches a single path segment, so it lists only top-level files (no `/` in the path). Use `**` to recurse.
+
+  ## Reading for citation
+  When you read to cite a specific line or range, follow each tool's own citation guidance in its description, and see the `sourcerer-code-citations` skill for the full rules:
+  - `code.grep` / `code.search` return one row per line, each with an authoritative `line.number` — cite single lines and never merge separate rows into a range.
+  - `files.cat` / `files.head` / `files.tail` return `line_start` / `line_end` boundary fields (and `cat` a numbered view) — use those to cite a range, and use `code.grep` with `after_line` + `n=1` to confirm a block's closing line.
+  - Never derive a line position by counting lines inside returned content.
+
+  ## Parallel calls
+  When two searches are independent, issue them in the same turn. For example, grep for a class definition and search for its concept simultaneously, then synthesize the results.
+tool_ids: []
+referenced_content: []

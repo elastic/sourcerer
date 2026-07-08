@@ -1,0 +1,45 @@
+id: sourcerer-repo-discovery
+name: Repo Discovery
+description: |-
+  Use at the start of most questions to identify which repos are indexed before querying content. Also use mid-conversation when an answer may require expanding into a related or upstream repo (e.g. tracing from an application repo into a lower-level dependency).
+content: |-
+  # Repo Discovery
+
+  ## When this applies
+  - **At the start of a question**: confirm which repos are indexed and plan where to look before issuing any content queries.
+  - **Mid-conversation**: when the answer may live in a related, sibling, or upstream repo that hasn't been searched yet — expand scope incrementally rather than re-listing everything.
+
+  ## Tool
+  Use `sourcerer.refs.list` with wildcard `git_repo` and `git_org` patterns. Each result row is one indexed ref; the distinct `git.repo` values in the results are the repos available to query.
+
+  ## Progressive disclosure — narrow first, expand only as needed
+
+  Start with the most specific pattern likely to match the question. Broaden only if the result is empty or you need more coverage.
+
+  | Scenario | Example call |
+  |---|---|
+  | Specific repo, confident | `git_org: elastic, git_repo: elasticsearch` |
+  | Repo family in one org | `git_org: elastic, git_repo: elasticsearch*` |
+  | All repos in one org | `git_org: elastic, git_repo: *` |
+  | Different org or upstream | `git_org: apache, git_repo: lucene*` |
+  | Cross-org fallback (expensive) | `git_repo: *` (no org filter) |
+
+  Avoid `git_repo: *` without an org filter unless you genuinely need all orgs — it returns every indexed ref and consumes many tokens.
+
+  ## Interpreting results
+  From the result rows:
+  - **Distinct `git.repo` values** — the repos available to query.
+  - **`git.ref_type`** — whether each repo has branches, tags, or both. Useful for knowing whether `sourcerer-ref-resolution` will find tags or needs to fall back to a branch.
+  - **`status`** — a ref with status other than `ready` may have incomplete content.
+
+  ## Example: expanding scope mid-conversation
+  A question about Elasticsearch's query parsing leads into how Lucene's `QueryParser` works underneath:
+  1. Initial discovery: `refs.list(git_org: elastic, git_repo: elasticsearch)` — confirm the repo and plan the search.
+  2. Answer the Elasticsearch side. When the trail leads to Lucene, expand:
+  3. `refs.list(git_org: apache, git_repo: lucene*)` — discover which Lucene repos are indexed.
+  4. Use `sourcerer-ref-resolution` on the relevant Lucene repo to pin a commit, then query content.
+
+  Each discovery call should be targeted — retrieve only what you need to plan the next step.
+tool_ids:
+- sourcerer.refs.list
+referenced_content: []

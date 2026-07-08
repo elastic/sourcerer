@@ -21,6 +21,7 @@ _ELASTIC = resources.files("sourcerer") / "elastic"
 ELASTICSEARCH_INDEX_TEMPLATES_DIR = _ELASTIC / "index_templates"
 AGENT_BUILDER_TOOLS_DIR = _ELASTIC / "agent_builder_tools"
 AGENT_BUILDER_AGENTS_DIR = _ELASTIC / "agent_builder_agents"
+AGENT_BUILDER_SKILLS_DIR = _ELASTIC / "agent_builder_skills"
 
 
 def make_kb_session(
@@ -51,6 +52,10 @@ def _tool_put_body(tool: dict) -> dict:
 
 def _agent_put_body(agent: dict) -> dict:
     return {k: v for k, v in agent.items() if k != "id"}
+
+
+def _skill_put_body(skill: dict) -> dict:
+    return {k: v for k, v in skill.items() if k != "id"}
 
 
 def load_index_templates(es, templates_dir: pathlib.Path = ELASTICSEARCH_INDEX_TEMPLATES_DIR) -> list[str]:
@@ -114,6 +119,27 @@ def load_agent_builder_agents(
     return loaded
 
 
+def load_agent_builder_skills(
+    session: requests.Session, kb_url: str, skills_dir: pathlib.Path = AGENT_BUILDER_SKILLS_DIR
+) -> list[str]:
+    skills = _load_yaml_dir(skills_dir)
+    if not skills:
+        raise FileNotFoundError(f"No skill definitions found in {skills_dir}")
+    base = kb_url.rstrip("/")
+    loaded = []
+    for skill in skills:
+        skill_id = skill["id"]
+        item_url = f"{base}/api/agent_builder/skills/{skill_id}"
+        get_resp = session.get(item_url)
+        if get_resp.status_code == 200:
+            resp = session.put(item_url, json=_skill_put_body(skill))
+        else:
+            resp = session.post(f"{base}/api/agent_builder/skills", json=skill)
+        resp.raise_for_status()
+        loaded.append(skill_id)
+    return loaded
+
+
 def run(url: str, api_key: str | None, username: str | None, password: str | None, kb_url: str | None) -> None:
     es = make_client(url, api_key, username, password)
     try:
@@ -141,6 +167,10 @@ def run(url: str, api_key: str | None, username: str | None, password: str | Non
         tool_ids = load_agent_builder_tools(session, kb_url)
         for tid in tool_ids:
             click.echo(f"Upserted tool: {tid}")
+
+        skill_ids = load_agent_builder_skills(session, kb_url)
+        for sid in skill_ids:
+            click.echo(f"Upserted skill: {sid}")
 
         agent_ids = load_agent_builder_agents(session, kb_url)
         for aid in agent_ids:
