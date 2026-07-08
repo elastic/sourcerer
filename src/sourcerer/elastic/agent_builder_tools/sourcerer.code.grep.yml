@@ -50,7 +50,7 @@ configuration:
       defaultValue: "**"
     regex:
       type: string
-      description: Regex to grep. Must wrap with greedy wildcards to match substrings (e.g. .*public static void main.*). Keep patterns simple to avoid errors. Do not combine multiple .*X.* alternatives with | — patterns like .*foo.*|.*bar.*|.*baz.* cause exponential blowup during automaton determinization; use one grep call per keyword instead. Avoid broad alternations like (a|b)* combined with large repetitions {N}, and avoid many consecutive ? wildcards after a *.
+      description: Regex to grep. Must wrap with greedy wildcards to match substrings (e.g. .*public static void main.*). Keep patterns simple to avoid errors. Do not combine multiple .*X.* alternatives with | — patterns like .*foo.*|.*bar.*|.*baz.* cause exponential blowup during automaton determinization; use one grep call per keyword instead. Avoid broad alternations like (a|b)* combined with large repetitions {N}, and avoid many consecutive ? wildcards after a *
       optional: false
     n:
       type: integer
