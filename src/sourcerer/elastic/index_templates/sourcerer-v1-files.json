@@ -9,6 +9,11 @@
     "settings": {
       "index": {
         "codec": "best_compression",
+        "mapping": {
+          "source": {
+            "mode": "synthetic"
+          }
+        },
         "sort": {
           "field": [
             "git.org",

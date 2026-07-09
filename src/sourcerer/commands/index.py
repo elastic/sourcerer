@@ -29,7 +29,7 @@ from elasticsearch.helpers import parallel_bulk as es_parallel_bulk
 from ..config import RepoConfig, load_config
 from ..planner import Marker, content_delete_set, plan_repo
 from ..progress import ProgressReporter, Unit, make_reporter
-from ..utils import make_client, make_doc_id, is_serverless
+from ..utils import make_client, make_doc_id
 
 # Env-derived config (the `_tuning()` knobs below, and SOURCERER_CACHE_DIR in resolve_cache_root)
 # is read at call time, not import, so it observes whatever `.env` cli.py's --env callback loaded.
@@ -45,9 +45,9 @@ def files_index(org: str, repo: str) -> str:
     return f"{FILES_INDEX_PREFIX}~{org.lower()}~{repo.lower()}"
 
 
-def lines_index(org: str, repo: str, commit_sha: str) -> str:
-    """Return the per-commit lines index name, e.g. sourcerer-v1-lines~elastic~elasticsearch~<sha>."""
-    return f"{LINES_INDEX_PREFIX}~{org.lower()}~{repo.lower()}~{commit_sha.lower()}"
+def lines_index(org: str, repo: str) -> str:
+    """Return the per-repo lines index name, e.g. sourcerer-v1-lines~elastic~elasticsearch."""
+    return f"{LINES_INDEX_PREFIX}~{org.lower()}~{repo.lower()}"
 
 
 @functools.lru_cache(maxsize=None)
@@ -591,7 +591,7 @@ def build_file_actions(rel_path: str) -> list[dict]:
     org, repo, commit_sha = ctx["org"], ctx["repo"], ctx["commit_sha"]
     abs_path = ctx["repo_dir"] / rel_path
     f_index = files_index(org, repo)
-    l_index = lines_index(org, repo, commit_sha)
+    l_index = lines_index(org, repo)
     file_id, file_doc = build_file_doc(org, repo, commit_sha, rel_path, abs_path)
     actions = [{"_index": f_index, "_id": file_id, "_source": file_doc}]
     # Read the file's bytes once: detect binary from the first 8 KB, and (if text) decode the
@@ -676,27 +676,6 @@ def index_repo(
         on_progress(files_count, lines_count)
     return files_count, lines_count
 
-
-def force_merge_lines_index(es: Elasticsearch, org: str, repo: str, commit_sha: str) -> None:
-    """Kick off a force-merge of a commit's lines index down to a single segment, once all of
-    that commit's line docs have been written. The lines index is write-once per commit (content
-    is keyed by (org, repo, commit, path) and never rewritten for that commit), so merging to one
-    segment after the load trades a one-off merge cost for smaller, faster-to-search segments.
-
-    Fired with wait_for_completion=False so it runs as a background task on the cluster and the
-    indexing run doesn't block on the (potentially long) merge. Best-effort: a cluster that
-    rejects or can't schedule the merge just keeps its default segmenting rather than failing
-    the ref.
-
-    Skipped entirely on Elastic Cloud Serverless, which doesn't expose the force-merge API
-    (segment management is handled by the platform); calling it there only prints an error."""
-    if is_serverless(es):
-        return
-    index = lines_index(org, repo, commit_sha)
-    try:
-        es.indices.forcemerge(index=index, max_num_segments=1, wait_for_completion=False)
-    except ES_ERRORS as e:
-        click.echo(f"Note: could not force-merge {index}: {e}", err=True)
 
 
 def commit_date(repo_dir: pathlib.Path) -> str | None:
@@ -926,7 +905,7 @@ def index_ref_in_dir(
         # recording a half-populated commit as done.
         status = "tagged" if tag else "recorded"
         files_count = count_commit_docs(es, files_index(org, repo), org, repo, commit_sha)
-        lines_count = count_commit_docs(es, lines_index(org, repo, commit_sha), org, repo, commit_sha)
+        lines_count = count_commit_docs(es, lines_index(org, repo), org, repo, commit_sha)
     else:
         reporter.set_total_files(unit, count_tracked_files(repo_dir))
         reporter.set_stage(unit, "indexing")
@@ -934,11 +913,6 @@ def index_ref_in_dir(
             es, org, repo, repo_dir, commit_sha,
             on_progress=lambda f, l: reporter.update_counts(unit, f, l),
         )
-        # All of this commit's line docs are now written; merge its lines index to a single
-        # segment in the background (see force_merge_lines_index). Only on the freshly-indexed
-        # path -- the tagged/recorded branch means another ref already indexed (and merged) this
-        # same commit's content.
-        force_merge_lines_index(es, org, repo, commit_sha)
         status = "indexed"
     write_ref_marker(es, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso, files_count, lines_count)
     reporter.finish(unit, status, files_count, lines_count)
@@ -1006,12 +980,12 @@ def fetch_markers(
 
 
 def execute_deletions(
-    es: Elasticsearch, org: str, repo: str, decisions, force_merge: bool = True,
+    es: Elasticsearch, org: str, repo: str, decisions,
 ) -> tuple[int, int]:
-    """Apply a prune plan. Deletes the marker docs, then drops content ONLY for commits that
-    no surviving marker references (the commit-safety guard, in content_delete_set): the
-    per-commit lines index is dropped whole, and the shared per-repo files index is pruned by
-    a `git.commit` delete-by-query. Returns (markers_deleted, commits_content_dropped)."""
+    """Apply a prune plan. Deletes the marker docs, then fires async delete-by-query for each
+    pruned commit's content in both shared indices. Content is dropped ONLY for commits that
+    no surviving marker references (the commit-safety guard, in content_delete_set).
+    Returns (markers_deleted, commits_content_dropped)."""
     deletes = [d.marker for d in decisions if d.action == "delete"]
     if not deletes:
         return (0, 0)
@@ -1025,31 +999,22 @@ def execute_deletions(
     )
 
     for sha in drop_commits:
-        try:
-            es.indices.delete(index=lines_index(org, repo, sha), ignore_unavailable=True)
-        except NotFoundError:
-            pass
-        try:
-            es.delete_by_query(
-                index=files_index(org, repo),
-                query={"bool": {"filter": [
-                    {"term": {"git.org": org}},
-                    {"term": {"git.repo": repo}},
-                    {"term": {"git.commit": sha}},
-                ]}},
-                conflicts="proceed",
-                refresh=False,
-            )
-        except NotFoundError:
-            pass
-    if force_merge and drop_commits and not is_serverless(es):
-        # Reclaim the deleted file docs from the shared files index. Best-effort: the marker
-        # and content deletes are already applied even if the merge can't be scheduled.
-        # Skipped on Serverless, which doesn't expose the force-merge API.
-        try:
-            es.indices.forcemerge(index=files_index(org, repo), only_expunge_deletes=True)
-        except (NotFoundError, *ES_ERRORS):
-            pass
+        for idx in (lines_index(org, repo), files_index(org, repo)):
+            try:
+                es.delete_by_query(
+                    index=idx,
+                    query={"bool": {"filter": [
+                        {"term": {"git.org": org}},
+                        {"term": {"git.repo": repo}},
+                        {"term": {"git.commit": sha}},
+                    ]}},
+                    conflicts="proceed",
+                    refresh=False,
+                    scroll_size=5000,
+                    wait_for_completion=False,
+                )
+            except NotFoundError:
+                pass
     return (len(deletes), len(drop_commits))
 
 

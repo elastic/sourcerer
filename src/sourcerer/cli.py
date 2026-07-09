@@ -151,15 +151,10 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
     default=False,
     help="Show what would be deleted without deleting anything.",
 )
-@click.option(
-    "--force-merge/--no-force-merge",
-    default=True,
-    help="After dropping content, force-merge the files index to reclaim deleted docs (default: on).",
-)
 @click.option("-q", "--quiet", is_flag=True, default=False, help="Suppress output for repos with nothing to prune.")
 @env_option
 @auth_options
-def prune(config_path, dry_run, force_merge, quiet, url, api_key, username, password):
+def prune(config_path, dry_run, quiet, url, api_key, username, password):
     """Delete indexed refs that fall outside their repos.yml retention policies.
 
     Applies the same retain policies the `index` command uses to skip doomed refs,
@@ -167,7 +162,7 @@ def prune(config_path, dry_run, force_merge, quiet, url, api_key, username, pass
     along with any content (lines/files) no surviving ref still references. Use --dry-run
     to preview the plan first.
     """
-    prune_cmd.run(config_path, url, api_key, username, password, dry_run, force_merge, quiet)
+    prune_cmd.run(config_path, url, api_key, username, password, dry_run, quiet)
 
 
 if __name__ == "__main__":

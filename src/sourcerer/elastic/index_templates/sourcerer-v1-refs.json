@@ -8,6 +8,7 @@
   "template": {
     "settings": {
       "index": {
+        "codec": "best_compression",
         "sort": {
           "field": [
             "git.org",

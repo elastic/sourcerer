@@ -36,7 +36,7 @@ def _print_repo(cfg, decisions, dry_run: bool) -> None:
 
 
 def run(config_path, url, api_key, username, password,
-        dry_run=False, force_merge=True, quiet=False) -> None:
+        dry_run=False, quiet=False) -> None:
     try:
         entries = load_config(config_path)
     except (OSError, ValueError, yaml.YAMLError) as e:
@@ -66,7 +66,7 @@ def run(config_path, url, api_key, username, password,
             continue
         if any(d.action == "delete" for d in decisions):
             try:
-                n_markers, n_commits = execute_deletions(es, cfg.org, cfg.repo, decisions, force_merge)
+                n_markers, n_commits = execute_deletions(es, cfg.org, cfg.repo, decisions)
                 total_markers += n_markers
                 total_commits += n_commits
             except ES_ERRORS as e:
