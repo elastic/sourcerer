@@ -22,12 +22,12 @@ import click
 import yaml
 from elastic_transport import TransportError
 from elasticsearch import ApiError, Elasticsearch, NotFoundError
-from elasticsearch.helpers import BulkIndexError, bulk, scan
+from elasticsearch.helpers import BulkIndexError, scan
 from elasticsearch.helpers import parallel_bulk as es_parallel_bulk
 
 # App packages
 from ..config import RepoConfig, load_config
-from ..planner import Marker, content_delete_set, plan_repo
+from ..planner import Marker, content_delete_set, parse_index_name, plan_repo
 from ..progress import ProgressReporter, Unit, make_reporter
 from ..utils import make_client, make_doc_id
 
@@ -979,43 +979,81 @@ def fetch_markers(
     return out
 
 
-def execute_deletions(
-    es: Elasticsearch, org: str, repo: str, decisions,
-) -> tuple[int, int]:
-    """Apply a prune plan. Deletes the marker docs, then fires async delete-by-query for each
-    pruned commit's content in both shared indices. Content is dropped ONLY for commits that
-    no surviving marker references (the commit-safety guard, in content_delete_set).
-    Returns (markers_deleted, commits_content_dropped)."""
-    deletes = [d.marker for d in decisions if d.action == "delete"]
-    if not deletes:
-        return (0, 0)
-    drop_commits = content_delete_set(decisions)
+# --- Orphan sweep: ES-facing read helpers --------------------------------------------------
+# The detection logic itself (orphan_indices/orphan_content_commits/orphan_markers/
+# plan_orphans) is pure and lives in planner.py; these are the thin, mockable, READ-ONLY
+# wrappers that gather its inputs from the cluster. The functions that apply a plan (actually
+# delete anything) live in commands/prune.py alongside the retention deletion logic, so every
+# deleting code path is in one place.
 
-    bulk(
-        es,
-        ({"_op_type": "delete", "_index": REFS_INDEX, "_id": m.id} for m in deletes),
-        raise_on_error=False,
-        refresh=False,
-    )
+_COMPOSITE_PAGE_SIZE = 1000
 
-    for sha in drop_commits:
-        for idx in (lines_index(org, repo), files_index(org, repo)):
-            try:
-                es.delete_by_query(
-                    index=idx,
-                    query={"bool": {"filter": [
-                        {"term": {"git.org": org}},
-                        {"term": {"git.repo": repo}},
-                        {"term": {"git.commit": sha}},
-                    ]}},
-                    conflicts="proceed",
-                    refresh=False,
-                    scroll_size=5000,
-                    wait_for_completion=False,
-                )
-            except NotFoundError:
-                pass
-    return (len(deletes), len(drop_commits))
+
+def list_sourcerer_indices(es: Elasticsearch) -> list[str]:
+    """Every physical sourcerer-v1-{files,lines} index name, via one `_cat/indices` read.
+    Read-side wildcards are safe on every cluster (including Serverless) -- only wildcard
+    *deletes* are the compatibility problem this sweep is designed to avoid, so this is the
+    one place a wildcard is used. sourcerer-v1-refs is a single global index (never
+    per-org/repo), so it's intentionally excluded from this pattern."""
+    pattern = f"{FILES_INDEX_PREFIX}*,{LINES_INDEX_PREFIX}*"
+    rows = es.cat.indices(index=pattern, h="index", format="json")
+    return [row["index"] for row in rows]
+
+
+def enumerate_ref_tuples(es: Elasticsearch) -> set[tuple[str, str, str]]:
+    """Every distinct (git.org, git.repo, git.commit) tuple recorded in sourcerer-v1-refs, via
+    a paginated composite aggregation (safe over an unbounded number of distinct tuples).
+    Returns an empty set if the refs index doesn't exist yet."""
+    return _composite_org_repo_commit_tuples(es, REFS_INDEX)
+
+
+def enumerate_content_commits(es: Elasticsearch, index: str) -> set[tuple[str, str, str]]:
+    """Every distinct (git.org, git.repo, git.commit) tuple with at least one doc in `index` (a
+    single files or lines physical index). Returns an empty set if `index` doesn't exist."""
+    return _composite_org_repo_commit_tuples(es, index)
+
+
+def _composite_org_repo_commit_tuples(es: Elasticsearch, index: str) -> set[tuple[str, str, str]]:
+    out: set[tuple[str, str, str]] = set()
+    after: dict | None = None
+    while True:
+        composite: dict = {
+            "size": _COMPOSITE_PAGE_SIZE,
+            "sources": [
+                {"org": {"terms": {"field": "git.org"}}},
+                {"repo": {"terms": {"field": "git.repo"}}},
+                {"commit": {"terms": {"field": "git.commit"}}},
+            ],
+        }
+        if after is not None:
+            composite["after"] = after
+        try:
+            resp = es.search(index=index, size=0, aggs={"tuples": {"composite": composite}})
+        except NotFoundError:
+            return out
+        agg = resp["aggregations"]["tuples"]
+        buckets = agg["buckets"]
+        if not buckets:
+            return out
+        for b in buckets:
+            out.add((b["key"]["org"], b["key"]["repo"], b["key"]["commit"]))
+        after = agg.get("after_key")
+        if after is None:
+            return out
+
+
+def gather_content_commit_tuples(es: Elasticsearch, index_names: list[str]) -> set[tuple[str, str, str]]:
+    """Union of (org, repo, commit) tuples with content docs, across every org~repo-granularity
+    files/lines index in `index_names`. Org-only and org~repo~commit indices are skipped here --
+    Class-A (orphan_indices) already judges those by name alone, with no per-doc commit variety
+    to aggregate over that isn't already implied by the name itself."""
+    out: set[tuple[str, str, str]] = set()
+    for name in index_names:
+        parsed = parse_index_name(name, FILES_INDEX_PREFIX, LINES_INDEX_PREFIX)
+        if parsed is None or parsed.repo is None or parsed.commit is not None:
+            continue
+        out |= enumerate_content_commits(es, name)
+    return out
 
 
 def index_one(

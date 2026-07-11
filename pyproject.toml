@@ -16,11 +16,19 @@ dependencies = [
     "rich==13.9.4",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
 [project.scripts]
 sourcerer = "sourcerer.cli:cli"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.package-data]
 sourcerer = [

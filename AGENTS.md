@@ -7,7 +7,8 @@ Commands:
 - `sourcerer setup`
 - `sourcerer index <org>/<repo> [-b <branch>] [-t <tag>] [-c <commit>]`
 - `sourcerer index --config <file> [--prune] [--dry-run]`
-- `sourcerer prune --config <file> [--dry-run]`
+- `sourcerer prune [--config <file>] [--dry-run]` (config-driven retention prune is skipped
+  without `--config`; the orphan sweep always runs)
 - `sourcerer help`
 
 ### Indexing multiple repos with a config

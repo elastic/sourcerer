@@ -142,8 +142,9 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
     "--config",
     "config_path",
     type=click.Path(exists=True, dir_okay=False),
-    required=True,
-    help="YAML config whose retain policies decide which indexed refs to delete.",
+    default=None,
+    help="YAML config whose retain policies decide which indexed refs to delete. Omit to "
+    "run only the orphan sweep, which doesn't depend on a config.",
 )
 @click.option(
     "--dry-run",
@@ -155,12 +156,17 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
 @env_option
 @auth_options
 def prune(config_path, dry_run, quiet, url, api_key, username, password):
-    """Delete indexed refs that fall outside their repos.yml retention policies.
+    """Delete indexed refs that fall outside their repos.yml retention policies, then sweep
+    for orphans.
 
-    Applies the same retain policies the `index` command uses to skip doomed refs,
-    but retroactively: refs already indexed that a policy would now delete are removed,
-    along with any content (lines/files) no surviving ref still references. Use --dry-run
-    to preview the plan first.
+    With --config, applies the same retain policies the `index` command uses to skip doomed
+    refs, but retroactively: refs already indexed that a policy would now delete are removed,
+    along with any content (lines/files) no surviving ref still references.
+
+    Afterwards -- or always, if --config is omitted -- also detects and removes orphans: whole
+    files/lines indices with no matching entry in sourcerer-v1-refs (e.g. a repo removed
+    from the config), commit content left behind with no marker referencing it, and refs
+    markers whose content is entirely gone. Use --dry-run to preview both passes first.
     """
     prune_cmd.run(config_path, url, api_key, username, password, dry_run, quiet)
 
