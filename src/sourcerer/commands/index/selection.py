@@ -1,7 +1,8 @@
 # sourcerer/commands/index/selection.py
 # Turns repos.yml selectors into concrete Units to index: lists a repo's remote branches/tags
 # once per ref kind and keeps the ones a selector's version-aware pattern matches, then resolves
-# each selector's `since` floor to a commit-date lower bound.
+# each selector's `since` floor to a commit-date lower bound. A `commit` selector pins explicit
+# SHAs/prefixes instead -- there's nothing to list remotely, so it's turned into Units directly.
 
 # Standard packages
 import datetime
@@ -28,6 +29,16 @@ def _resolve_entry(cfg: RepoConfig) -> list[Unit]:
     units: list[Unit] = []
     for sel in cfg.selectors:
         rt = sel.ref_type
+        if rt == "commit":
+            # Pinned commits aren't enumerable via ls-remote (there's no remote listing of
+            # commits) -- `match` already holds the literal SHA/prefix strings to index, one
+            # Unit per pattern. checkout_ref resolves the (possibly short) SHA at clone time.
+            for prefix in sel.raw_patterns:
+                if (rt, prefix) in seen:
+                    continue
+                seen.add((rt, prefix))
+                units.append(Unit(org=cfg.org, repo=cfg.repo, ref=prefix, kind=rt))
+            continue
         if rt not in fetched:
             fetched[rt] = list_remote_ref_names(
                 cfg.org, cfg.repo, "heads" if rt == "branch" else "tags"

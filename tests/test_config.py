@@ -100,7 +100,7 @@ def _selector(type_="branch", match="main", since=None, retain=None):
 class TestParseSelector:
     def test_bad_type_raises(self):
         with pytest.raises(ValueError, match="'type' must be"):
-            parse_config([_entry(refs=[_selector(type_="commit")])])
+            parse_config([_entry(refs=[_selector(type_="sha")])])
 
     def test_unknown_key_raises(self):
         with pytest.raises(ValueError, match="unknown keys"):
@@ -135,6 +135,74 @@ class TestParseSelector:
             match=["v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}"],
         )])])
         assert cfgs[0].selectors[0].levels == ("major", "minor", "patch")
+
+
+class TestParseCommitSelector:
+    def test_full_sha_accepted(self):
+        cfgs = parse_config([_entry(refs=[_selector(type_="commit", match="a" * 40)])])
+        assert cfgs[0].selectors[0].raw_patterns == ["a" * 40]
+
+    def test_short_prefix_accepted(self):
+        cfgs = parse_config([_entry(refs=[_selector(type_="commit", match="cfefb3b")])])
+        assert cfgs[0].selectors[0].raw_patterns == ["cfefb3b"]
+
+    def test_lowercase_normalized(self):
+        cfgs = parse_config([_entry(refs=[_selector(type_="commit", match="CFEFB3B")])])
+        assert cfgs[0].selectors[0].raw_patterns == ["cfefb3b"]
+
+    def test_too_short_raises(self):
+        with pytest.raises(ValueError, match="7-40 hex chars"):
+            parse_config([_entry(refs=[_selector(type_="commit", match="abc123")])])
+
+    def test_non_hex_raises(self):
+        with pytest.raises(ValueError, match="7-40 hex chars"):
+            parse_config([_entry(refs=[_selector(type_="commit", match="not-a-sha")])])
+
+    def test_too_long_raises(self):
+        with pytest.raises(ValueError, match="7-40 hex chars"):
+            parse_config([_entry(refs=[_selector(type_="commit", match="a" * 41)])])
+
+    def test_list_of_shas(self):
+        cfgs = parse_config([_entry(refs=[_selector(
+            type_="commit", match=["cfefb3b", "deadbee"],
+        )])])
+        assert cfgs[0].selectors[0].raw_patterns == ["cfefb3b", "deadbee"]
+
+    def test_since_raises(self):
+        with pytest.raises(ValueError, match="do not support 'since'"):
+            parse_config([_entry(refs=[_selector(
+                type_="commit", match="cfefb3b", since={"age": "1y"},
+            )])])
+
+    def test_retain_age_allowed(self):
+        cfgs = parse_config([_entry(refs=[_selector(
+            type_="commit", match="cfefb3b", retain={"age": "2y"},
+        )])])
+        assert cfgs[0].selectors[0].retain.age == timedelta(days=730)
+
+    def test_retain_keep_forever_allowed(self):
+        cfgs = parse_config([_entry(refs=[_selector(type_="commit", match="cfefb3b")])])
+        assert cfgs[0].selectors[0].retain is None
+
+    def test_retain_count_raises(self):
+        with pytest.raises(ValueError, match="only 'age' retention"):
+            parse_config([_entry(refs=[_selector(
+                type_="commit", match="cfefb3b", retain={"count": 5},
+            )])])
+
+    def test_retain_version_raises(self):
+        # Rejected earlier, by the same "no version tokens" guard branch/tag selectors hit --
+        # a commit selector has no version levels either.
+        with pytest.raises(ValueError, match="has no version tokens"):
+            parse_config([_entry(refs=[_selector(
+                type_="commit", match="cfefb3b", retain={"version": {"majors": 2}},
+            )])])
+
+    def test_retain_prerelease_superseded_raises(self):
+        with pytest.raises(ValueError, match="only 'age' retention"):
+            parse_config([_entry(refs=[_selector(
+                type_="commit", match="cfefb3b", retain={"prerelease": "superseded"},
+            )])])
 
 
 class TestParseSince:
@@ -243,6 +311,14 @@ class TestSelectorMatches:
         assert sel.matches("branch", "dev") is not None
         assert sel.matches("branch", "main") is not None
         assert sel.matches("branch", "other") is None
+
+    def test_commit_prefix_matches_full_sha(self):
+        cfgs = parse_config([_entry(refs=[_selector(type_="commit", match="cfefb3b")])])
+        sel = cfgs[0].selectors[0]
+        full_sha = "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60"
+        assert sel.matches("commit", full_sha) is not None
+        assert sel.matches("commit", "deadbeef" * 5) is None
+        assert sel.matches("branch", full_sha) is None
 
 
 class TestSinceVersionFloor:

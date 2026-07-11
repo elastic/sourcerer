@@ -19,7 +19,8 @@ content: |-
   - `git_ref: v8.17.*` — all 8.17.x tags
   - `git_ref: main` — exact branch match
 
-  Combine with `git_ref_type: tag` or `git_ref_type: branch` to narrow further.
+  Combine with `git_ref_type: tag`, `git_ref_type: branch`, or `git_ref_type: commit` (a pinned,
+  ad-hoc commit not on a tracked branch/tag tip) to narrow further.
 
   ## Resolution scenarios
 
@@ -40,7 +41,7 @@ content: |-
   Resolve each ref independently using the steps above. Run content queries against each commit, then compare results. Label each finding with its version.
 
   ### Explicit ref (branch name, exact tag, commit hash)
-  Use as given. If it is a branch, call `refs.list` with `git_ref_type: branch` to confirm it exists and retrieve its current commit. If it is a tag, confirm and get its commit. If it is a commit hash, use it directly.
+  Use as given. If it is a branch, call `refs.list` with `git_ref_type: branch` to confirm it exists and retrieve its current commit. If it is a tag, confirm and get its commit. If it is a commit hash, use it directly — optionally confirm with `git_ref_type: commit` if it may be a pinned commit rather than one reached via a branch/tag.
 
   ## Pinning the commit
   Once a ref resolves to a `git.commit`, use that commit in every subsequent `sourcerer.code.*` and `sourcerer.files.*` call for that repo and ref. Re-invoke this skill only when the question introduces a new or additional ref.

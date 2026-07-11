@@ -137,6 +137,44 @@ class TestBranchVsTagCountGrouping:
         assert decisions["v8"].action == "delete"
 
 
+class TestCommitSelectorRetention:
+    OLD_SHA = "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60"
+    NEW_SHA = "deadbeefcafebabe1234567890abcdef12345678"
+
+    def test_age_retention(self):
+        now = dt(2024, 6, 1)
+        cfg = _cfg([_sel(type_="commit", match=["cfefb3b", "deadbee"], retain={"age": "30d"})])
+        old = make_marker("old", ref=self.OLD_SHA, ref_type="commit",
+                           commit=self.OLD_SHA, commit_date=dt(2020, 1, 1))
+        recent = make_marker("recent", ref=self.NEW_SHA, ref_type="commit",
+                              commit=self.NEW_SHA, commit_date=dt(2024, 5, 20))
+        decisions = {d.marker.id: d for d in plan_repo([old, recent], cfg, now=now)}
+        assert decisions["old"].action == "delete"
+        assert decisions["old"].criteria == ("age",)
+        assert decisions["recent"].action == "keep"
+
+    def test_no_retain_keeps_forever(self):
+        cfg = _cfg([_sel(type_="commit", match="cfefb3b")])
+        m = make_marker(ref=self.OLD_SHA, ref_type="commit",
+                         commit=self.OLD_SHA, commit_date=dt(2020, 1, 1))
+        [decision] = plan_repo([m], cfg)
+        assert decision.action == "keep"
+
+    def test_full_sha_managed_by_short_prefix_selector(self):
+        cfg = _cfg([_sel(type_="commit", match="cfefb3b", retain={"age": "30d"})])
+        m = make_marker(ref=self.OLD_SHA, ref_type="commit",
+                         commit=self.OLD_SHA, commit_date=dt(2020, 1, 1))
+        [decision] = plan_repo([m], cfg, now=dt(2024, 6, 1))
+        assert decision.action == "delete"
+        assert decision.criteria == ("age",)
+
+    def test_non_matching_sha_is_unmanaged(self):
+        cfg = _cfg([_sel(type_="commit", match="cfefb3b")])
+        other = make_marker(ref=self.NEW_SHA, ref_type="commit", commit=self.NEW_SHA)
+        [decision] = plan_repo([other], cfg)
+        assert decision.action == "unmanaged"
+
+
 class TestDateIndependentOnly:
     def test_skips_count_and_age_but_not_version(self):
         cfg = _cfg([_sel(

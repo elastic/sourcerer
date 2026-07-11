@@ -82,6 +82,33 @@ def commit_fully_indexed(es: Elasticsearch, org: str, repo: str, commit_sha: str
         return False
 
 
+def commit_prefix_indexed(es: Elasticsearch, org: str, repo: str, sha_prefix: str) -> str | None:
+    """The full commit SHA of a `status: complete` marker in this repo whose commit starts with
+    `sha_prefix`, or None if no marker matches. There is no remote way to resolve a SHA/prefix
+    (unlike ls-remote for branch/tag), so a pinned commit's cheap pre-clone skip instead checks
+    this index directly: if some earlier run already fully indexed a commit with this prefix,
+    a `type: commit` (or `-c`) re-run can skip the clone entirely, the same way branch/tag do.
+    `git.commit` is a lowercase-normalized keyword, so `prefix` matches case-insensitively as
+    long as `sha_prefix` is already lowercase (config parsing normalizes it; callers of the
+    `-c` CLI flag should lowercase it too)."""
+    query = {
+        "bool": {
+            "filter": [
+                {"term": {"git.org": org}},
+                {"term": {"git.repo": repo}},
+                {"prefix": {"git.commit": sha_prefix}},
+                {"term": {"status": "complete"}},
+            ]
+        }
+    }
+    try:
+        resp = es.search(index=REFS_INDEX, size=1, query=query)
+    except NotFoundError:
+        return None
+    hits = resp["hits"]["hits"]
+    return hits[0]["_source"]["git"]["commit"] if hits else None
+
+
 def should_index(es: Elasticsearch, org: str, repo: str, ref_type: str, ref: str, commit_sha: str) -> bool:
     """
     True if this exact (ref_type, ref, commit) needs (re)indexing. The id now encodes the
@@ -142,16 +169,24 @@ def pre_clone_skip(
     force: bool,
 ) -> tuple[bool, str | None, str | None]:
     """
-    Cheap pre-clone decision via `git ls-remote` (no clone). Returns
+    Cheap pre-clone decision -- no clone needed either way. Returns
     (skip, ref_for_id, remote_sha):
       - skip=True  -> the ref is already fully indexed; the caller should finish "skipped"
         (using the returned ref_for_id) without cloning.
       - skip=False -> the caller must clone/checkout and run the post-clone path.
 
-    Not possible for -c (can't resolve a short hash remotely) or under --force; both
-    bypass the check and fall through to cloning. An ls-remote failure also falls through.
+    branch/tag resolve via `git ls-remote`. A pinned commit (-c, or a `type: commit` config
+    selector) can't be resolved remotely that way, so it instead checks for an already-indexed
+    marker whose commit starts with the given SHA/prefix (commit_prefix_indexed) -- a hit skips
+    the clone just like a branch/tag whose tip is already indexed. --force bypasses both checks
+    and falls through to cloning; so does an ls-remote failure for branch/tag.
     """
-    if force or commit:
+    if force:
+        return False, None, None
+    if commit:
+        full_sha = commit_prefix_indexed(es, org, repo, commit.lower())
+        if full_sha:
+            return True, full_sha, full_sha
         return False, None, None
     remote_sha, default_branch = resolve_remote(org, repo, branch, tag)
     if not remote_sha:

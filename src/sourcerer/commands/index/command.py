@@ -316,15 +316,16 @@ def run_config(
             (org, repo), group = item
             # 2a. Cheap per-ref skip for the whole group (no clone yet). A transient ES error
             # here fails just that ref (the skip check hits the cluster) and the batch goes on.
-            pending: list[tuple[Unit, str | None, str | None]] = []
+            pending: list[tuple[Unit, str | None, str | None, str | None]] = []
             for unit in group:
                 if _aborted.is_set():
                     return
                 reporter.start(unit)
                 branch = unit.ref if unit.kind == "branch" else None
                 tag = unit.ref if unit.kind == "tag" else None
+                commit = unit.ref if unit.kind == "commit" else None
                 try:
-                    skip, ref_for_id, _ = pre_clone_skip(es, org, repo, branch, tag, None, force)
+                    skip, ref_for_id, _ = pre_clone_skip(es, org, repo, branch, tag, commit, force)
                 except ES_ERRORS as e:
                     with failures_lock:
                         failures += 1
@@ -334,7 +335,7 @@ def run_config(
                     unit.ref = ref_for_id
                     reporter.finish(unit, "skipped")
                 else:
-                    pending.append((unit, branch, tag))
+                    pending.append((unit, branch, tag, commit))
 
             if not pending:
                 return  # whole repo already indexed -> no clone at all
@@ -347,7 +348,7 @@ def run_config(
                 reporter.set_stage(pending[0][0], "cloning")
                 with prepared_repo(org, repo, cache_root, ephemeral) as repo_dir:
                     if repo_dir is None:
-                        for unit, _branch, _tag in pending:
+                        for unit, _branch, _tag, _commit in pending:
                             reporter.finish(unit, "locked", detail="another sourcerer run holds this repo's cache lock")
                         return
                     # Reorder pending refs newest-first by creation date so more-recent refs
@@ -369,17 +370,23 @@ def run_config(
                     # prune" can't diverge. count/version/prerelease are cohort-relative, so the
                     # whole group's refs are scored together (e.g. v8.14.0-.2 are dropped once
                     # v8.14.3 is in the candidate set via patch:0).
-                    prospective: list[tuple[Unit, str | None, str | None, Marker]] = []
-                    for unit, branch, tag in pending:
-                        ref_type = "branch" if branch else "tag"
+                    prospective: list[tuple[Unit, str | None, str | None, str | None, Marker]] = []
+                    for unit, branch, tag, commit in pending:
+                        ref_type = "branch" if branch else "tag" if tag else "commit"
                         info = _rev_info(repo_dir, unit.ref)
                         sha, cd = info if info else ("", None)
+                        # For a commit selector, unit.ref is still the (possibly short) SHA
+                        # prefix from the config; once resolved, key the marker on the full SHA
+                        # so it lines up with what write_ref_marker stores and prune matches
+                        # against. Fall back to the prefix if resolution failed (checkout will
+                        # then fail too, reported as a per-unit error).
+                        marker_ref = sha if (ref_type == "commit" and sha) else unit.ref
                         floor = _effective_since_floor(cfg, repo_dir, ref_type, unit.ref, now)
                         if floor is not None and cd is not None and cd < floor:
                             reporter.finish(unit, "skipped", detail=f"before since floor {floor.date()}")
                             continue
-                        prospective.append((unit, branch, tag, Marker(
-                            id=f"{ref_type}:{unit.ref}", ref=unit.ref, ref_type=ref_type,
+                        prospective.append((unit, branch, tag, commit, Marker(
+                            id=f"{ref_type}:{marker_ref}", ref=marker_ref, ref_type=ref_type,
                             commit=sha, commit_date=cd, indexed_at=now,
                         )))
 
@@ -388,7 +395,7 @@ def run_config(
                         decisions = plan_repo([m for *_, m in prospective], cfg, now)
                         doomed = {d.marker.id for d in decisions if d.action == "delete"}
 
-                    for unit, branch, tag, marker in prospective:
+                    for unit, branch, tag, commit, marker in prospective:
                         if _aborted.is_set():
                             break
                         if marker.id in doomed:
@@ -396,7 +403,7 @@ def run_config(
                             continue
                         try:
                             index_ref_in_dir(
-                                es, org, repo, repo_dir, branch, tag, None,
+                                es, org, repo, repo_dir, branch, tag, commit,
                                 force, reporter, unit,
                             )
                         except KeyboardInterrupt:
@@ -407,7 +414,7 @@ def run_config(
                             reporter.finish(unit, "error", detail=str(e))
             except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
                 # Clone failed: fail every still-pending ref of this repo, continue others.
-                for unit, _branch, _tag in pending:
+                for unit, _branch, _tag, _commit in pending:
                     if unit.status is None:
                         with failures_lock:
                             failures += 1

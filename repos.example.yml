@@ -62,3 +62,17 @@
     retain:
       age: 1m
       count: 1
+
+  # Example: Pin one or more explicit commits (e.g. a snapshot referenced by a doc or a
+  # support case) rather than matching a named ref. `match` entries are 7-40 hex chars: a
+  # full SHA, or a short prefix (git's own "short hash" convention). `since` is not valid
+  # here -- a commit selector already names the exact point to index. Retention supports
+  # only `age` (or omit `retain` to keep forever); `count`/`version`/`prerelease` have no
+  # meaning for a single pinned point and raise an error if set. A pinned commit must be
+  # reachable from some fetched branch or tag -- one orphaned from all refs (e.g.
+  # force-pushed away) will fail to check out.
+  - type: commit
+    match:
+    - cfefb3b2378ccbadefa7  # full 40-char SHA also accepted
+    retain:
+      age: 2y                # keep while within this age, prune older (or omit -> keep forever)

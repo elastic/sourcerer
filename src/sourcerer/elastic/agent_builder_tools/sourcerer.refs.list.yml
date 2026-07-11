@@ -42,6 +42,6 @@ configuration:
       defaultValue: "*"
     git_ref_type:
       type: string
-      description: Filter by ref type (can be "branch", "tag", or either with "*")
+      description: Filter by ref type (can be "branch", "tag", "commit", or any with "*")
       optional: true
       defaultValue: "*"

@@ -28,10 +28,30 @@ config is a YAML list, one entry per repo. See `repos.example.yml`.
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | yes | `branch` or `tag`. |
-| `match` | yes | Pattern string or list of patterns matched against ref names (version DSL + glob). A ref matches if any pattern hits. |
-| `since` | no | Index-side inclusion floor: the earliest commit to start indexing from. See below. |
-| `retain` | no | Retention policy (see below). Omit to keep forever. |
+| `type` | yes | `branch`, `tag`, or `commit`. |
+| `match` | yes | For `branch`/`tag`: pattern string or list of patterns matched against ref names (version DSL + glob) — a ref matches if any pattern hits. For `commit`: a commit SHA/prefix string or list of them (see below). |
+| `since` | no | Index-side inclusion floor: the earliest commit to start indexing from. See below. Not valid for `type: commit`. |
+| `retain` | no | Retention policy (see below). Omit to keep forever. For `type: commit`, only `age` is valid. |
+
+#### `type: commit` (pinning an explicit commit)
+
+Pins one or more commits directly, rather than matching named refs. `match` entries are
+7–40 hex chars — a full 40-char SHA, or a shorter prefix (git's own "short hash" convention;
+a `git.commit` lookup uses a prefix match against the resolved full SHA). There's nothing to
+index "from" for a single pinned point, so `since` is rejected; likewise `retain.count`,
+`retain.version`, and `retain.prerelease` have no meaning for one commit and are rejected --
+only `retain.age` (or omitting `retain` to keep forever) is allowed. A pinned commit must be
+reachable from some fetched branch or tag (a full clone only contains objects reachable that
+way) -- one that's been force-pushed away or only exists on an unfetched ref will fail to
+check out, reported as a per-unit error.
+
+```yaml
+- type: commit
+  match:
+  - cfefb3b              # short prefix (>= 7 hex chars) or a full 40-char SHA
+  retain:
+    age: 2y               # only 'age' is valid for commit selectors (or omit = keep forever)
+```
 
 #### `since` (inclusion floor)
 
@@ -127,6 +147,10 @@ Duration format (for `age`/`since.age`): `<n><unit>` where unit is `s` (seconds)
       count: 5                # newest 5 indexed commits of main
   - type: tag
     match: my-dev-tag         # no retain -> kept forever (allowlist)
+  - type: commit
+    match: cfefb3b            # pin an ad-hoc commit not on any tracked branch/tag tip
+    retain:
+      age: 2y                 # only 'age' is valid for commit selectors
 ```
 
 Indexing is idempotent — re-running only indexes refs that are new or have moved.

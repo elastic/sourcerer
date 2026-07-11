@@ -22,9 +22,23 @@ Per repo entry:
             builds: null
           prerelease: superseded | keep          #   sibling of version; default keep
 
+      - type: commit
+        match: <sha/prefix> | [<sha/prefix>, ...]  # 7-40 hex chars each; a ref matches if its
+                                                    # full commit SHA starts with any entry
+        retain:                                    # omit -> keep forever. Only 'age' is valid:
+          age: 2y                                  #   keep commits within this age, prune older
+
 Dotted keys are accepted as flat shorthand for nesting, e.g. `since.ref: v8.0.0` or
 `retain.version.majors: 2` instead of the nested form above. Dotted and nested forms may be
 mixed; conflicting values raise the same errors as duplicate nested keys.
+
+A `commit` selector pins one or more explicit commits rather than matching named refs. It does
+not support `since` (there is nothing to index "from" -- the selector already names the exact
+point) or the `count`/`version`/`prerelease` retain criteria (they have no meaning for a single
+pinned point); only `retain.age` (or omitting `retain` to keep forever) is allowed. A pinned
+commit must be reachable from some fetched branch or tag -- a full clone only contains objects
+reachable that way, so a commit orphaned from all refs (e.g. force-pushed away) will fail to
+check out.
 
 Duration units: s, h, d, w, m (=30d month), y (=365d year).
 """
@@ -46,6 +60,10 @@ _DURATION_RE = re.compile(r"^\s*(\d+)\s*(s|h|d|w|m|y)\s*$")
 _DURATION_UNITS = {"s": 1, "h": 3600, "d": 86400, "w": 604800, "m": 2592000, "y": 31536000}
 _NUMERIC_LEVELS = ("major", "minor", "patch", "build")
 _PLURAL_TO_LEVEL = {"majors": "major", "minors": "minor", "patches": "patch", "builds": "build"}
+# A commit selector's `match` entries are SHA prefixes, not version-DSL patterns: 7 hex chars is
+# git's own "short hash" convention (the shortest form `git rev-parse --short` will produce), and
+# rejecting anything shorter bounds how many distinct commits a single prefix could collide with.
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
 def parse_duration(text) -> timedelta:
@@ -96,6 +114,14 @@ class Selector:
 
     def matches(self, ref_type: str, ref: str) -> Version | None:
         if self.ref_type != ref_type:
+            return None
+        if self.ref_type == "commit":
+            # raw_patterns holds normalized (lowercase) SHA prefixes; a ref (the full commit
+            # SHA) matches if it starts with any of them. No version components -- a commit
+            # selector never drives version/count/prerelease retention.
+            ref_l = ref.lower()
+            if any(ref_l.startswith(p) for p in self.raw_patterns):
+                return Version(ref=ref, components=(), prerelease="")
             return None
         for cp in self.compiled:
             v = match_version(cp, ref)
@@ -188,33 +214,64 @@ def _parse_retain(raw: dict, ctx: str, has_versioned: bool, levels: tuple[str, .
     return Retain(age=age, count=count, version=version, prerelease=prerelease)
 
 
+def _parse_commit_match(raw: dict, ctx: str) -> list[str]:
+    m = raw.get("match")
+    patterns = [m] if isinstance(m, str) else list(m or [])
+    if not patterns or not all(isinstance(p, str) for p in patterns):
+        raise ValueError(f"{ctx}: 'match' must be a commit SHA/prefix string or non-empty "
+                         f"list of strings")
+    normalized = []
+    for p in patterns:
+        if not _SHA_RE.match(p):
+            raise ValueError(f"{ctx}: 'match' entries must be 7-40 hex chars "
+                             f"(a commit SHA or prefix), got {p!r}")
+        normalized.append(p.lower())
+    return normalized
+
+
 def _parse_selector(raw: dict, ctx: str) -> Selector:
-    if raw.get("type") not in ("branch", "tag"):
-        raise ValueError(f"{ctx}: 'type' must be 'branch' or 'tag'")
+    if raw.get("type") not in ("branch", "tag", "commit"):
+        raise ValueError(f"{ctx}: 'type' must be 'branch', 'tag', or 'commit'")
     unknown = set(raw) - {"type", "match", "since", "retain"}
     if unknown:
         raise ValueError(f"{ctx}: unknown keys {sorted(unknown)}")
     ref_type = raw["type"]
 
-    m = raw.get("match")
-    patterns = [m] if isinstance(m, str) else list(m or [])
-    if not patterns or not all(isinstance(p, str) for p in patterns):
-        raise ValueError(f"{ctx}: 'match' must be a pattern string or non-empty list of strings")
-    compiled = [compile_pattern(p) for p in patterns]
+    if ref_type == "commit":
+        # A pinned commit has no enumerable name to pattern-match against (see selection.py),
+        # so `match` holds literal SHA/prefix strings instead of version.py DSL patterns, and
+        # there are no version levels to drive version/count/prerelease retention.
+        patterns = _parse_commit_match(raw, ctx)
+        compiled: list[CompiledPattern] = []
+        levels: tuple[str, ...] = ()
+        has_versioned = False
+    else:
+        m = raw.get("match")
+        patterns = [m] if isinstance(m, str) else list(m or [])
+        if not patterns or not all(isinstance(p, str) for p in patterns):
+            raise ValueError(f"{ctx}: 'match' must be a pattern string or non-empty list of strings")
+        compiled = [compile_pattern(p) for p in patterns]
 
-    # A version policy compares numeric levels, so every versioned pattern must agree on its
-    # numeric level set (prerelease may be present on some and not others).
-    level_sets = {cp.levels for cp in compiled if cp.levels}
-    if len(level_sets) > 1:
-        raise ValueError(f"{ctx}: match patterns disagree on version levels {sorted(level_sets)}")
-    levels = next(iter(level_sets), ())
-    has_versioned = bool(levels)
+        # A version policy compares numeric levels, so every versioned pattern must agree on its
+        # numeric level set (prerelease may be present on some and not others).
+        level_sets = {cp.levels for cp in compiled if cp.levels}
+        if len(level_sets) > 1:
+            raise ValueError(f"{ctx}: match patterns disagree on version levels {sorted(level_sets)}")
+        levels = next(iter(level_sets), ())
+        has_versioned = bool(levels)
 
+    if ref_type == "commit" and raw.get("since") is not None:
+        # A commit selector already names the exact point to index -- there is nothing to
+        # index "from".
+        raise ValueError(f"{ctx}: commit selectors do not support 'since'")
     since = _parse_since(raw["since"], ctx) if raw.get("since") is not None else None
 
     retain = None
     if raw.get("retain") is not None:
         retain = _parse_retain(raw["retain"], ctx, has_versioned, levels)
+        if ref_type == "commit" and (retain.count is not None or retain.version is not None
+                                      or retain.prerelease != "keep"):
+            raise ValueError(f"{ctx}: commit selectors support only 'age' retention")
         if retain.is_empty():
             retain = None
 
