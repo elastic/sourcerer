@@ -10,7 +10,7 @@ import requests
 import yaml
 
 # App packages
-from ..utils import make_client
+from ...utils import make_client
 
 _ELASTIC = resources.files("sourcerer") / "elastic"
 ELASTICSEARCH_INDEX_TEMPLATES_DIR = _ELASTIC / "index_templates"

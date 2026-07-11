@@ -65,7 +65,7 @@ def _selector_keep_ids(
     NOT protect -- which criterion name(s) ("age"/"count"/"version"/"prerelease") excluded it.
     retain fires on ANY criterion, i.e. a marker is kept only if EVERY criterion keeps it
     (intersection); the exclusion map records which criterion in particular failed, for
-    prune's WHY report (commands/prune.py's `policy:<criteria>` tag).
+    prune's WHY report (commands/prune/command.py's `policy:<criteria>` tag).
 
     Grouping: version/prerelease/age evaluate over the whole matched family (a version
     landscape; age is per-marker so grouping is moot). `count` is per ref-name for branches
@@ -172,7 +172,7 @@ def content_delete_set(decisions: list[Decision]) -> set[str]:
 #                          -> delete_by_query on sourcerer-v1-refs.
 #
 # Today the CLI only ever produces org~repo-granularity indices (see files_index/lines_index
-# in commands/index.py); parse_index_name and orphan_indices also recognize the org-only and
+# in sourcerer/indices.py); parse_index_name and orphan_indices also recognize the org-only and
 # org~repo~commit levels so detection keeps working if a future granularity is introduced,
 # even though only one level is exercised in practice right now.
 
@@ -194,7 +194,7 @@ def parse_index_name(
     files_prefix: str = _FILES_PREFIX_DEFAULT,
     lines_prefix: str = _LINES_PREFIX_DEFAULT,
 ) -> ParsedIndex | None:
-    """Inverse of files_index()/lines_index() (commands/index.py), extended to also recognize
+    """Inverse of files_index()/lines_index() (sourcerer/indices.py), extended to also recognize
     the org-only and org~repo~commit granularities those builders don't produce today. Returns
     None for anything that doesn't fit the scheme (sourcerer-v1-refs, an unrelated index, or a
     malformed/empty segment) so callers skip it rather than risk misclassifying it as an orphan."""

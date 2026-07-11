@@ -1,9 +1,9 @@
-"""Unit tests for the ES-facing, READ-ONLY orphan-sweep helpers in sourcerer.commands.index
+"""Unit tests for the ES-facing, READ-ONLY orphan-sweep helpers in sourcerer.queries
 (index listing and tuple enumeration). Every ES call is mocked -- these tests assert the
 shape of the requests (index patterns, aggregation pagination), not against a real cluster.
 
 Deletion logic (delete_index, execute_orphan_deletions, execute_deletions) lives in
-commands/prune.py, not here -- see test_prune_deletions.py."""
+commands/prune/execute.py, not here -- see test_prune_deletions.py."""
 
 # Standard packages
 from unittest.mock import MagicMock
@@ -13,10 +13,8 @@ from elastic_transport import ApiResponseMeta, HttpHeaders
 from elasticsearch import NotFoundError
 
 # App packages
-from sourcerer.commands.index import (
-    FILES_INDEX_PREFIX,
-    LINES_INDEX_PREFIX,
-    REFS_INDEX,
+from sourcerer.indices import FILES_INDEX_PREFIX, LINES_INDEX_PREFIX, REFS_INDEX
+from sourcerer.queries import (
     enumerate_content_commits,
     enumerate_ref_tuples,
     gather_content_commit_tuples,

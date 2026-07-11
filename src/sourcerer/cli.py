@@ -3,9 +3,9 @@ import click
 from dotenv import find_dotenv, load_dotenv
 
 # App packages
-from .commands import index as index_cmd
-from .commands import prune as prune_cmd
-from .commands import setup as setup_cmd
+from .commands.index import command as index_cmd
+from .commands.prune import command as prune_cmd
+from .commands.setup import command as setup_cmd
 
 
 def _load_env(ctx, param, value):

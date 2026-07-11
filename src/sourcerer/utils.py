@@ -3,6 +3,7 @@ import hashlib
 
 # Elastic packages
 from elasticsearch import Elasticsearch, ApiError, TransportError
+from elasticsearch.helpers import BulkIndexError
 
 # Joins the fields of a document id before hashing. NUL is the only byte that cannot
 # appear in an org, repo, git ref, or file path (paths may contain any byte but NUL and
@@ -26,9 +27,15 @@ def make_doc_id(*parts: str) -> str:
     return hashlib.blake2b(joined, digest_size=ID_DIGEST_SIZE).hexdigest()
 
 
-# Larger bulk batches sent concurrently (see parallel_bulk in commands/index.py) take longer
-# per request, so give them a generous timeout and let the client retry transient timeouts.
+# Larger bulk batches sent concurrently (see parallel_bulk in commands/index/documents.py) take
+# longer per request, so give them a generous timeout and let the client retry transient timeouts.
 CLIENT_OPTS = {"request_timeout": 120, "max_retries": 3, "retry_on_timeout": True}
+
+# Remote/transient Elasticsearch failures (read timeouts, dropped connections, API errors,
+# per-doc bulk failures) that should fail only the current unit of work -- so a long batch keeps
+# going and reports that one ref/repo as an error -- rather than crashing the whole run. Shared
+# by the index and prune commands.
+ES_ERRORS = (ApiError, TransportError, BulkIndexError)
 
 
 def make_client(url: str, api_key: str | None, username: str | None, password: str | None) -> Elasticsearch:

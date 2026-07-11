@@ -1,7 +1,7 @@
-"""Unit tests for the deletion-executing functions in sourcerer.commands.prune: delete_index
-and execute_orphan_deletions (the orphan sweep), and execute_deletions (retention). Every ES
-call is mocked -- these assert the shape of the requests (wildcard-free deletes, query
-filters, single combined refs query), not against a real cluster."""
+"""Unit tests for the deletion-executing functions in sourcerer.commands.prune.execute:
+delete_index and execute_orphan_deletions (the orphan sweep), and execute_deletions
+(retention). Every ES call is mocked -- these assert the shape of the requests (wildcard-free
+deletes, query filters, single combined refs query), not against a real cluster."""
 
 # Standard packages
 from unittest.mock import MagicMock
@@ -11,8 +11,8 @@ from elastic_transport import ApiResponseMeta, HttpHeaders
 from elasticsearch import NotFoundError
 
 # App packages
-from sourcerer.commands.index import REFS_INDEX, files_index, lines_index
-from sourcerer.commands.prune import delete_index, execute_deletions, execute_orphan_deletions
+from sourcerer.commands.prune.execute import delete_index, execute_deletions, execute_orphan_deletions
+from sourcerer.indices import REFS_INDEX, files_index, lines_index
 from sourcerer.planner import Decision, Marker, OrphanPlan
 
 
@@ -116,7 +116,7 @@ class TestExecuteDeletions:
         es = MagicMock()
         bulk_calls = []
         monkeypatch.setattr(
-            "sourcerer.commands.prune.bulk",
+            "sourcerer.commands.prune.execute.bulk",
             lambda client, actions, **kw: bulk_calls.append((client, list(actions), kw)),
         )
         decisions = [Decision(_marker("m1", "aaa"), "delete", "count:1")]
@@ -131,7 +131,7 @@ class TestExecuteDeletions:
 
     def test_shared_commit_referenced_by_a_surviving_marker_keeps_its_content(self, monkeypatch):
         es = MagicMock()
-        monkeypatch.setattr("sourcerer.commands.prune.bulk", lambda *a, **k: None)
+        monkeypatch.setattr("sourcerer.commands.prune.execute.bulk", lambda *a, **k: None)
         decisions = [
             Decision(_marker("m1", "aaa", ref="old-branch"), "delete", "count:1"),
             Decision(_marker("m2", "aaa", ref="release-tag"), "keep", "keep forever"),
