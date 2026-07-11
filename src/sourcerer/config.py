@@ -22,6 +22,10 @@ Per repo entry:
             builds: null
           prerelease: superseded | keep          #   sibling of version; default keep
 
+Dotted keys are accepted as flat shorthand for nesting, e.g. `since.ref: v8.0.0` or
+`retain.version.majors: 2` instead of the nested form above. Dotted and nested forms may be
+mixed; conflicting values raise the same errors as duplicate nested keys.
+
 Duration units: s, h, d, w, m (=30d month), y (=365d year).
 """
 
@@ -218,6 +222,49 @@ def _parse_selector(raw: dict, ctx: str) -> Selector:
                     since=since, retain=retain, levels=levels)
 
 
+def _deep_merge(dst: dict, src: dict) -> None:
+    """Merge src into dst in place; raise on any key collision that isn't itself a pair of
+    mappings to recurse into (used to reconcile dotted and nested forms of the same key)."""
+    for k, v in src.items():
+        if isinstance(dst.get(k), dict) and isinstance(v, dict):
+            _deep_merge(dst[k], v)
+        elif k in dst:
+            raise ValueError(f"conflicting key {k!r} in config")
+        else:
+            dst[k] = v
+
+
+def _expand_dotted_keys(obj):
+    """Expand dict keys containing '.' into nested mappings, so `since.ref: x` becomes
+    `since: {ref: x}`. Recurses into lists and nested dicts; deep-merges siblings that share
+    a dotted prefix (e.g. retain.version.majors + retain.version.patches) or mix dotted and
+    nested forms of the same subtree."""
+    if isinstance(obj, list):
+        return [_expand_dotted_keys(x) for x in obj]
+    if not isinstance(obj, dict):
+        return obj
+    out: dict = {}
+    for key, val in obj.items():
+        val = _expand_dotted_keys(val)
+        parts = key.split(".") if isinstance(key, str) else [key]
+        cursor = out
+        for p in parts[:-1]:
+            nxt = cursor.get(p)
+            if nxt is None:
+                nxt = cursor[p] = {}
+            elif not isinstance(nxt, dict):
+                raise ValueError(f"dotted key {key!r} conflicts with a non-mapping value for {p!r}")
+            cursor = nxt
+        leaf = parts[-1]
+        if isinstance(cursor.get(leaf), dict) and isinstance(val, dict):
+            _deep_merge(cursor[leaf], val)
+        elif leaf in cursor:
+            raise ValueError(f"duplicate key {key!r} in config")
+        else:
+            cursor[leaf] = val
+    return out
+
+
 def load_config(config_path: str) -> list[RepoConfig]:
     with open(config_path) as f:
         return parse_config(yaml.safe_load(f))
@@ -226,6 +273,7 @@ def load_config(config_path: str) -> list[RepoConfig]:
 def parse_config(data) -> list[RepoConfig]:
     if not isinstance(data, list):
         raise ValueError("config must be a YAML list of repo entries")
+    data = _expand_dotted_keys(data)
     out: list[RepoConfig] = []
     for i, entry in enumerate(data):
         ctx = f"config entry {i}"

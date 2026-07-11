@@ -282,3 +282,59 @@ class TestSinceVersionFloor:
             type_="tag", match="my-dev-tag", since={"ref": "my-dev-tag"},
         )])])
         assert cfgs[0].selectors[0].since_version_floor() is None
+
+
+class TestDottedKeys:
+    def test_since_ref_dotted(self):
+        cfgs = parse_config([_entry(refs=[{
+            "type": "tag", "match": "v{major}.{minor}.{patch}", "since.ref": "v8.0.0",
+        }])])
+        assert cfgs[0].selectors[0].since == Since("ref", "v8.0.0")
+
+    def test_retain_version_dotted(self):
+        cfgs = parse_config([_entry(refs=[{
+            "type": "tag", "match": "v{major}.{minor}.{patch}",
+            "retain.version.majors": 2, "retain.version.patches": 1,
+        }])])
+        assert cfgs[0].selectors[0].retain.version.counts == {"major": 2, "patch": 1}
+
+    def test_dotted_equivalent_to_nested(self):
+        nested = parse_config([_entry(refs=[_selector(
+            type_="tag", match="v{major}.{minor}.{patch}",
+            since={"ref": "v8.0.0"}, retain={"version": {"majors": 2, "patches": 1}},
+        )])])
+        dotted = parse_config([_entry(refs=[{
+            "type": "tag", "match": "v{major}.{minor}.{patch}",
+            "since.ref": "v8.0.0", "retain.version.majors": 2, "retain.version.patches": 1,
+        }])])
+        assert nested[0].selectors[0] == dotted[0].selectors[0]
+
+    def test_mixed_nested_and_dotted(self):
+        cfgs = parse_config([_entry(refs=[{
+            "type": "tag", "match": "v{major}.{minor}.{patch}",
+            "retain": {"version": {"majors": 2}}, "retain.version.patches": 1,
+        }])])
+        assert cfgs[0].selectors[0].retain.version.counts == {"major": 2, "patch": 1}
+
+    def test_conflicting_since_forms_raises(self):
+        with pytest.raises(ValueError, match="exactly one"):
+            parse_config([_entry(refs=[{
+                "type": "branch", "match": "main",
+                "since": {"age": "1y"}, "since.ref": "main",
+            }])])
+
+    def test_scalar_dotted_conflict_raises(self):
+        with pytest.raises(ValueError, match="conflicts with a non-mapping value"):
+            parse_config([_entry(refs=[{
+                "type": "branch", "match": "main",
+                "since": "not-a-mapping", "since.ref": "main",
+            }])])
+
+    def test_duplicate_dotted_leaf_raises(self):
+        # Nested `since.ref` and dotted `since.ref` both set the same leaf -> reject as a
+        # duplicate rather than silently letting the later one win.
+        with pytest.raises(ValueError, match="duplicate key"):
+            parse_config([_entry(refs=[{
+                "type": "branch", "match": "main",
+                "since": {"ref": "main"}, "since.ref": "other",
+            }])])
