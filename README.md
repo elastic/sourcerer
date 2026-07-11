@@ -104,3 +104,9 @@ no reinstall needed. Because the environment is isolated in `./.venv`, this neve
 with a globally installed `sourcerer` (e.g. from `uv tool install`).
 
 Equivalently, you can invoke the module directly: `uv run python -m sourcerer.cli <command>`.
+
+### Tests
+
+```sh
+uv run pytest tests/
+```
