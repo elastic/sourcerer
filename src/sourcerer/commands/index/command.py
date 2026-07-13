@@ -60,7 +60,7 @@ def index_ref_in_dir(
 ) -> None:
     """
     Index a single ref of one repo into an already-cloned `repo_dir`. Checks out the ref
-    (a full clone holds every branch/tag, so one clone serves any number of refs), then
+    (the clone holds every branch/tag, so one clone serves any number of refs), then
     runs the authoritative SHA guard and indexes, tags, or records the ref. At most one of
     branch/tag/commit should be set; none means the remote's default branch.
     """

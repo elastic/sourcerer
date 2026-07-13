@@ -41,7 +41,7 @@ a `git.commit` lookup uses a prefix match against the resolved full SHA). There'
 index "from" for a single pinned point, so `since` is rejected; likewise `retain.count`,
 `retain.version`, and `retain.prerelease` have no meaning for one commit and are rejected --
 only `retain.age` (or omitting `retain` to keep forever) is allowed. A pinned commit must be
-reachable from some fetched branch or tag (a full clone only contains objects reachable that
+reachable from some fetched branch or tag (the clone only contains commits reachable that
 way) -- one that's been force-pushed away or only exists on an unfetched ref will fail to
 check out, reported as a per-unit error.
 
@@ -163,10 +163,18 @@ nightly) then transfers only the new commits since the last run instead of a ful
 large repo's history. Combined with the cheap pre-clone skip (a repo with no moved refs isn't
 even fetched) and immutable-tag dedup, repeated runs stay fast.
 
+- **Blobless clone**: clones use `git clone --filter=blob:none` — every commit, tree, and ref is
+  present (so any branch/tag/pinned commit stays reachable and checkoutable), but file contents
+  are not downloaded up front. A blob is faulted in from `origin` the first time a commit that
+  needs it is checked out, so disk usage tracks the working set actually indexed, not the repo's
+  full history.
 - **Location** (precedence): `--cache-dir` flag → `SOURCERER_CACHE_DIR` env → `$XDG_CACHE_HOME/sourcerer` → `~/.cache/sourcerer`. Clones live at `<cache>/repos/<org>/<repo>`.
-- **Safe to delete**: the cache is a pure derived artifact (all index state lives in Elasticsearch). Removing it just forces a fresh clone on the next run.
+- **Safe to delete**: the cache is a pure derived artifact (all index state lives in Elasticsearch). Removing it just forces a fresh (blobless) clone on the next run — this is also how a cache directory populated by an older, full-clone version of sourcerer gets converted to blobless: delete it once and let the next run re-create it.
 - **`--ephemeral`**: skip the cache and clone into a throwaway temp dir (good for one-off or CI runs).
 - **Concurrency**: a per-repo advisory lock prevents two overlapping runs from corrupting the same clone; if a repo is already locked by another run, it is skipped for that run.
+- **Garbage collection**: after each fetch, a best-effort `git gc` expires reflogs and prunes
+  objects that are no longer reachable — chiefly blobs faulted in for commits that fell out of a
+  branch's retained window since the last run. A gc failure never fails the index run.
 
 ## Index fields
 

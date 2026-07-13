@@ -64,12 +64,38 @@ def repo_lock(repo_dir: pathlib.Path) -> Iterator[bool]:
 
 
 def _git_clone(url: str, repo_dir: pathlib.Path) -> None:
+    """Blobless partial clone: every commit, tree, and ref is present (so any ref/commit stays
+    reachable and checkoutable), but blobs are not downloaded up front -- git faults them in
+    on demand the first time a commit touching them is checked out."""
     subprocess.run(
-        ["git", "clone", url, str(repo_dir)],
+        ["git", "clone", "--filter=blob:none", url, str(repo_dir)],
         check=True,
         capture_output=True,
         text=True,
     )
+
+
+def _git_gc(repo_dir: pathlib.Path) -> None:
+    """Reclaim disk from blobs faulted in for commits that are no longer reachable (e.g. a
+    branch moved on `fetch --prune`). Reflogs are expired first because checkouts leave HEAD
+    reflog entries that would otherwise keep old commits (and their blobs) alive; the cache is
+    a throwaway derived artifact, so this is safe. Best-effort: a gc failure must not fail the
+    index run."""
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "reflog", "expire", "--expire=now", "--all"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "gc", "--prune=now", "--quiet"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        pass
 
 
 def _is_clone_of(repo_dir: pathlib.Path, url: str) -> bool:
@@ -95,18 +121,20 @@ def clone_repo(
     repo_dir: pathlib.Path | None = None,
     ephemeral: bool = False,
 ) -> Iterator[pathlib.Path]:
-    """Make a repo available on disk and yield its path. A full clone fetches all branches and
-    tags, so the caller can `checkout_ref` any number of refs against this one clone.
+    """Make a repo available on disk and yield its path. A blobless clone fetches all branches
+    and tags (commits, trees, and refs, but not blobs), so the caller can `checkout_ref` any
+    number of refs against this one clone -- blobs fault in on demand as each ref is checked out.
 
-    ephemeral (or no repo_dir): full-clone into a temp dir and delete it on exit -- the original
-    throwaway behaviour, for one-off/CI runs.
+    ephemeral (or no repo_dir): blobless-clone into a temp dir and delete it on exit -- the
+    original throwaway behaviour, for one-off/CI runs.
 
     persistent (repo_dir given, not ephemeral): keep the clone at the stable `repo_dir`. If it is
     already a valid clone of this repo, `git fetch` only the new objects (so a scheduled run
-    transfers a day's commits, not the whole history); otherwise clone fresh. A fetch failure
-    falls back to wipe + re-clone once (recovering a corrupt cache) before giving up. The dir is
-    NOT deleted on exit. HEAD is left wherever the fetch/clone leaves it; callers check out what
-    they need."""
+    transfers a day's commits, not the whole history), then `git gc` to reclaim blobs faulted in
+    for commits that fell out of reachability since the last run; otherwise clone fresh. A fetch
+    failure falls back to wipe + re-clone once (recovering a corrupt cache) before giving up. The
+    dir is NOT deleted on exit. HEAD is left wherever the fetch/clone leaves it; callers check out
+    what they need."""
     url = GITHUB_URL_TEMPLATE.format(org=org, repo=repo)
     if ephemeral or repo_dir is None:
         with tempfile.TemporaryDirectory(prefix="sourcerer-") as tmp:
@@ -123,6 +151,7 @@ def clone_repo(
                 capture_output=True,
                 text=True,
             )
+            _git_gc(repo_dir)
         except subprocess.CalledProcessError:
             # Fetch failed (e.g. a corrupt object store) -- wipe and re-clone once.
             shutil.rmtree(repo_dir, ignore_errors=True)

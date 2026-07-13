@@ -36,7 +36,7 @@ A `commit` selector pins one or more explicit commits rather than matching named
 not support `since` (there is nothing to index "from" -- the selector already names the exact
 point) or the `count`/`version`/`prerelease` retain criteria (they have no meaning for a single
 pinned point); only `retain.age` (or omitting `retain` to keep forever) is allowed. A pinned
-commit must be reachable from some fetched branch or tag -- a full clone only contains objects
+commit must be reachable from some fetched branch or tag -- the clone only contains commits
 reachable that way, so a commit orphaned from all refs (e.g. force-pushed away) will fail to
 check out.
 
