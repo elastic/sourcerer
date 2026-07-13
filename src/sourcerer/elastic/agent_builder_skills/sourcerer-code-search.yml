@@ -81,8 +81,8 @@ content: |-
   ## Reading for citation
   When you read to cite a specific line or range, follow each tool's own citation guidance in its description, and see the `sourcerer-code-citations` skill for the full rules:
   - `code.grep` / `code.search` return one row per line, each with an authoritative `line.number` — cite single lines and never merge separate rows into a range.
-  - `files.cat` / `files.head` / `files.tail` return `line_start` / `line_end` boundary fields (and `cat` a numbered view) — use those to cite a range, and use `code.grep` with `after_line` + `n=1` to confirm a block's closing line.
-  - Never derive a line position by counting lines inside returned content.
+  - `files.cat` / `files.head` / `files.tail` / `files.read_lines` prefix each returned line with its 1-indexed number by default (grep -n style, `<line>:<content>`) — read the number off the first and last lines to cite a range. Pass `show_line_numbers=false` when you want raw, unprefixed text.
+  - Never derive a line position by counting lines inside returned content — read it from the per-line prefix.
 
   ## Parallel calls
   When two searches are independent, issue them in the same turn. For example, grep for a class definition and search for its concept simultaneously, then synthesize the results.

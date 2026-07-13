@@ -1,6 +1,6 @@
 id: sourcerer.files.head
 type: esql
-description: head repo file(s)
+description: head repo file(s); each line is prefixed with its 1-indexed line number (disable with show_line_numbers=false)
 tags: []
 configuration:
   query: |-
@@ -29,9 +29,13 @@ configuration:
     | EVAL _file_segs = MV_COUNT(SPLIT(file.path, "/"))
     | WHERE _fp_is_recursive OR _file_segs == _fp_segs
 
-    // Construct the output for each file based on its lines
-    // Prefix each line with its zero-padded line number so: (a) duplicate lines stay unique; and (b) lexical sort = line order
-    | EVAL pair = CONCAT(RIGHT(CONCAT("0000000000", TO_STRING(line.number)), 10), line.content)
+    // Construct the output for each file based on its lines.
+    // _sortkey: internal 10-digit zero-padded line number so (a) duplicate lines stay unique
+    // and (b) lexical sort == line order. Stripped back off after the STATS/MV_CONCAT below.
+    | EVAL _sortkey = RIGHT(CONCAT("0000000000", TO_STRING(line.number)), 10)
+    // _display: optional visible grep -n style prefix ("<line>:<content>"); survives the strip.
+    | EVAL _display = CASE(?show_line_numbers == true, CONCAT(TO_STRING(line.number), ":", line.content), line.content)
+    | EVAL pair = CONCAT(_sortkey, _display)
 
     // Collapse each file's lines into one ordered, deduped-safe list (the prefix prevents VALUES from dropping repeated lines)
     | STATS pairs = MV_SORT(VALUES(pair))
@@ -40,7 +44,8 @@ configuration:
     // Keep only the first n lines
     | EVAL sliced = MV_SLICE(pairs, 0, ?n - 1)
 
-    // Join lines with newlines, then strip the 10-digit prefix off each line
+    // Join lines with newlines, then strip the 10-digit sort key off each line
+    // (the visible show_line_numbers prefix, if any, is the 11th+ chars and is preserved)
     | EVAL content = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(sliced, "\n")), "\n[0-9]{10}", "\n"), 2)
 
     // Format the response
@@ -71,3 +76,8 @@ configuration:
       description: Number of lines to return
       optional: true
       defaultValue: 10
+    show_line_numbers:
+      type: boolean
+      description: Prefix each returned line with its 1-indexed line number (grep -n style, "<line>:<content>")
+      optional: true
+      defaultValue: true

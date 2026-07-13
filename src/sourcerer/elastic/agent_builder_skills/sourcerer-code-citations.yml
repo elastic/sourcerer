@@ -37,9 +37,9 @@ content: |-
   - Cite where a symbol is *defined*, not merely referenced, imported, or instantiated — unless your point is specifically about that usage site.
   - If a symbol's definition lives outside the indexed repos (e.g. a third-party dependency), cite the nearest resolvable reference (its import or declaration) and note that the definition is external.
   - Line and range citations are only as reliable as the tool output they came from. Follow each sourcerer tool's own description for how to turn its output into an accurate citation:
-    - Tools that return one row per line give an authoritative per-row line number for single-line citations — don't merge separate rows into a range.
-    - Tools that return a reconstructed block give explicit boundary fields — use those to cite a range.
-    - Never derive a line position by counting lines inside returned file content (see Integrity below).
+    - `code.grep` / `code.search` return one row per line, each with an authoritative `line.number` — cite single lines and don't merge separate rows into a range.
+    - The content tools (`files.cat` / `files.head` / `files.tail` / `files.read_lines`) prefix every returned line with its authoritative 1-indexed line number (grep -n style, `<line>:<content>`) unless called with `show_line_numbers=false` — read the number directly off the line you're citing, and off the first and last lines of a block to cite a range.
+    - Never derive a line position by counting lines inside returned file content — read it from the per-line prefix (or a per-row `line.number`) (see Integrity below).
 
   ## URL templates
   - Directory: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.directory}`
@@ -49,7 +49,7 @@ content: |-
 
   ## Integrity
   - Cite only locations you've verified with a tool call and can construct from the templates above. Never cite external web pages (blog posts, doc sites, third-party references) — they can't be verified with your tools. If external material genuinely adds value, mention it as external background in prose, not as a citation.
-  - If you can't confirm where something is defined, say so rather than guessing. Counting or estimating a line position from a block of returned text is not verification.
+  - If you can't confirm where something is defined, say so rather than guessing. Reading a line number off a tool's per-line prefix or per-row `line.number` is verification; counting or estimating a position from unnumbered text is not.
 
   ## Examples
 
