@@ -36,6 +36,7 @@ configuration:
     - sourcerer.files.cat
     - sourcerer.files.head
     - sourcerer.files.ls
+    - sourcerer.files.read_lines
     - sourcerer.files.tail
     - sourcerer.refs.list
   enable_elastic_capabilities: false

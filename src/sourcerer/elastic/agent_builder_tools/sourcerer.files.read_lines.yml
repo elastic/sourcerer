@@ -1,6 +1,6 @@
-id: sourcerer.code.grep
+id: sourcerer.files.read_lines
 type: esql
-description: grep code in repo file(s) with regex
+description: read a range of lines from repo file(s)
 tags: []
 configuration:
   query: |-
@@ -10,7 +10,8 @@ configuration:
         AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit
         AND file.path LIKE ?file_path
-        AND line.content RLIKE ?regex
+        AND line.number >= ?line_number_start
+        AND line.number <= ?line_number_end
 
     // Enforce glob depth for * and ** on file.path.
     // Without this, "src/*/Job.java" would match files at any depth,
@@ -30,10 +31,21 @@ configuration:
     | EVAL _file_segs = MV_COUNT(SPLIT(file.path, "/"))
     | WHERE _fp_is_recursive OR _file_segs == _fp_segs
 
+    // Construct the output for each file based on its lines
+    // Prefix each line with its zero-padded line number so: (a) duplicate lines stay unique; and (b) lexical sort = line order
+    | EVAL pair = CONCAT(RIGHT(CONCAT("0000000000", TO_STRING(line.number)), 10), line.content)
+
+    // Collapse each file's lines into one ordered, deduped-safe list (the prefix prevents VALUES from dropping repeated lines)
+    | STATS pairs = MV_SORT(VALUES(pair))
+        BY git.org, git.repo, git.commit, file.path
+
+    // Join lines with newlines, then strip the 10-digit prefix off each line
+    | EVAL content = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(pairs, "\n")), "\n[0-9]{10}", "\n"), 2)
+
     // Format the response
-    | KEEP git.org, git.repo, git.commit, file.path, line.number, line.content
-    | SORT git.org, git.repo, git.commit, file.path, line.number
-    | LIMIT ?n
+    | KEEP git.org, git.repo, git.commit, file.path, content
+    | SORT git.org, git.repo, git.commit, file.path
+    | LIMIT 1000000
   params:
     git_org:
       type: string
@@ -52,15 +64,13 @@ configuration:
       defaultValue: "*"
     file_path:
       type: string
-      description: File path(s) to grep (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)
-      optional: true
-      defaultValue: "**"
-    regex:
-      type: string
-      description: Regex to grep. Must wrap with greedy wildcards to match substrings (e.g. .*public static void main.*). Keep patterns simple to avoid errors. Avoid repetition of alternation groups like (a|b){13} or (a|b)*, and avoid long runs of ? wildcards. These cause exponential automaton determinization blowup. Prefer one call per keyword over complex alternations.
+      description: File path(s) to read (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)
       optional: false
-    n:
+    line_number_start:
       type: integer
-      description: Number of search results
-      optional: true
-      defaultValue: 100
+      description: First line to return (1-indexed, inclusive)
+      optional: false
+    line_number_end:
+      type: integer
+      description: Last line to return (1-indexed, inclusive)
+      optional: false

@@ -12,16 +12,23 @@ configuration:
         AND file.path LIKE ?file_path
         AND MATCH(line.content.text, ?q)
 
-    // Flag whether the file path pattern is recursive (e.g. "src/**/*.java")
-    | EVAL fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")
-
-    // Count the segments in the pattern and in the indexed file.path.
-    // For non-recursive patterns, depth must match exactly — this is what
-    // confines a "*" to a single segment (if depths differ, a "*" must
-    // have crossed a "/" to match, which we don't want).
-    | EVAL fp_num_input_segments = LENGTH(?file_path) - LENGTH(REPLACE(?file_path, "/", "")) + 1
-    | EVAL fp_num_segments = MV_COUNT(SPLIT(file.path, "/"))
-    | WHERE fp_is_recursive OR fp_num_segments == fp_num_input_segments
+    // Enforce glob depth for * and ** on file.path.
+    // Without this, "src/*/Job.java" would match files at any depth,
+    // not just three path segments, because a wildcard * in ES|QL
+    // treats "/" as a regular character.
+    // 
+    //   _fp_is_recursive  Does the pattern contain "**"?
+    //   _fp_segs          How many segments does the pattern have? ("src/*/Job.java" = 3)
+    //   _file_segs        How many segments does this indexed file.path have?
+    //   
+    // WHERE _fp_is_recursive OR _file_segs == _fp_segs keeps the file if the
+    // pattern is recursive (** means any depth is intended) or if the file
+    // depth exactly matches the pattern depth (equal depths mean a * could only
+    // have matched within a single segment).
+    | EVAL _fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")
+    | EVAL _fp_segs = LENGTH(?file_path) - LENGTH(REPLACE(?file_path, "/", "")) + 1
+    | EVAL _file_segs = MV_COUNT(SPLIT(file.path, "/"))
+    | WHERE _fp_is_recursive OR _file_segs == _fp_segs
 
     // Format the response
     | SORT _score DESC

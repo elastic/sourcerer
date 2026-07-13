@@ -10,68 +10,65 @@ configuration:
         AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit
 
-    // Normalize the input file_path by stripping any trailing slash
-    // (e.g. "src/" and "src" are equivalent)
+    // Enforce glob depth for * and ** on file.path.
+    // Without this, "src/*/Job.java" would match files at any depth,
+    // not just three path segments, because a wildcard * in ES|QL
+    // treats "/" as a regular character.
+    // 
+    // ls uses a prefix approach for non-recursive patterns: truncate file.path
+    // to the pattern's depth, then match the prefix against the pattern.
+    // This confines * to one segment and enables directory listing.
+    // Files deeper than the pattern are matched by prefix and later collapsed
+    // to their immediate child name. For recursive patterns (**),
+    // match file.path directly.
+    //
+    //   fp                  Input pattern with any trailing "/" stripped
+    //   is_recursive        Does the pattern contain "**"?
+    //   num_input_segments  How many segments does the pattern have? ("src/*/Job.java" = 3)
+    //   segments            Indexed file.path split into parts
+    //   num_segments        How many segments does this indexed file.path have?
+    //   prefix              Indexed file.path truncated to num_input_segments depth
+    //
+    // WHERE keeps the file if the pattern is recursive (any depth intended, match
+    // file.path directly) or if the file is at or below the pattern depth and its
+    // truncated prefix matches (prefix match confines * to a single segment; >= allows
+    // files at the pattern's own depth too, e.g. "src/*.xml" matching a file directly).
     | EVAL fp = CASE(ENDS_WITH(?file_path, "/"), LEFT(?file_path, LENGTH(?file_path) - 1), ?file_path)
-
-    // Flag whether the input pattern is recursive (e.g. "src/**")
     | EVAL is_recursive = fp != REPLACE(fp, "[*][*]", "")
-    
-    // Count the segments in the input pattern. Examples:
-    //   "src"                      = 1
-    //   "src/test/resources"       = 3
-    //   "src/test/resources/*.xml" = 4
     | EVAL num_input_segments = LENGTH(fp) - LENGTH(REPLACE(fp, "/", "")) + 1
-
-    // Split the indexed file.path into segments. Example:
-    //   "src/test/resources/log4j.xml" = [ "src", "test", "resources", "log4j.xml" ]
     | EVAL segments = SPLIT(file.path, "/")
-
-    // Count the segments of the indexed file.path. Example:
-    //   [ "src", "test", "resources", "log4j.xml" ] = 4
     | EVAL num_segments = MV_COUNT(segments)
-
-    // Truncate the indexed file.path to the input pattern's depth,
-    // so we compare like-for-like. This is also what confines a "*" to a
-    // single segment: prefix holds exactly num_input_segments parts,
-    // so there's no extra "/" for a wildcard to span. Example:
-    //   "src/test/resources/log4j.xml" = "src/test/resources"
     | EVAL prefix = MV_CONCAT(MV_SLICE(segments, 0, num_input_segments - 1), "/")
-    
-    // Keep files at or below the input pattern's depth whose prefix matches the
-    // pattern. ">=" (not ">") lets the pattern match a file at its own depth,
-    // e.g. "src/test/resources/*.xml" matching log4j.xml directly.
-    | WHERE num_segments >= num_input_segments
-      AND CASE(ENDS_WITH(?file_path, "/"), CONCAT(prefix, "/"), prefix) LIKE ?file_path
-    
-    // Decide what to emit for each matched file:
-    // If recursive ("**"), emit the full descendant path.
-    // If file sits at pattern dept, emit the matched file's path (a file glob hit).
-    // If file sits below, emit the single child directly under the target level.
+    | WHERE (
+        is_recursive AND file.path LIKE ?file_path
+      ) OR (
+        NOT is_recursive
+        AND num_segments >= num_input_segments
+        AND CASE(ENDS_WITH(?file_path, "/"), CONCAT(prefix, "/"), prefix) LIKE ?file_path
+      )
+
+    // Emit the full path (recursive), the file's own path (at pattern depth), or
+    // the immediate child path (deeper files) for directory-listing semantics.
     | EVAL name = CASE(
       is_recursive, file.path,
       num_segments == num_input_segments, file.path,
-      MV_CONCAT(MV_SLICE(segments, 0, num_input_segments), "/") // absolute path of the immediate child
+      MV_CONCAT(MV_SLICE(segments, 0, num_input_segments), "/")
     )
-    
-    // Flag whether each emitted name is a directory. A one-level-down child is
-    // a directory only if the file lives deeper still (num_segments > depth + 1).
-    // Recursive paths and direct file-glob hits are always files.
+
+    // A name is a directory only if the file lives more than one level below the pattern.
     | EVAL is_dir = CASE(
       is_recursive, false,
       num_segments == num_input_segments, false,
       num_segments > num_input_segments + 1
     )
-    
-    // Collapse to one row per entry (e.g. many files under "main/" become
-    // a single "main/" row, with counts). This is what turns raw paths into
-    // an ls listing.
+
+    // Collapse to one row per unique entry — this turns raw paths into an ls listing.
     | STATS files = COUNT(*), bytes = SUM(file.size) BY name, is_dir
 
     // Append a trailing "/" to directory entries so they read like ls output.
     | EVAL name = CASE(is_dir, CONCAT(name, "/"), name)
 
-    // Format response
+    // Format the response
     | SORT is_dir DESC, name
     | KEEP name
     | LIMIT 1000000
