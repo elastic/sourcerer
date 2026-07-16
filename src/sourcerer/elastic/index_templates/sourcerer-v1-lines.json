@@ -12,7 +12,8 @@
         "mapping": {
           "source": {
             "mode": "synthetic"
-          }
+          },
+          "synthetic_source_keep": "arrays"
         },
         "sort": {
           "field": [
@@ -102,6 +103,19 @@
               "type": "keyword"
             },
             "extension": {
+              "type": "keyword",
+              "normalizer": "lowercase"
+            },
+            "size": {
+              "type": "long"
+            },
+            "target_path": {
+              "type": "keyword"
+            },
+            "target_size": {
+              "type": "long"
+            },
+            "attributes": {
               "type": "keyword",
               "normalizer": "lowercase"
             }

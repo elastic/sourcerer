@@ -48,7 +48,7 @@ configuration:
     | EVAL content = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(pairs, "\n")), "\n[0-9]{10}", "\n"), 2)
 
     // Format the response
-    | KEEP git.org, git.repo, git.commit, file.path, content
+    | KEEP git.org, git.repo, git.commit, file.path, file.size, content
     | SORT git.org, git.repo, git.commit, file.path
     | LIMIT 1000000
   params:

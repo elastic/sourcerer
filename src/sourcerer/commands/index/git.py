@@ -276,6 +276,42 @@ def resolve_commit(repo_dir: pathlib.Path) -> str:
     return result.stdout.strip()
 
 
+def get_symlink_paths(repo_dir: pathlib.Path) -> frozenset[str]:
+    """Return the set of repo-relative paths that git tracks as symlinks (mode 120000).
+    Works regardless of core.symlinks -- when git checks out symlinks as plain text files
+    (core.symlinks=false), path.is_symlink() returns False, but this identifies them via
+    the git object mode."""
+    proc = subprocess.Popen(
+        ["git", "-C", str(repo_dir), "ls-files", "--stage", "-z"],
+        stdout=subprocess.PIPE,
+    )
+    symlinks: set[str] = set()
+    try:
+        buf = b""
+        while True:
+            chunk = proc.stdout.read(65536)
+            if not chunk:
+                break
+            buf += chunk
+            *complete, buf = buf.split(b"\0")
+            for entry in complete:
+                if entry:
+                    text = entry.decode("utf-8", errors="surrogateescape")
+                    if text.startswith("120000 "):
+                        symlinks.add(text.split("\t", 1)[1])
+        if buf:
+            text = buf.decode("utf-8", errors="surrogateescape")
+            if text.startswith("120000 "):
+                symlinks.add(text.split("\t", 1)[1])
+        proc.wait()
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, "git ls-files --stage")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    return frozenset(symlinks)
+
+
 def iter_tracked_files(repo_dir: pathlib.Path) -> Iterator[str]:
     proc = subprocess.Popen(
         ["git", "-C", str(repo_dir), "ls-files", "-z"],

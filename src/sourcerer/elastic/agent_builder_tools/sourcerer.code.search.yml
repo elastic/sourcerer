@@ -32,7 +32,7 @@ configuration:
 
     // Format the response
     | SORT _score DESC
-    | KEEP git.org, git.repo, git.commit, file.path, line.number, line.content
+    | KEEP git.org, git.repo, git.commit, file.path, file.size, line.number, line.content
     | LIMIT ?n
   params:
     git_org:

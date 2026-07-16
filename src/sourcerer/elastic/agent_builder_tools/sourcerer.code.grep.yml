@@ -31,7 +31,7 @@ configuration:
     | WHERE _fp_is_recursive OR _file_segs == _fp_segs
 
     // Format the response
-    | KEEP git.org, git.repo, git.commit, file.path, line.number, line.content
+    | KEEP git.org, git.repo, git.commit, file.path, file.size, line.number, line.content
     | SORT git.org, git.repo, git.commit, file.path, line.number
     | LIMIT ?n
   params:
