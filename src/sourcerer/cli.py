@@ -3,6 +3,7 @@ import click
 from dotenv import find_dotenv, load_dotenv
 
 # App packages
+from .commands.benchmark import command as benchmark_cmd
 from .commands.index import command as index_cmd
 from .commands.prune import command as prune_cmd
 from .commands.setup import command as setup_cmd
@@ -169,6 +170,94 @@ def prune(config_path, dry_run, quiet, url, api_key, username, password):
     markers whose content is entirely gone. Use --dry-run to preview both passes first.
     """
     prune_cmd.run(config_path, url, api_key, username, password, dry_run, quiet)
+
+
+@cli.group()
+def benchmark():
+    """Fetch, index, and run code-exploration benchmarks (e.g. swe_explore_bench)."""
+
+
+@benchmark.command(name="list")
+def benchmark_list():
+    """List the benchmarks available to get."""
+    for name in benchmark_cmd.available():
+        click.echo(name)
+
+
+@benchmark.command(name="get")
+@click.argument("benchmark_name")
+@env_option
+def benchmark_get(benchmark_name):
+    """Download and build BENCHMARK_NAME's dataset into ./benchmarks/<name>/."""
+    benchmark_cmd.get(benchmark_name)
+
+
+@benchmark.command(name="index")
+@click.argument("benchmark_name")
+@click.option("-f", "--force", is_flag=True, default=False, help="Re-index even if already indexed.")
+@click.option("-q", "--quiet", is_flag=True, default=False, help="Suppress progress output (for programmatic use).")
+@click.option(
+    "--cache-dir",
+    envvar="SOURCERER_CACHE_DIR",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Directory for persistent repo clones (default: ~/.cache/sourcerer). "
+    "Reused and `git fetch`ed on later runs instead of re-cloning.",
+)
+@click.option(
+    "--ephemeral",
+    is_flag=True,
+    default=False,
+    help="Clone into a throwaway temp dir and delete it afterwards, instead of using the cache.",
+)
+@click.option(
+    "--prune",
+    is_flag=True,
+    default=False,
+    help="After all indexing completes, prune indexed refs that fall outside the benchmark "
+    "config's retention policies (equivalent to `sourcerer prune --config` afterwards).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Preview what would be indexed (and, with --prune, what would be pruned afterwards) "
+    "without writing to Elasticsearch.",
+)
+@env_option
+@auth_options
+def benchmark_index(benchmark_name, force, quiet, cache_dir, ephemeral, prune, dry_run, url, api_key, username, password):
+    """Index BENCHMARK_NAME's commits into Elasticsearch using its packaged repos.yml.
+
+    Runs the equivalent of `sourcerer index --config <benchmark>/repos.yml`; the config
+    path is fixed per benchmark, so REPO_SPEC / -b / -t / -c / --config are not accepted.
+    """
+    benchmark_cmd.index(
+        benchmark_name, url, api_key, username, password,
+        force, quiet, cache_dir, ephemeral, prune, dry_run,
+    )
+
+
+@benchmark.command(name="run")
+@click.argument("benchmark_name")
+@click.option("-k", "--top-k", "top_k", default="5", help="Comma-separated top_k values, e.g. 5,10,20.")
+@click.option("-j", "--concurrency", default=1, type=int, help="Instances to explore in parallel (default 1 = sequential).")
+@click.option("--connector-id", default=None, help="Agent Builder connector_id selecting the LLM (default: deployment default).")
+@click.option("--resume", is_flag=True, default=False, help="Skip instances already completed in the output files.")
+@env_option
+def benchmark_run(benchmark_name, top_k, concurrency, connector_id, resume):
+    """Run BENCHMARK_NAME's eval, writing results under ./benchmarks/<name>/results/.
+
+    Lazily downloads and builds the dataset first if it isn't present. Reads
+    KIBANA_URL and ELASTICSEARCH_API_KEY from the environment (load them with -e/--env).
+    """
+    benchmark_cmd.run(
+        benchmark_name,
+        top_k=top_k,
+        concurrency=concurrency,
+        connector_id=connector_id,
+        resume=resume,
+    )
 
 
 if __name__ == "__main__":

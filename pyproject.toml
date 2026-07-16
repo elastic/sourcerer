@@ -14,6 +14,7 @@ dependencies = [
     "pyyaml==6.0.2",
     "requests==2.34.2",
     "rich==13.9.4",
+    "typer==0.12.5",
 ]
 
 [project.optional-dependencies]
@@ -39,4 +40,5 @@ sourcerer = [
     "elastic/agent_builder_agents/*.yaml",
     "elastic/agent_builder_skills/*.yml",
     "elastic/agent_builder_skills/*.yaml",
+    "benchmarks/*/repos.yml",
 ]

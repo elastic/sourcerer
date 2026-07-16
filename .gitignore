@@ -3,6 +3,7 @@ __pycache__/
 *.egg-info/
 
 # Build artifacts
+benchmarks/
 build/
 dist/
 vendor/

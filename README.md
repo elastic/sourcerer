@@ -86,6 +86,58 @@ trained to use terminal commands, and [grep has worked exceptionally well](https
 over multiple code repositories indexed in Elasticsearch for greater speed,
 scale, relevance, security, collaboration, and customization.
 
+## Benchmarks
+
+Sourcerer includes a benchmark harness that measure how well the agent locates the right
+source code for a task. The current benchmark, `swe_explore_bench`
+([SWE-Explore-Bench](https://github.com/Qiushao-E/SWE-Explore-Bench)), scores
+whether, given an issue, the agent cites the correct file regions.
+
+List what's available:
+
+```sh
+sourcerer benchmark list
+```
+
+Run a benchmark in three steps (from a directory with a `.env`, as in the
+Quickstart):
+
+1. Download and build the dataset into `./benchmarks/<name>/` (needs `git`, `uv`,
+   and network access to GitHub + HuggingFace):
+   ```sh
+   sourcerer benchmark get swe_explore_bench
+   ```
+2. Index the benchmark's base commits into Elasticsearch (uses the benchmark's
+   packaged `repos.yml`):
+   ```sh
+   sourcerer benchmark index swe_explore_bench
+   ```
+3. Run the eval against the Sourcerer agent (needs `KIBANA_URL` and
+   `ELASTICSEARCH_API_KEY`):
+   ```sh
+   sourcerer benchmark run swe_explore_bench
+   ```
+
+Useful `run` options: `-k/--top-k` (comma-separated cutoffs, e.g. `-k 5,10,20`;
+default `5`), `-j/--concurrency` (instances explored in parallel; default `1`),
+`--connector-id` (pick the Agent Builder LLM connector), and `--resume` (skip
+instances already completed). `run` will download the dataset automatically if
+step 1 was skipped.
+
+### Results and traces
+
+Each run writes to a timestamped directory:
+
+```
+./benchmarks/<name>/results/sourcerer-<YYYYMMDDHHMMSS>/
+├── top5.jsonl      # one file per --top-k value: per-instance regions + metrics
+└── traces.jsonl    # full request/response trace for every instance
+```
+
+Aggregate metric averages for each `top_k` also print to the console when the run
+finishes.
+
+
 ## Development
 
 To run the CLI from a local checkout without installing it globally, use `uv run` from
