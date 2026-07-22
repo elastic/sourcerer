@@ -76,3 +76,19 @@
     - cfefb3b2378ccbadefa7  # full 40-char SHA also accepted
     retain:
       age: 2y                # keep while within this age, prune older (or omit -> keep forever)
+
+# Example (Customer Zero): keep a fast-moving branch refreshed with the isolated v2 incremental
+# path. `update: incremental` maintains ONE mutable branch view in the sourcerer-v2-* indices:
+# the first run rebuilds the branch, and each later run diffs the last completed commit against
+# the new tip and touches only the changed paths (typically 10-20 files) instead of
+# re-snapshotting the whole repo. There is no per-commit history, so it cannot be combined with
+# `since` or `retain`. During an update the branch stays queryable and may briefly return a
+# mixed revision until it reaches status ready. Requires an ES|QL version with index.mode:
+# lookup and LOOKUP JOIN. A given branch may be indexed in snapshot OR incremental mode, never
+# both, so this uses a dedicated repo entry rather than doubling up main above.
+- org: acme
+  repo: customer-zero
+  refs:
+  - type: branch
+    match: main
+    update: incremental

@@ -111,6 +111,7 @@ class Selector:
     since: Since | None
     retain: Retain | None
     levels: tuple[str, ...] = ()   # numeric levels shared by the versioned match patterns
+    update_mode: str = "snapshot"  # "snapshot" (v1 default) | "incremental" (v2 branch path)
 
     def matches(self, ref_type: str, ref: str) -> Version | None:
         if self.ref_type != ref_type:
@@ -232,10 +233,25 @@ def _parse_commit_match(raw: dict, ctx: str) -> list[str]:
 def _parse_selector(raw: dict, ctx: str) -> Selector:
     if raw.get("type") not in ("branch", "tag", "commit"):
         raise ValueError(f"{ctx}: 'type' must be 'branch', 'tag', or 'commit'")
-    unknown = set(raw) - {"type", "match", "since", "retain"}
+    unknown = set(raw) - {"type", "match", "since", "retain", "update"}
     if unknown:
         raise ValueError(f"{ctx}: unknown keys {sorted(unknown)}")
     ref_type = raw["type"]
+
+    # `update` opts a branch selector into the isolated v2 incremental path; omitted or an
+    # explicit `snapshot` keeps the default v1 behaviour. Incremental is branch-only and cannot
+    # be combined with `since` or `retain`: it maintains a single mutable branch view with no
+    # history for retention to trim and no inclusion floor to apply.
+    update_mode = raw.get("update", "snapshot")
+    if update_mode not in ("snapshot", "incremental"):
+        raise ValueError(f"{ctx}: 'update' must be 'snapshot' or 'incremental' (got {update_mode!r})")
+    if update_mode == "incremental":
+        if ref_type != "branch":
+            raise ValueError(f"{ctx}: 'update: incremental' is only valid for 'type: branch'")
+        if raw.get("since") is not None:
+            raise ValueError(f"{ctx}: 'update: incremental' cannot be combined with 'since'")
+        if raw.get("retain") is not None:
+            raise ValueError(f"{ctx}: 'update: incremental' cannot be combined with 'retain'")
 
     if ref_type == "commit":
         # A pinned commit has no enumerable name to pattern-match against (see selection.py),
@@ -276,7 +292,7 @@ def _parse_selector(raw: dict, ctx: str) -> Selector:
             retain = None
 
     return Selector(ref_type=ref_type, raw_patterns=patterns, compiled=compiled,
-                    since=since, retain=retain, levels=levels)
+                    since=since, retain=retain, levels=levels, update_mode=update_mode)
 
 
 def _deep_merge(dst: dict, src: dict) -> None:

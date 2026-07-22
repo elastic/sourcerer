@@ -42,6 +42,12 @@ content: |-
     - Never derive a line position by counting lines inside returned file content (see Integrity below).
 
   ## URL templates
+  Every content tool returns a `git.commit` to build these URLs. For a snapshot ref it is the
+  pinned commit; for an incremental branch it is the branch's last COMPLETED commit, attached
+  automatically via the refs lookup join (you query the branch by `git_ref_key`, and still cite
+  by the returned `git.commit`). While an incremental branch is `status: indexing`, that commit
+  remains the last completed pointer, so citations stay valid even though the live view may
+  briefly show a mixed revision.
   - Directory: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.directory}`
   - File: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}`
   - Single line: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number}`

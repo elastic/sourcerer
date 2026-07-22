@@ -32,6 +32,7 @@ config is a YAML list, one entry per repo. See `repos.example.yml`.
 | `match` | yes | For `branch`/`tag`: pattern string or list of patterns matched against ref names (version DSL + glob) — a ref matches if any pattern hits. For `commit`: a commit SHA/prefix string or list of them (see below). |
 | `since` | no | Index-side inclusion floor: the earliest commit to start indexing from. See below. Not valid for `type: commit`. |
 | `retain` | no | Retention policy (see below). Omit to keep forever. For `type: commit`, only `age` is valid. |
+| `update` | no | `snapshot` (default) or `incremental`. `incremental` opts a `type: branch` selector into the isolated v2 incremental path (see below); it cannot be combined with `since` or `retain`. |
 
 #### `type: commit` (pinning an explicit commit)
 
@@ -154,6 +155,77 @@ Duration format (for `age`/`since.age`): `<n><unit>` where unit is `s` (seconds)
 ```
 
 Indexing is idempotent — re-running only indexes refs that are new or have moved.
+
+### Incremental branch indexing (`update: incremental`)
+
+By default a branch selector is a **snapshot** selector: each new commit produces a complete,
+immutable, commit-addressed file/line snapshot in the `sourcerer-v1-*` indices. That keeps
+coherent history, but the indexing cost scales with the whole repository on every move.
+
+`update: incremental` opts a `type: branch` selector into an isolated **v2** evaluation path
+for moving branches that need frequent, cheap refreshes:
+
+```yaml
+- org: elastic
+  repo: elasticsearch
+  refs:
+  - type: branch
+    match: main
+    update: incremental      # v2 incremental path; cannot combine with since/retain
+```
+
+How it behaves:
+
+- **Isolated schema.** Incremental content lives in `sourcerer-v2-files~<org>~<repo>` and
+  `sourcerer-v2-lines~<org>~<repo>`, with one mutable lookup document per branch in
+  `sourcerer-v2-refs`. The `sourcerer-v1-*` snapshot indices are never touched. Content is
+  **ref-addressed** (`git.ref_key` / `git.ref`), not commit-addressed — no commit SHA in the
+  document id — so a branch keeps exactly one live view.
+- **First run rebuilds.** The initial incremental run (or any run where the previous completed
+  commit is no longer available locally, e.g. after a force-push) rebuilds the whole branch
+  namespace into v2. It never migrates existing v1 data.
+- **Changed-file updates.** Subsequent runs diff the last completed commit against the new
+  remote tip and touch only the changed paths: deleted/modified/rename-source paths have their
+  prior file and line docs deleted, then added/modified/rename-destination files are re-indexed.
+  For a Customer Zero profile that changes roughly **10–20 files** per update, the work is
+  proportional to those paths, not the whole repo.
+- **No branch history.** Only the current view is retained — there are no per-commit snapshots
+  for an incremental branch, which is why `retain` (nothing to trim) and `since` (no inclusion
+  floor) are rejected at config parse time.
+- **Temporary mixed revisions.** Elasticsearch is eventually consistent during an update by
+  explicit design. While an update runs, the branch's `sourcerer-v2-refs` document reports
+  `status: indexing`, `git.commit` stays at the last completed commit, and `git.target_commit`
+  advertises the candidate. Queries stay available throughout and may briefly return a **mixed
+  revision**; the completed `git.commit` used for citations only advances to `status: ready`
+  after all deletes + indexing + a content refresh succeed.
+- **Retry / fallback.** A failed update leaves `status: indexing` with the old completed commit
+  intact plus a bounded `error`/`failed_at`; the next run retries old→current and clears those
+  on success. A missing diff base falls back to a full branch rebuild rather than trusting an
+  empty diff.
+- **Agents query by ref key.** `sourcerer.refs.list` returns each ref's `update_mode`. For an
+  incremental branch, pass its exact `git_ref_key` (not `git_commit`) to the code/file tools;
+  they attach the completed commit via a `LOOKUP JOIN` on `sourcerer-v2-refs` for citations.
+
+> Requires an Elasticsearch/ES|QL version that supports `index.mode: lookup` and `LOOKUP JOIN`.
+
+#### Local evaluation
+
+A repeatable way to measure the incremental win against a real cluster:
+
+1. `sourcerer setup` — loads the v1 and v2 index templates (idempotent; leaves v1 data alone).
+2. Index a branch once in incremental mode:
+   `sourcerer index --config repos.yml` with an `update: incremental` branch selector. This is
+   the full first-run rebuild — note the reported processed-file count and duration.
+3. Push a commit to that branch changing 10–20 files (add/modify/delete/rename).
+4. Re-run `sourcerer index --config repos.yml`. Compare the reported processed-file count and
+   duration to the first run — only the changed paths should be processed.
+5. Verify with the tools: `sourcerer.refs.list` shows one v2 refs doc for the branch with
+   `update_mode: incremental`, `status`, and the completed commit; query the changed content
+   with a code/file tool using the branch's `git_ref_key`, and confirm deleted/renamed paths
+   return nothing.
+
+Schedule incremental runs (e.g. via cron) at an interval comfortably longer than a single
+update's duration, so consecutive runs never overlap on the same branch.
 
 ### Clone cache
 

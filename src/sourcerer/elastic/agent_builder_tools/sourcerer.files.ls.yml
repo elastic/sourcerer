@@ -4,11 +4,20 @@ description: ls files and directories under a given path or glob pattern in a re
 tags: []
 configuration:
   query: |-
-    // Scope the search
-    FROM sourcerer-v1-files*
-    | WHERE MATCH(git.org, ?git_org)
-        AND git.repo LIKE ?git_repo
-        AND git.commit LIKE ?git_commit
+    // Scope to EXACTLY ONE schema: v1 snapshot by git.commit when no git_ref_key is supplied,
+    // or v2 incremental by exact git.ref_key when it is. The branches are mutually exclusive,
+    // so an unscoped call never lists a mix of snapshot and incremental content.
+    FROM sourcerer-v1-files*, sourcerer-v2-files* METADATA _index
+    | WHERE (?git_ref_key == "" AND _index LIKE "sourcerer-v1-files*"
+                AND git.org LIKE ?git_org AND git.repo LIKE ?git_repo AND git.commit LIKE ?git_commit)
+         OR (?git_ref_key != "" AND _index LIKE "sourcerer-v2-files*"
+                AND git.ref_key == ?git_ref_key)
+
+    // Attach the completed commit for v2 rows via the refs lookup join on exact git.ref_key
+    // (kept for parity with the other content tools; ls emits only names).
+    | EVAL _org = git.org, _repo = git.repo, _commit = git.commit
+    | LOOKUP JOIN sourcerer-v2-refs ON git.ref_key
+    | EVAL git.org = _org, git.repo = _repo, git.commit = COALESCE(git.commit, _commit)
 
     // Normalize the input file_path by stripping any trailing slash
     // (e.g. "src/" and "src" are equivalent)
@@ -88,9 +97,14 @@ configuration:
       defaultValue: "*"
     git_commit:
       type: string
-      description: Filter by git commit(s) (supports * wildcards)
+      description: Filter by git commit(s) for v1 snapshot refs (supports * wildcards). Ignored when git_ref_key is set.
       optional: true
       defaultValue: "*"
+    git_ref_key:
+      type: string
+      description: Exact ref key of a v2 incremental branch (from sourcerer.refs.list). When set, ls targets that branch's incremental content instead of snapshot content; leave empty for snapshot (git_commit) queries.
+      optional: true
+      defaultValue: ""
     file_path:
       type: string
       description: File path to ls (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)

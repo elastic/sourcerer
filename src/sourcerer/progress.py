@@ -47,6 +47,7 @@ class Unit:
     repo: str
     ref: str | None
     kind: str
+    update_mode: str = "snapshot"  # "snapshot" (v1) | "incremental" (v2 branch path)
     stage: str = "pending"  # pending|resolving|cloning|checkout|indexing|done
     total_files: int | None = None
     files: int = 0

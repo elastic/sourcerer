@@ -1,0 +1,77 @@
+{
+  "_meta": {
+    "description": "sourcerer-v2-files"
+  },
+  "index_patterns": [
+    "sourcerer-v2-files*"
+  ],
+  "template": {
+    "settings": {
+      "index": {
+        "codec": "best_compression",
+        "mapping": {
+          "source": {
+            "mode": "synthetic"
+          }
+        },
+        "sort": {
+          "field": [
+            "git.ref_key",
+            "file.path"
+          ],
+          "order": [
+            "asc",
+            "asc"
+          ]
+        }
+      }
+    },
+    "mappings": {
+      "properties": {
+        "git": {
+          "properties": {
+            "org": {
+              "type": "keyword"
+            },
+            "repo": {
+              "type": "keyword"
+            },
+            "ref_key": {
+              "type": "keyword"
+            },
+            "ref": {
+              "type": "keyword"
+            },
+            "ref_type": {
+              "type": "keyword"
+            }
+          }
+        },
+        "file": {
+          "properties": {
+            "path": {
+              "type": "keyword"
+            },
+            "directory": {
+              "type": "keyword"
+            },
+            "name": {
+              "type": "keyword"
+            },
+            "extension": {
+              "type": "keyword",
+              "normalizer": "lowercase"
+            },
+            "size": {
+              "type": "long"
+            },
+            "attributes": {
+              "type": "keyword",
+              "normalizer": "lowercase"
+            }
+          }
+        }
+      }
+    }
+  }
+}

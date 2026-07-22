@@ -25,19 +25,36 @@ def _resolve_entry(cfg: RepoConfig) -> list[Unit]:
     ls-remote failures (after retries) are reported to stderr; that ref type contributes
     no units so the run continues with the repos that did resolve."""
     fetched: dict[str, list[str] | None] = {}  # kind -> names (None = ls-remote failed)
-    seen: set[tuple[str, str]] = set()
+    # (kind, name) -> the update_mode it was first selected in. Overlap is judged on concrete
+    # resolved names (INV-010): a same-mode repeat dedupes to the existing Unit, while the same
+    # branch selected once as snapshot and once as incremental is a config error -- one branch
+    # cannot live in both schemas at once.
+    seen: dict[tuple[str, str], str] = {}
     units: list[Unit] = []
+
+    def _select(rt: str, name: str, mode: str) -> None:
+        key = (rt, name)
+        prior = seen.get(key)
+        if prior is not None:
+            if prior != mode:
+                raise ValueError(
+                    f"{cfg.org}/{cfg.repo}: {rt} {name!r} is selected in both "
+                    f"'update: snapshot' and 'update: incremental' modes; a branch cannot be "
+                    f"indexed under both the v1 snapshot and v2 incremental schemas at once"
+                )
+            return  # same-mode overlap: dedupe to the already-appended Unit
+        seen[key] = mode
+        units.append(Unit(org=cfg.org, repo=cfg.repo, ref=name, kind=rt, update_mode=mode))
+
     for sel in cfg.selectors:
         rt = sel.ref_type
         if rt == "commit":
             # Pinned commits aren't enumerable via ls-remote (there's no remote listing of
             # commits) -- `match` already holds the literal SHA/prefix strings to index, one
             # Unit per pattern. checkout_ref resolves the (possibly short) SHA at clone time.
+            # Commits are always snapshot (incremental is branch-only, enforced at parse time).
             for prefix in sel.raw_patterns:
-                if (rt, prefix) in seen:
-                    continue
-                seen.add((rt, prefix))
-                units.append(Unit(org=cfg.org, repo=cfg.repo, ref=prefix, kind=rt))
+                _select(rt, prefix, sel.update_mode)
             continue
         if rt not in fetched:
             fetched[rt] = list_remote_ref_names(
@@ -48,15 +65,12 @@ def _resolve_entry(cfg: RepoConfig) -> list[Unit]:
             continue  # ls-remote failed for this ref type, skip
         floor = sel.since_version_floor()  # version-based `since: {ref}`, name-only
         for name in names:
-            if (rt, name) in seen:
-                continue
             v = sel.matches(rt, name)
             if v is None:
                 continue
             if floor is not None and v.components < floor:
                 continue  # below the since version floor
-            seen.add((rt, name))
-            units.append(Unit(org=cfg.org, repo=cfg.repo, ref=name, kind=rt))
+            _select(rt, name, sel.update_mode)
 
     failed_kinds = sorted(k for k, v in fetched.items() if v is None)
     if failed_kinds:

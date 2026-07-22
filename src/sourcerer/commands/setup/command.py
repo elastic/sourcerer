@@ -10,9 +10,32 @@ import requests
 import yaml
 
 # App packages
-from ...utils import make_client
+from ...indices import (
+    FILES_INDEX_PREFIX,
+    FILES_INDEX_PREFIX_V2,
+    LINES_INDEX_PREFIX,
+    LINES_INDEX_PREFIX_V2,
+    REFS_INDEX_V2,
+)
+from ...utils import ES_ERRORS, make_client
 
 _ELASTIC = resources.files("sourcerer") / "elastic"
+
+# Indices the Agent Builder ES|QL tools need to exist for their column references to resolve
+# on ANY cluster, regardless of which schema has data yet:
+#   - REFS_INDEX_V2 is the LOOKUP JOIN target; the join errors if the index is absent.
+#   - The four prefix-named "schema anchor" indices are empty and exist only so ES|QL can
+#     always resolve git.commit (v1-only field) and git.ref_key (v2-only field). Without them
+#     a v1-only or v2-only cluster 400s with "Unknown column" on the mutually-exclusive
+#     dual-schema queries. Their names equal the bare index prefix (no "~org~repo"), which
+#     parse_index_name() rejects, so the v1 orphan-prune sweep skips them.
+_QUERY_SEED_INDICES = [
+    REFS_INDEX_V2,
+    FILES_INDEX_PREFIX,
+    LINES_INDEX_PREFIX,
+    FILES_INDEX_PREFIX_V2,
+    LINES_INDEX_PREFIX_V2,
+]
 ELASTICSEARCH_INDEX_TEMPLATES_DIR = _ELASTIC / "index_templates"
 AGENT_BUILDER_TOOLS_DIR = _ELASTIC / "agent_builder_tools"
 AGENT_BUILDER_AGENTS_DIR = _ELASTIC / "agent_builder_agents"
@@ -70,6 +93,19 @@ def load_index_templates(es, templates_dir: pathlib.Path = ELASTICSEARCH_INDEX_T
         )
         loaded.append(name)
     return loaded
+
+
+def ensure_query_seed_indices(es) -> list[str]:
+    """Create the v2 refs lookup index and the empty schema-anchor indices the ES|QL tools rely
+    on (see _QUERY_SEED_INDICES). Idempotent: existing indices are left untouched. Each index
+    matches an index template loaded above, so it inherits the correct mapping/settings."""
+    created = []
+    for name in _QUERY_SEED_INDICES:
+        if es.indices.exists(index=name):
+            continue
+        es.indices.create(index=name)
+        created.append(name)
+    return created
 
 
 def load_agent_builder_tools(
@@ -144,6 +180,14 @@ def run(url: str, api_key: str | None, username: str | None, password: str | Non
         sys.exit(1)
     for name in loaded:
         click.echo(f"Loaded index template: {name}")
+
+    try:
+        seeded = ensure_query_seed_indices(es)
+    except ES_ERRORS as e:
+        click.echo(f"Error: could not create query seed indices: {e}", err=True)
+        sys.exit(1)
+    for name in seeded:
+        click.echo(f"Created query seed index: {name}")
 
     if not kb_url:
         click.echo("Skipping agent builder setup (KIBANA_URL not set).")

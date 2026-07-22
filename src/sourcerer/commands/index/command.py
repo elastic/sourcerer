@@ -27,20 +27,36 @@ from ...planner import Marker, plan_repo
 from ...progress import ProgressReporter, Unit, make_reporter
 from ...utils import ES_ERRORS, make_client
 from ..prune import command as prune_cmd
-from .documents import index_repo
+from .documents import index_paths_v2, index_repo
 from .git import (
     checkout_branch,
     checkout_ref,
     commit_date,
     count_tracked_files,
     default_branch,
+    iter_tracked_files,
+    plan_changes,
     prepared_repo,
     ref_dates,
     resolve_cache_root,
     resolve_commit,
     _rev_info,
 )
-from .markers import commit_fully_indexed, count_commit_docs, pre_clone_skip, should_index, write_ref_marker
+from .markers import (
+    commit_fully_indexed,
+    count_commit_docs,
+    count_v2_branch_docs,
+    delete_v2_branch,
+    delete_v2_paths,
+    pre_clone_skip,
+    read_v2_ref,
+    refresh_v2_content,
+    should_index,
+    write_ref_marker,
+    write_v2_failed,
+    write_v2_indexing,
+    write_v2_ready,
+)
 from .report import dry_run_config
 from .runtime import _aborted, _tuning, bulk_indexing_settings, handle_interrupts
 from .selection import _effective_since_floor, _load_config, _resolve_entry
@@ -119,6 +135,104 @@ def index_ref_in_dir(
         status = "indexed"
     write_ref_marker(es, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso, files_count, lines_count)
     reporter.finish(unit, status, files_count, lines_count)
+
+
+def index_incremental_in_dir(
+    es: Elasticsearch,
+    org: str,
+    repo: str,
+    repo_dir,
+    branch: str,
+    force: bool = False,
+    reporter: ProgressReporter | None = None,
+    unit: Unit | None = None,
+) -> None:
+    """Incremental (v2) update of one branch into an already-cloned `repo_dir`. Entirely
+    separate from the snapshot path: it never consults v1 markers, `should_index`, or the
+    retention planner. The branch's single v2 refs document drives the decision:
+
+      * completed SHA == remote HEAD and status ready (and not --force)  -> no-op skip.
+      * no marker, no completed SHA, --force, or a missing diff base     -> full branch
+        reconciliation: delete the whole ref namespace, then index every tracked file.
+      * otherwise -> apply the Git change plan: synchronously delete prior docs for
+        deleted/modified/rename-source paths, then index the current destination paths.
+
+    The completed pointer advances only after deletes + indexing + content refresh all succeed
+    (INV-005/INV-008). Any Git or Elasticsearch failure records failure state (status stays
+    `indexing`, completed SHA unchanged, bounded error) and re-raises so the caller reports the
+    unit as failed without stopping the batch.
+    """
+    if reporter is None:
+        reporter = ProgressReporter()
+    if unit is None:
+        unit = Unit(org=org, repo=repo, ref=branch, kind="branch", update_mode="incremental")
+
+    reporter.set_stage(unit, "checkout")
+    checkout_branch(repo_dir, branch)
+    new_sha = resolve_commit(repo_dir)
+    commit_date_iso = commit_date(repo_dir)
+    unit.ref = branch
+
+    prior = read_v2_ref(es, org, repo, branch)
+    completed = prior.get("git", {}).get("commit") if prior else None
+    prior_status = prior.get("status") if prior else None
+
+    # No-op: the last completed commit already equals the current tip and the branch is ready.
+    if not force and prior is not None and prior_status == "ready" and completed == new_sha:
+        reporter.finish(unit, "skipped")
+        return
+
+    # Advertise the in-flight update: status -> indexing, completed pointer held at the old SHA,
+    # candidate exposed as target_commit. Readers stay unblocked (may see a brief mixed revision).
+    write_v2_indexing(es, org, repo, branch, completed_commit=completed,
+                      target_commit=new_sha, prior=prior)
+
+    try:
+        # Decide full reconciliation vs targeted change plan. --force, a first index, or an
+        # unavailable diff base all rebuild the whole namespace (never treat a missing base as
+        # an empty diff, INV-007).
+        plan = None
+        if not force and completed is not None:
+            candidate = plan_changes(repo_dir, completed, new_sha)
+            plan = None if candidate.base_missing else candidate
+
+        reporter.set_stage(unit, "indexing")
+
+        def on_progress(f: int, l: int) -> None:
+            reporter.update_counts(unit, f, l)
+
+        if plan is None:
+            delete_v2_branch(es, org, repo, branch)
+            paths = list(iter_tracked_files(repo_dir))
+            reporter.set_total_files(unit, len(paths))
+            processed_files, processed_lines = index_paths_v2(
+                es, org, repo, repo_dir, branch, paths, on_progress=on_progress,
+            )
+        else:
+            delete_v2_paths(es, org, repo, branch, plan.delete_paths)
+            reporter.set_total_files(unit, len(plan.index_paths))
+            processed_files, processed_lines = index_paths_v2(
+                es, org, repo, repo_dir, branch, plan.index_paths, on_progress=on_progress,
+            )
+
+        # Publication boundary: refresh content first, count the authoritative branch totals,
+        # then advance the completed pointer and refresh the refs index (INV-008).
+        refresh_v2_content(es, org, repo)
+        files_total, lines_total = count_v2_branch_docs(es, org, repo, branch)
+        write_v2_ready(es, org, repo, branch, new_sha, commit_date_iso, files_total, lines_total)
+    except KeyboardInterrupt:
+        # Aborted mid-update: leave the marker at `indexing` with the old completed SHA (already
+        # written above); the next run retries. Do not record it as a failure.
+        raise
+    except Exception as e:
+        try:
+            write_v2_failed(es, org, repo, branch, completed_commit=completed,
+                            target_commit=new_sha, error=str(e), prior=prior)
+        except Exception:
+            pass  # a secondary failure writing the failure marker must not mask the original
+        raise
+
+    reporter.finish(unit, "indexed", processed_files, processed_lines)
 
 
 def index_one(
@@ -314,10 +428,19 @@ def run_config(
             if _aborted.is_set():
                 return
             (org, repo), group = item
-            # 2a. Cheap per-ref skip for the whole group (no clone yet). A transient ES error
+            # Incremental (v2) branch units bypass the entire v1 pre-clone/skip/retention path:
+            # their no-op vs retry decision is made post-checkout from the v2 marker, so they
+            # always require the clone (unless the whole repo is snapshot-only and already
+            # indexed). Split them out first; the snapshot units keep the existing behaviour.
+            incremental_units = [u for u in group if u.update_mode == "incremental"]
+            snapshot_group = [u for u in group if u.update_mode != "incremental"]
+            for unit in incremental_units:
+                reporter.start(unit)
+
+            # 2a. Cheap per-ref skip for the snapshot units (no clone yet). A transient ES error
             # here fails just that ref (the skip check hits the cluster) and the batch goes on.
             pending: list[tuple[Unit, str | None, str | None, str | None]] = []
-            for unit in group:
+            for unit in snapshot_group:
                 if _aborted.is_set():
                     return
                 reporter.start(unit)
@@ -337,7 +460,7 @@ def run_config(
                 else:
                     pending.append((unit, branch, tag, commit))
 
-            if not pending:
+            if not pending and not incremental_units:
                 return  # whole repo already indexed -> no clone at all
 
             # 2b. Clone/fetch once, then check out and index each pending ref. A failure on one
@@ -345,10 +468,13 @@ def run_config(
             # the remaining refs (and other repos) continue. If the persistent cache dir is locked
             # by another run, prepared_repo yields None and the whole repo is skipped this round.
             try:
-                reporter.set_stage(pending[0][0], "cloning")
+                clone_leader = pending[0][0] if pending else incremental_units[0]
+                reporter.set_stage(clone_leader, "cloning")
                 with prepared_repo(org, repo, cache_root, ephemeral) as repo_dir:
                     if repo_dir is None:
                         for unit, _branch, _tag, _commit in pending:
+                            reporter.finish(unit, "locked", detail="another sourcerer run holds this repo's cache lock")
+                        for unit in incremental_units:
                             reporter.finish(unit, "locked", detail="another sourcerer run holds this repo's cache lock")
                         return
                     # Reorder pending refs newest-first by creation date so more-recent refs
@@ -412,9 +538,32 @@ def run_config(
                             with failures_lock:
                                 failures += 1
                             reporter.finish(unit, "error", detail=str(e))
+
+                    # 2d. Incremental branch units, indexed against the same clone. Each is
+                    # fully self-contained (v2 marker + change plan); a Git/ES failure records
+                    # failure state inside index_incremental_in_dir and is reported here without
+                    # stopping the remaining refs or repos.
+                    for unit in incremental_units:
+                        if _aborted.is_set():
+                            break
+                        try:
+                            index_incremental_in_dir(
+                                es, org, repo, repo_dir, unit.ref, force, reporter, unit,
+                            )
+                        except KeyboardInterrupt:
+                            break
+                        except (FileNotFoundError, subprocess.CalledProcessError, ValueError, *ES_ERRORS) as e:
+                            with failures_lock:
+                                failures += 1
+                            reporter.finish(unit, "error", detail=str(e))
             except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
                 # Clone failed: fail every still-pending ref of this repo, continue others.
                 for unit, _branch, _tag, _commit in pending:
+                    if unit.status is None:
+                        with failures_lock:
+                            failures += 1
+                        reporter.finish(unit, "error", detail=str(e))
+                for unit in incremental_units:
                     if unit.status is None:
                         with failures_lock:
                             failures += 1

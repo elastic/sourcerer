@@ -1,22 +1,31 @@
 id: sourcerer.refs.list
 type: esql
-description: list the git refs (branches, tags) indexed for org(s)/repo(s)
+description: list the git refs (branches, tags) indexed for org(s)/repo(s), including v1 snapshot refs and v2 incremental branches
 tags: []
 configuration:
   query: |-
-    // List the indexed refs. Every filter is wildcard-friendly and defaults to "*",
-    // so calling with no params lists every ref in every repo. Narrow with any combo
-    // of org / repo / ref / ref_type / commit to browse what's available to
-    // cat/head/tail/grep/search.
-    FROM sourcerer-v1-refs*
+    // List the indexed refs across BOTH schemas: v1 snapshot markers and v2 incremental
+    // branch markers. Every filter is wildcard-friendly and defaults to "*", so calling with
+    // no params lists every ref in every repo. Narrow with any combo of org / repo / ref /
+    // ref_type / commit.
+    //
+    // update_mode tells the agent HOW to query the ref's content:
+    //   - snapshot    -> pass the completed git_commit to the code/file tools
+    //   - incremental -> pass the exact git_ref_key to the code/file tools
+    // For incremental refs, git.commit is the LAST COMPLETED commit and status may be
+    // "indexing" (an update is in flight); git.target_commit is the candidate being applied.
+    FROM sourcerer-v1-refs*, sourcerer-v2-refs* METADATA _index
     | WHERE git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit
         AND git.ref LIKE ?git_ref
         AND git.ref_type LIKE ?git_ref_type
 
+    // Derive update_mode from the source index so v1 rows (no stored field) are labelled too.
+    | EVAL update_mode = CASE(_index LIKE "sourcerer-v2-refs*", "incremental", "snapshot")
+
     // Most recent first so a moved branch's current commit leads
-    | KEEP git.org, git.repo, git.ref, git.ref_type, git.commit, git.commit_date, status, files_count, lines_count, indexed_at
+    | KEEP git.org, git.repo, git.ref, git.ref_type, git.ref_key, git.commit, git.target_commit, git.commit_date, status, update_mode, files_count, lines_count, indexed_at
     | SORT indexed_at DESC
     | LIMIT 1000
   params:

@@ -22,6 +22,14 @@ content: |-
   Combine with `git_ref_type: tag`, `git_ref_type: branch`, or `git_ref_type: commit` (a pinned,
   ad-hoc commit not on a tracked branch/tag tip) to narrow further.
 
+  Each ref carries an `update_mode` that dictates HOW you query its content:
+  - `update_mode: snapshot` — the ref is a v1 immutable snapshot. Pin its `git.commit` and pass
+    it as `git_commit` to every `sourcerer.code.*` / `sourcerer.files.*` call.
+  - `update_mode: incremental` — the ref is a v2 mutable branch view. Pass its exact
+    `git.ref_key` as `git_ref_key` to the content tools (NOT `git_commit`). The tools attach the
+    branch's completed commit automatically for citations. Never mix the two: supply either
+    `git_commit` (snapshot) or `git_ref_key` (incremental), never both.
+
   ## Resolution scenarios
 
   ### No ref specified — default to latest stable
@@ -43,8 +51,22 @@ content: |-
   ### Explicit ref (branch name, exact tag, commit hash)
   Use as given. If it is a branch, call `refs.list` with `git_ref_type: branch` to confirm it exists and retrieve its current commit. If it is a tag, confirm and get its commit. If it is a commit hash, use it directly — optionally confirm with `git_ref_type: commit` if it may be a pinned commit rather than one reached via a branch/tag.
 
+  ## Incremental branches (update_mode: incremental)
+  A v2 incremental branch is a single mutable view, not a per-commit snapshot. Resolve it with
+  `refs.list` (`git_ref_type: branch`) and read its `update_mode`, `status`, `git.commit`
+  (last completed), `git.target_commit` (candidate being applied), and `git.ref_key`.
+  - Query its content by passing the exact `git_ref_key` to the code/file tools.
+  - `status: ready` means `git.commit` is the fully-applied tip.
+  - `status: indexing` means an update is in flight: results remain available but may briefly
+    reflect a MIXED revision while Elasticsearch applies the change. `git.commit` still reports
+    the last completed pointer, so citations stay valid; note the in-progress state if precision
+    matters. There is no per-commit history for an incremental branch — only its current view.
+
   ## Pinning the commit
-  Once a ref resolves to a `git.commit`, use that commit in every subsequent `sourcerer.code.*` and `sourcerer.files.*` call for that repo and ref. Re-invoke this skill only when the question introduces a new or additional ref.
+  For a snapshot ref, once it resolves to a `git.commit`, use that commit as `git_commit` in
+  every subsequent `sourcerer.code.*` and `sourcerer.files.*` call for that repo and ref. For an
+  incremental branch, reuse its `git_ref_key` the same way. Re-invoke this skill only when the
+  question introduces a new or additional ref.
 tool_ids:
 - sourcerer.refs.list
 referenced_content: []

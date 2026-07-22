@@ -1,0 +1,74 @@
+{
+  "_meta": {
+    "description": "sourcerer-v2-refs"
+  },
+  "index_patterns": [
+    "sourcerer-v2-refs*"
+  ],
+  "template": {
+    "settings": {
+      "index": {
+        "mode": "lookup",
+        "number_of_shards": 1,
+        "codec": "best_compression"
+      }
+    },
+    "mappings": {
+      "properties": {
+        "git": {
+          "properties": {
+            "ref_key": {
+              "type": "keyword"
+            },
+            "org": {
+              "type": "keyword"
+            },
+            "repo": {
+              "type": "keyword"
+            },
+            "ref": {
+              "type": "keyword"
+            },
+            "ref_type": {
+              "type": "keyword"
+            },
+            "commit": {
+              "type": "keyword"
+            },
+            "target_commit": {
+              "type": "keyword"
+            },
+            "commit_date": {
+              "type": "date"
+            }
+          }
+        },
+        "status": {
+          "type": "keyword"
+        },
+        "update_mode": {
+          "type": "keyword"
+        },
+        "files_count": {
+          "type": "long"
+        },
+        "lines_count": {
+          "type": "long"
+        },
+        "indexed_at": {
+          "type": "date"
+        },
+        "update_started_at": {
+          "type": "date"
+        },
+        "failed_at": {
+          "type": "date"
+        },
+        "error": {
+          "type": "keyword",
+          "index": false
+        }
+      }
+    }
+  }
+}

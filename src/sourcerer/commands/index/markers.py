@@ -11,8 +11,14 @@ import datetime
 from elasticsearch import Elasticsearch, NotFoundError
 
 # App packages
-from ...indices import REFS_INDEX, files_index
-from ...utils import make_doc_id
+from ...indices import (
+    REFS_INDEX,
+    REFS_INDEX_V2,
+    files_index,
+    files_index_v2,
+    lines_index_v2,
+)
+from ...utils import build_ref_key, make_doc_id
 from .git import resolve_remote
 
 
@@ -196,6 +202,249 @@ def pre_clone_skip(
     if ref_for_id and not should_index(es, org, repo, ref_type, ref_for_id, remote_sha):
         return True, ref_for_id, remote_sha
     return False, ref_for_id, remote_sha
+
+
+# --- v2 (incremental) mutable branch markers ------------------------------------------------
+# The v2 refs index holds exactly ONE document per incremental branch (INV-004), keyed by a
+# stable id that folds in only (org, repo, "branch", ref) -- never the commit -- so successive
+# updates overwrite the same document in place. Its `status`/`git.commit`/`git.target_commit`
+# fields make the update window observable without blocking readers (INV-005/INV-008).
+
+ERROR_MAX_LEN = 2000  # bound stored failure text so a giant git/ES error can't bloat the doc
+
+
+def build_v2_ref_id(org: str, repo: str, ref: str) -> str:
+    """Stable id of an incremental branch's single v2 refs document (INV-004). Normalized
+    org/repo lowercasing matches the content ids and ref-key so identity is consistent; the
+    branch name stays case-sensitive."""
+    return make_doc_id(org.lower(), repo.lower(), "branch", ref)
+
+
+def read_v2_ref(es: Elasticsearch, org: str, repo: str, ref: str) -> dict | None:
+    """The branch's v2 refs document _source, or None if it has never been indexed. A
+    real-time GET, so it reflects the last write even without an index refresh."""
+    try:
+        return es.get(index=REFS_INDEX_V2, id=build_v2_ref_id(org, repo, ref))["_source"]
+    except NotFoundError:
+        return None
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _build_v2_ref_doc(
+    org: str,
+    repo: str,
+    ref: str,
+    *,
+    status: str,
+    commit: str | None,
+    target_commit: str | None = None,
+    commit_date_iso: str | None = None,
+    files_count: int = 0,
+    lines_count: int = 0,
+    indexed_at: str | None = None,
+    update_started_at: str | None = None,
+    failed_at: str | None = None,
+    error: str | None = None,
+) -> dict:
+    return {
+        "git": {
+            "ref_key": build_ref_key(org, repo, ref),
+            "org": org.lower(),
+            "repo": repo.lower(),
+            "ref": ref,
+            "ref_type": "branch",
+            "commit": commit,
+            "target_commit": target_commit,
+            "commit_date": commit_date_iso,
+        },
+        "status": status,
+        "update_mode": "incremental",
+        "files_count": files_count,
+        "lines_count": lines_count,
+        "indexed_at": indexed_at,
+        "update_started_at": update_started_at,
+        "failed_at": failed_at,
+        "error": error[:ERROR_MAX_LEN] if error else None,
+    }
+
+
+def write_v2_indexing(
+    es: Elasticsearch,
+    org: str,
+    repo: str,
+    ref: str,
+    completed_commit: str | None,
+    target_commit: str,
+    prior: dict | None = None,
+    refresh: bool = False,
+) -> None:
+    """Publish `status: indexing`: the completed pointer (`git.commit`) stays at the LAST
+    completed SHA (or None on a first index) while `git.target_commit` advertises the candidate
+    SHA (INV-005). Prior counts/commit_date/indexed_at are carried so readers keep meaningful
+    metadata during the window. Not a publication boundary -- refresh defaults off; a real-time
+    GET still sees it on retry."""
+    prior = prior or {}
+    pg = prior.get("git", {})
+    doc = _build_v2_ref_doc(
+        org, repo, ref,
+        status="indexing",
+        commit=completed_commit,
+        target_commit=target_commit,
+        commit_date_iso=pg.get("commit_date"),
+        files_count=prior.get("files_count", 0),
+        lines_count=prior.get("lines_count", 0),
+        indexed_at=prior.get("indexed_at"),
+        update_started_at=_now_iso(),
+        failed_at=prior.get("failed_at"),
+        error=prior.get("error"),
+    )
+    es.index(index=REFS_INDEX_V2, id=build_v2_ref_id(org, repo, ref), document=doc, refresh=refresh)
+
+
+def write_v2_ready(
+    es: Elasticsearch,
+    org: str,
+    repo: str,
+    ref: str,
+    commit: str,
+    commit_date_iso: str | None,
+    files_count: int,
+    lines_count: int,
+    refresh: bool = True,
+) -> None:
+    """Publish `status: ready` at the NEW completed commit, clearing the target and any prior
+    failure fields (INV-005/INV-008). This is the pointer-advancing publication boundary, so it
+    refreshes by default -- callers refresh the content indices first, then call this."""
+    doc = _build_v2_ref_doc(
+        org, repo, ref,
+        status="ready",
+        commit=commit,
+        target_commit=None,
+        commit_date_iso=commit_date_iso,
+        files_count=files_count,
+        lines_count=lines_count,
+        indexed_at=_now_iso(),
+        update_started_at=None,
+        failed_at=None,
+        error=None,
+    )
+    es.index(index=REFS_INDEX_V2, id=build_v2_ref_id(org, repo, ref), document=doc, refresh=refresh)
+
+
+def write_v2_failed(
+    es: Elasticsearch,
+    org: str,
+    repo: str,
+    ref: str,
+    completed_commit: str | None,
+    target_commit: str | None,
+    error: str,
+    prior: dict | None = None,
+    refresh: bool = False,
+) -> None:
+    """Record a failed update WITHOUT advancing the completed pointer: status stays `indexing`,
+    `git.commit` remains the last completed SHA, and a bounded `error` + `failed_at` are stored
+    for diagnosis (INV-005). The next run retries old->current and clears these on success."""
+    prior = prior or {}
+    pg = prior.get("git", {})
+    doc = _build_v2_ref_doc(
+        org, repo, ref,
+        status="indexing",
+        commit=completed_commit,
+        target_commit=target_commit,
+        commit_date_iso=pg.get("commit_date"),
+        files_count=prior.get("files_count", 0),
+        lines_count=prior.get("lines_count", 0),
+        indexed_at=prior.get("indexed_at"),
+        update_started_at=prior.get("update_started_at") or _now_iso(),
+        failed_at=_now_iso(),
+        error=error,
+    )
+    es.index(index=REFS_INDEX_V2, id=build_v2_ref_id(org, repo, ref), document=doc, refresh=refresh)
+
+
+def _delete_by_query_sync(es: Elasticsearch, index: str, query: dict, refresh: bool) -> None:
+    """Synchronous delete-by-query used by the incremental path. Unlike the async prune
+    deletion, this waits for completion (`wait_for_completion=True`) so a subsequent re-index
+    can't race a still-running delete, and uses `conflicts="proceed"` so a concurrent version
+    bump doesn't abort the batch. Missing indices (a first index, before any content exists)
+    are ignored."""
+    try:
+        es.delete_by_query(
+            index=index,
+            query=query,
+            wait_for_completion=True,
+            conflicts="proceed",
+            refresh=refresh,
+            ignore_unavailable=True,
+            allow_no_indices=True,
+        )
+    except NotFoundError:
+        pass
+
+
+def delete_v2_paths(
+    es: Elasticsearch, org: str, repo: str, ref: str, paths, refresh: bool = False,
+) -> None:
+    """Synchronously delete the file and line docs for `paths` on this exact branch from the v2
+    content indices. Scoped by the exact `git.ref_key` (a single keyword term, so a branch
+    whose name is a prefix of another can't bleed) plus a `file.path` terms filter -- never a
+    wildcard. A no-op for an empty path set."""
+    paths = list(paths)
+    if not paths:
+        return
+    ref_key = build_ref_key(org, repo, ref)
+    query = {
+        "bool": {
+            "filter": [
+                {"term": {"git.ref_key": ref_key}},
+                {"terms": {"file.path": paths}},
+            ]
+        }
+    }
+    for index in (files_index_v2(org, repo), lines_index_v2(org, repo)):
+        _delete_by_query_sync(es, index, query, refresh)
+
+
+def delete_v2_branch(
+    es: Elasticsearch, org: str, repo: str, ref: str, refresh: bool = False,
+) -> None:
+    """Delete EVERY v2 content doc for this branch (full namespace), scoped by the exact
+    `git.ref_key`. Used for the initial index and the missing-diff-base rebuild (INV-007)."""
+    ref_key = build_ref_key(org, repo, ref)
+    query = {"bool": {"filter": [{"term": {"git.ref_key": ref_key}}]}}
+    for index in (files_index_v2(org, repo), lines_index_v2(org, repo)):
+        _delete_by_query_sync(es, index, query, refresh)
+
+
+def count_v2_branch_docs(es: Elasticsearch, org: str, repo: str, ref: str) -> tuple[int, int]:
+    """Authoritative (files, lines) totals for a branch's current v2 view, counted by exact
+    `git.ref_key`. Call AFTER refreshing the content indices so the counts reflect the just-
+    applied deletes and indexes -- these become the ready marker's files_count/lines_count.
+    Returns 0 for an index that does not exist yet."""
+    ref_key = build_ref_key(org, repo, ref)
+    query = {"bool": {"filter": [{"term": {"git.ref_key": ref_key}}]}}
+
+    def _count(index: str) -> int:
+        try:
+            return int(es.count(index=index, query=query)["count"])
+        except NotFoundError:
+            return 0
+
+    return _count(files_index_v2(org, repo)), _count(lines_index_v2(org, repo))
+
+
+def refresh_v2_content(es: Elasticsearch, org: str, repo: str) -> None:
+    """Make the branch's just-written v2 content visible before the ready pointer is published
+    (INV-008: content refresh precedes the final refs write). Best-effort over missing indices."""
+    es.indices.refresh(
+        index=[files_index_v2(org, repo), lines_index_v2(org, repo)],
+        ignore_unavailable=True,
+        allow_no_indices=True,
+    )
 
 
 def resolve_head(es: Elasticsearch, org: str, repo: str, ref_type: str, ref: str) -> dict | None:

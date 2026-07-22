@@ -10,7 +10,17 @@ from elastic_transport import ApiResponseMeta, HttpHeaders
 from elasticsearch import NotFoundError
 
 # App packages
-from sourcerer.commands.index.markers import commit_prefix_indexed, pre_clone_skip
+from sourcerer.commands.index.markers import (
+    ERROR_MAX_LEN,
+    build_v2_ref_id,
+    commit_prefix_indexed,
+    pre_clone_skip,
+    read_v2_ref,
+    write_v2_failed,
+    write_v2_indexing,
+    write_v2_ready,
+)
+from sourcerer.indices import REFS_INDEX_V2
 
 FULL_SHA = "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60"
 
@@ -73,3 +83,92 @@ class TestPreCloneSkipCommit:
             es, "acme", "widgets", None, None, "cfefb3b", False,
         )
         assert (skip, ref_for_id, remote_sha) == (False, None, None)
+
+
+OLD = "1111111111111111111111111111111111111111"
+NEW = "2222222222222222222222222222222222222222"
+
+
+class TestV2RefId:
+    def test_stable_across_calls_and_commit_independent(self):
+        a = build_v2_ref_id("acme", "widgets", "main")
+        b = build_v2_ref_id("acme", "widgets", "main")
+        assert a == b  # one document per branch, no commit folded in
+
+    def test_org_repo_case_insensitive_but_ref_case_sensitive(self):
+        assert build_v2_ref_id("Acme", "Widgets", "main") == build_v2_ref_id("acme", "widgets", "main")
+        assert build_v2_ref_id("acme", "widgets", "Main") != build_v2_ref_id("acme", "widgets", "main")
+
+
+def _indexed_doc(es):
+    return es.index.call_args.kwargs["document"]
+
+
+class TestWriteV2Indexing:
+    def test_preserves_completed_commit_and_exposes_target(self):
+        es = MagicMock()
+        write_v2_indexing(es, "acme", "widgets", "main", completed_commit=OLD, target_commit=NEW)
+        doc = _indexed_doc(es)
+        assert doc["status"] == "indexing"
+        assert doc["git"]["commit"] == OLD  # completed pointer unchanged
+        assert doc["git"]["target_commit"] == NEW  # candidate advertised
+        assert doc["update_mode"] == "incremental"
+        assert es.index.call_args.kwargs["id"] == build_v2_ref_id("acme", "widgets", "main")
+        assert es.index.call_args.kwargs["index"] == REFS_INDEX_V2
+
+    def test_first_index_has_no_completed_commit(self):
+        es = MagicMock()
+        write_v2_indexing(es, "acme", "widgets", "main", completed_commit=None, target_commit=NEW)
+        assert _indexed_doc(es)["git"]["commit"] is None
+
+    def test_carries_prior_counts(self):
+        es = MagicMock()
+        prior = {"files_count": 12, "lines_count": 340, "git": {"commit_date": "2026-01-01T00:00:00+00:00"}}
+        write_v2_indexing(es, "acme", "widgets", "main", OLD, NEW, prior=prior)
+        doc = _indexed_doc(es)
+        assert doc["files_count"] == 12 and doc["lines_count"] == 340
+        assert doc["git"]["commit_date"] == "2026-01-01T00:00:00+00:00"
+
+
+class TestWriteV2Ready:
+    def test_advances_commit_and_clears_target_and_error(self):
+        es = MagicMock()
+        write_v2_ready(es, "acme", "widgets", "main", commit=NEW,
+                       commit_date_iso="2026-02-02T00:00:00+00:00", files_count=5, lines_count=99)
+        doc = _indexed_doc(es)
+        assert doc["status"] == "ready"
+        assert doc["git"]["commit"] == NEW
+        assert doc["git"]["target_commit"] is None
+        assert doc["error"] is None and doc["failed_at"] is None
+        assert doc["files_count"] == 5 and doc["lines_count"] == 99
+        assert es.index.call_args.kwargs["refresh"] is True  # publication boundary
+
+
+class TestWriteV2Failed:
+    def test_keeps_status_indexing_and_retains_old_pointer(self):
+        es = MagicMock()
+        write_v2_failed(es, "acme", "widgets", "main", completed_commit=OLD,
+                        target_commit=NEW, error="boom")
+        doc = _indexed_doc(es)
+        assert doc["status"] == "indexing"  # not advanced
+        assert doc["git"]["commit"] == OLD
+        assert doc["git"]["target_commit"] == NEW
+        assert doc["error"] == "boom"
+        assert doc["failed_at"] is not None
+
+    def test_error_text_is_bounded(self):
+        es = MagicMock()
+        write_v2_failed(es, "acme", "widgets", "main", OLD, NEW, error="x" * 5000)
+        assert len(_indexed_doc(es)["error"]) == ERROR_MAX_LEN
+
+
+class TestReadV2Ref:
+    def test_returns_source(self):
+        es = MagicMock()
+        es.get.return_value = {"_source": {"status": "ready", "git": {"commit": NEW}}}
+        assert read_v2_ref(es, "acme", "widgets", "main") == {"status": "ready", "git": {"commit": NEW}}
+
+    def test_missing_returns_none(self):
+        es = MagicMock()
+        es.get.side_effect = _not_found()
+        assert read_v2_ref(es, "acme", "widgets", "main") is None

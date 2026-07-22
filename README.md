@@ -75,6 +75,14 @@ questions about your software using an agent that analyzes the code.
 Its value shines for questions that span multiple repositories or multiple
 versions of software.
 
+Branches default to immutable per-commit **snapshots**. For a fast-moving branch that needs
+frequent, cheap refreshes, a `type: branch` selector can opt into `update: incremental`, which
+maintains a single mutable branch view in isolated `sourcerer-v2-*` indices and re-indexes only
+the files changed since the last run (typically 10-20) instead of re-snapshotting the whole
+repo. See [Incremental branch indexing](AGENTS.md#incremental-branch-indexing-update-incremental)
+for the consistency contract (temporary mixed revisions during an update) and a local
+evaluation procedure.
+
 ## Philosophy
 
 **Code is the primary source of truth for its own behavior.** Always authoriative,

@@ -4,13 +4,22 @@ description: search code in repo file(s) with fast, relevant, code-optimized bm2
 tags: []
 configuration:
   query: |-
-    // Scope the search
-    FROM sourcerer-v1-lines* METADATA _score
-    | WHERE MATCH(git.org, ?git_org)
-        AND git.repo LIKE ?git_repo
-        AND git.commit LIKE ?git_commit
-        AND file.path LIKE ?file_path
-        AND MATCH(line.content.text, ?q)
+    // Scope the search to EXACTLY ONE schema, never both:
+    //   - no git_ref_key  -> v1 snapshot content, matched by git.commit (default "*")
+    //   - git_ref_key set -> v2 incremental content, matched by the exact git.ref_key
+    // The two branches are mutually exclusive, so an unscoped call never scans both schemas.
+    FROM sourcerer-v1-lines*, sourcerer-v2-lines* METADATA _score, _index
+    | WHERE (?git_ref_key == "" AND _index LIKE "sourcerer-v1-lines*"
+                AND git.org LIKE ?git_org AND git.repo LIKE ?git_repo AND git.commit LIKE ?git_commit)
+         OR (?git_ref_key != "" AND _index LIKE "sourcerer-v2-lines*"
+                AND git.ref_key == ?git_ref_key)
+    | WHERE MATCH(line.content.text, ?q) AND file.path LIKE ?file_path
+
+    // Attach the completed commit for v2 rows via the refs lookup join on exact git.ref_key
+    // (v1 rows have a null ref_key, don't match, and keep their own commit).
+    | EVAL _org = git.org, _repo = git.repo, _commit = git.commit
+    | LOOKUP JOIN sourcerer-v2-refs ON git.ref_key
+    | EVAL git.org = _org, git.repo = _repo, git.commit = COALESCE(git.commit, _commit)
 
     // Flag whether the file path pattern is recursive (e.g. "src/**/*.java")
     | EVAL fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")
@@ -40,9 +49,14 @@ configuration:
       defaultValue: "*"
     git_commit:
       type: string
-      description: Filter by git commit(s) (supports * wildcards)
+      description: Filter by git commit(s) for v1 snapshot refs (supports * wildcards). Ignored when git_ref_key is set.
       optional: true
       defaultValue: "*"
+    git_ref_key:
+      type: string
+      description: Exact ref key of a v2 incremental branch (from sourcerer.refs.list). When set, the search targets that branch's incremental content instead of snapshot content; leave empty for snapshot (git_commit) queries.
+      optional: true
+      defaultValue: ""
     file_path:
       type: string
       description: File path(s) to grep (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)

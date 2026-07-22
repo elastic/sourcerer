@@ -205,6 +205,49 @@ class TestParseCommitSelector:
             )])])
 
 
+class TestUpdateMode:
+    def test_omitted_defaults_to_snapshot(self):
+        cfgs = parse_config([_entry(refs=[_selector()])])
+        assert cfgs[0].selectors[0].update_mode == "snapshot"
+
+    def test_explicit_snapshot(self):
+        cfgs = parse_config([_entry(refs=[{"type": "branch", "match": "main", "update": "snapshot"}])])
+        assert cfgs[0].selectors[0].update_mode == "snapshot"
+
+    def test_valid_incremental_branch(self):
+        cfgs = parse_config([_entry(refs=[{"type": "branch", "match": "main", "update": "incremental"}])])
+        assert cfgs[0].selectors[0].update_mode == "incremental"
+
+    def test_unknown_value_raises(self):
+        with pytest.raises(ValueError, match="'update' must be"):
+            parse_config([_entry(refs=[{"type": "branch", "match": "main", "update": "delta"}])])
+
+    def test_incremental_tag_raises(self):
+        with pytest.raises(ValueError, match="only valid for 'type: branch'"):
+            parse_config([_entry(refs=[{"type": "tag", "match": "v{major}.{minor}.{patch}", "update": "incremental"}])])
+
+    def test_incremental_commit_raises(self):
+        with pytest.raises(ValueError, match="only valid for 'type: branch'"):
+            parse_config([_entry(refs=[{"type": "commit", "match": "cfefb3b", "update": "incremental"}])])
+
+    def test_incremental_with_since_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'since'"):
+            parse_config([_entry(refs=[{
+                "type": "branch", "match": "main", "update": "incremental", "since": {"age": "1y"},
+            }])])
+
+    def test_incremental_with_retain_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'retain'"):
+            parse_config([_entry(refs=[{
+                "type": "branch", "match": "main", "update": "incremental", "retain": {"count": 5},
+            }])])
+
+    def test_update_dotted_key(self):
+        # `update` is a plain scalar leaf, so dotted-key expansion leaves it untouched.
+        cfgs = parse_config([_entry(refs=[{"type": "branch", "match": "main", "update": "incremental"}])])
+        assert cfgs[0].selectors[0].update_mode == "incremental"
+
+
 class TestParseSince:
     def test_exactly_one_required_zero_raises(self):
         with pytest.raises(ValueError, match="exactly one"):

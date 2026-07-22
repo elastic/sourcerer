@@ -1,5 +1,6 @@
 # Standard packages
 import hashlib
+import json
 
 # Elastic packages
 from elasticsearch import Elasticsearch, ApiError, TransportError
@@ -25,6 +26,23 @@ def make_doc_id(*parts: str) -> str:
     """
     joined = ID_SEP.join(p.encode("utf-8", errors="surrogateescape") for p in parts)
     return hashlib.blake2b(joined, digest_size=ID_DIGEST_SIZE).hexdigest()
+
+
+def build_ref_key(org: str, repo: str, ref: str) -> str:
+    """Deterministic, case-sensitive ref key shared by v2 (incremental) content and refs docs.
+
+    JSON-encodes the compact array [org.lower(), repo.lower(), "branch", ref] with UTF-8 and
+    no whitespace, so a ref name containing '/' or other punctuation (e.g. "release/8.x") can't
+    collide with a different (org, repo, ref) triple the way naive delimiter concatenation
+    would. org/repo are lowercased -- the physical index name and every query already fold
+    case there -- while the ref is left exactly as Git spells it, because Git ref names are
+    case-sensitive ("Main" and "main" are different branches). This is the single source of
+    lowercasing for v2: the mappings carry NO normalizer (INV-003), so identity and query
+    scope agree only because this builder (and the matching _id builders) normalize the same
+    way.
+    """
+    return json.dumps([org.lower(), repo.lower(), "branch", ref],
+                      ensure_ascii=False, separators=(",", ":"))
 
 
 # Larger bulk batches sent concurrently (see parallel_bulk in commands/index/documents.py) take

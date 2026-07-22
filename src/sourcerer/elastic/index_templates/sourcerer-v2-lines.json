@@ -1,0 +1,130 @@
+{
+  "_meta": {
+    "description": "sourcerer-v2-lines"
+  },
+  "index_patterns": [
+    "sourcerer-v2-lines*"
+  ],
+  "template": {
+    "settings": {
+      "index": {
+        "codec": "best_compression",
+        "mapping": {
+          "source": {
+            "mode": "synthetic"
+          }
+        },
+        "sort": {
+          "field": [
+            "git.ref_key",
+            "file.path",
+            "line.number"
+          ],
+          "order": [
+            "asc",
+            "asc",
+            "asc"
+          ]
+        }
+      },
+      "analysis": {
+        "analyzer": {
+          "code_index": {
+            "type": "custom",
+            "tokenizer": "whitespace",
+            "filter": [
+              "code_word_delimiter",
+              "flatten_graph",
+              "lowercase"
+            ]
+          },
+          "code_search": {
+            "type": "custom",
+            "tokenizer": "whitespace",
+            "filter": [
+              "code_word_delimiter",
+              "lowercase"
+            ]
+          }
+        },
+        "filter": {
+          "code_word_delimiter": {
+            "type": "word_delimiter_graph",
+            "split_on_case_change": true,
+            "split_on_numerics": true,
+            "generate_word_parts": true,
+            "generate_number_parts": true,
+            "preserve_original": true,
+            "stem_english_possessive": false,
+            "catenate_words": false
+          }
+        }
+      },
+      "similarity": {
+        "code_bm25": {
+          "type": "BM25",
+          "k1": 0.8,
+          "b": 0.1
+        }
+      }
+    },
+    "mappings": {
+      "properties": {
+        "git": {
+          "properties": {
+            "org": {
+              "type": "keyword"
+            },
+            "repo": {
+              "type": "keyword"
+            },
+            "ref_key": {
+              "type": "keyword"
+            },
+            "ref": {
+              "type": "keyword"
+            },
+            "ref_type": {
+              "type": "keyword"
+            }
+          }
+        },
+        "file": {
+          "properties": {
+            "path": {
+              "type": "keyword"
+            },
+            "directory": {
+              "type": "keyword"
+            },
+            "name": {
+              "type": "keyword"
+            },
+            "extension": {
+              "type": "keyword",
+              "normalizer": "lowercase"
+            }
+          }
+        },
+        "line": {
+          "properties": {
+            "number": {
+              "type": "integer"
+            },
+            "content": {
+              "type": "wildcard",
+              "fields": {
+                "text": {
+                  "type": "text",
+                  "analyzer": "code_index",
+                  "search_analyzer": "code_search",
+                  "similarity": "code_bm25"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
