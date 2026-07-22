@@ -108,6 +108,12 @@ class TestRefsListSurfacesBothSchemas:
         for field in ("update_mode", "status", "git.ref_key", "git.target_commit", "git.commit"):
             assert field in q, f"refs.list KEEP is missing {field}"
 
+    def test_null_commit_rows_are_not_filtered_out(self):
+        # An incremental branch mid-first-index (git.commit == null) must still be listed;
+        # the default wildcard must short-circuit before `git.commit LIKE ?git_commit`.
+        q = _query("sourcerer.refs.list")
+        assert '?git_commit == "*" OR git.commit LIKE ?git_commit' in q
+
 
 class TestSkillsDocumentIncremental:
     def test_ref_resolution_mentions_ref_key_and_indexing_window(self):

@@ -207,6 +207,13 @@ How it behaves:
   they attach the completed commit via a `LOOKUP JOIN` on `sourcerer-v2-refs` for citations.
 
 > Requires an Elasticsearch/ES|QL version that supports `index.mode: lookup` and `LOOKUP JOIN`.
+>
+> **Upgrade note:** the content and refs tools now query both schemas and `LOOKUP JOIN`
+> `sourcerer-v2-refs`, so they depend on the v2 lookup index and the schema-anchor indices that
+> `sourcerer setup` creates. Re-run `sourcerer setup` after upgrading **before** relying on the
+> tools — `setup` creates those indices before (re)deploying the Agent Builder tools, so a
+> single `sourcerer setup` keeps the ordering correct; querying with the new tools against a
+> cluster that has not been set up will fail with an unknown-column / missing-index error.
 
 #### Local evaluation
 

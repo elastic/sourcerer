@@ -17,7 +17,10 @@ configuration:
     FROM sourcerer-v1-refs*, sourcerer-v2-refs* METADATA _index
     | WHERE git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
-        AND git.commit LIKE ?git_commit
+        // Tolerate a null completed commit: an incremental branch mid-first-index (or a failed
+        // first index) has git.commit == null and must still be listed so operators can see its
+        // status. `null LIKE "*"` is null (excluded), so short-circuit the default wildcard.
+        AND (?git_commit == "*" OR git.commit LIKE ?git_commit)
         AND git.ref LIKE ?git_ref
         AND git.ref_type LIKE ?git_ref_type
 
