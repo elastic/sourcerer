@@ -24,8 +24,6 @@ import requests
 
 from explorers.base import ContextRegion, Explorer, ExplorerResult
 
-# Matches the citation format Sourcerer's system prompt mandates, e.g.:
-#   [`AuthService`](https://github.com/elastic/elasticsearch/blob/<commit>/src/.../Auth.java#L42-L58)
 # Pro-format instance IDs embed the base commit directly:
 #   {org}__{repo}-{40-char-base-commit}[-v{target}]
 # e.g. ansible__ansible-3db08adbb1cc6aa9941be5e0fc810132c6e1fa4b-vba6da65...
@@ -34,10 +32,8 @@ from explorers.base import ContextRegion, Explorer, ExplorerResult
 # Greedy (.+) backtracks to the last `-{40hex}` so hyphenated repo names work.
 _PRO_ID_RE = re.compile(r"^([^_]+)__(.+)-([0-9a-f]{40})(?:-v|$)")
 
-_CITATION_RE = re.compile(
-    r"\]\(https://github\.com/(?P<org>[^/]+)/(?P<repo>[^/]+)/blob/"
-    r"(?P<commit>[0-9a-fA-F]+)/(?P<path>[^)#]+)"
-    r"#L(?P<start>\d+)(?:-L(?P<end>\d+))?\)"
+_RELEVANT_FILE_RE = re.compile(
+    r"^\s*-\s+(?P<path>.+?):(?P<start>\d+)(?:-(?P<end>\d+))?\s*$"
 )
 
 
@@ -54,15 +50,30 @@ def _instance_to_org_repo(instance_id: str) -> tuple[str, str]:
     return org, repo
 
 
-def parse_citations(markdown: str) -> list[ContextRegion]:
-    """Extract (path, start, end) regions from Sourcerer's cited response,
-    in the order they first appear, de-duplicated."""
+def parse_relevant_files(markdown: str) -> list[ContextRegion]:
+    """Extract `RELEVANT_FILES` entries as (path, start, end) regions.
+
+    The benchmark prompt asks for a single `RELEVANT_FILES:` block, but the parser
+    is tolerant of extra prose before/after that block and de-duplicates repeated
+    entries while preserving first-seen order.
+    """
+    lines = markdown.splitlines()
+    start_idx = 0
+    for idx, line in enumerate(lines):
+        if line.strip() == "RELEVANT_FILES:":
+            start_idx = idx + 1
+            break
     regions: list[ContextRegion] = []
     seen: set[tuple[str, int, int]] = set()
-    for m in _CITATION_RE.finditer(markdown):
-        path = m.group("path")
+    for line in lines[start_idx:]:
+        m = _RELEVANT_FILE_RE.match(line)
+        if not m:
+            continue
+        path = m.group("path").strip()
         start = int(m.group("start"))
         end = int(m.group("end")) if m.group("end") else start
+        if end < start:
+            start, end = end, start
         key = (path, start, end)
         if key in seen:
             continue
@@ -74,7 +85,7 @@ def parse_citations(markdown: str) -> list[ContextRegion]:
 @dataclass
 class SourcererExplorer(Explorer):
     """Calls the Sourcerer agent over Elastic Agent Builder's converse API and
-    turns its inline citations into ranked ContextRegions.
+    turns its `RELEVANT_FILES` response block into ranked ContextRegions.
 
     `commit_map` should be the complete instance_id -> base_commit mapping produced
     by `sourcerer benchmark get` (bench_commit_map.json), so the commit you ask
@@ -83,7 +94,7 @@ class SourcererExplorer(Explorer):
 
     Pass a Rich Console as `console` to print each prompt and response in dim text.
     Pass a `trace_log` path to append one JSONL record per call (prompt, response,
-    citations, timing) for later inspection and optimization.
+    extracted regions, timing) for later inspection and optimization.
     Pass `connector_id` to override the Kibana Agent Builder LLM connector (i.e. choose
     the model). When omitted the deployment's default connector is used.
     """
@@ -130,15 +141,39 @@ class SourcererExplorer(Explorer):
             return []
 
         t0 = time.time()
-
+        
+        # In the interest of comparing like-for-like in terms of reasoning,
+        # token usage, and latency, this prompt closely matches the EXPLORE_PROMPT
+        # of the claude_code explorer in terms of instructions, inputs, and outputs.
+        # It omits the skills and tools for repo discovery and ref resolution and
+        # instead receives the same explicit scoping that the other explorers receive.
         prompt = (
-            f"Repository: {org}/{repo}\n"
-            f"Commit: {commit}\n\n"
-            f"I'm investigating this issue and need to find the {top_k} most "
-            f"relevant source locations to understand and fix it. Scope every "
-            f"tool call to git.org={org}, git.repo={repo}, git.commit={commit}. "
-            f"Cite every file and line range you rely on.\n\n"
-            f"Issue:\n{query}"
+            "You are a code exploration specialist. Explore this repository to find the\n"
+            "source files and line ranges most relevant to understanding and fixing the\n"
+            "following issue.\n"
+            "\n"
+            "Use ONLY your Code Search and Code Citations skills and ONLY your\n"
+            "sourcerer.code.* and sourcerer.files.* tools to explore the codebase.\n"
+            "Focus on finding the ROOT CAUSE, not just symptom locations.\n"
+            "\n"
+            "Do NOT use your Repo Discovery skill, Ref Resolution skill, or\n"
+            "sourcerer.refs.list tool. Scope EVERY sourcerer.code.* and\n"
+            "sourcerer.files.* tool call to these filters:\n"
+            f"- git_org={org}\n"
+            f"- git_repo={repo}\n"
+            f"- git_commit={commit}\n"
+            "\n"
+            "After exploration, output your findings in EXACTLY this format:\n"
+            "\n"
+            "RELEVANT_FILES:\n"
+            "- path/to/file1.py:10-50\n"
+            "- path/to/file2.py:1-100\n"
+            "\n"
+            f"Focus on the root cause. Limit to top {top_k} most relevant regions.\n"
+            "\n"
+            "ISSUE:\n"
+            "\n"
+            f"{query}"
         )
 
         base = self.kibana_url.rstrip("/")
@@ -182,10 +217,10 @@ class SourcererExplorer(Explorer):
         data = resp.json()
         message = data.get("response", {}).get("message", "")
 
-        regions = parse_citations(message)[:top_k]
+        regions = parse_relevant_files(message)[:top_k]
 
         if self.console:
-            self.console.print(f"[dim]← {resp.status_code} ({len(message)} chars, {len(regions)} citations)\n{message}[/dim]")
+            self.console.print(f"[dim]← {resp.status_code} ({len(message)} chars, {len(regions)} regions)\n{message}[/dim]")
 
         self._write_trace({
             "instance_id": instance_id,
@@ -196,7 +231,7 @@ class SourcererExplorer(Explorer):
             "response": message,
             "status_code": resp.status_code,
             "response_chars": len(message),
-            "num_citations": len(regions),
+            "num_regions": len(regions),
             "regions": [{"path": r.path, "start": r.start, "end": r.end} for r in regions],
             "elapsed_s": round(time.time() - t0, 2),
         })

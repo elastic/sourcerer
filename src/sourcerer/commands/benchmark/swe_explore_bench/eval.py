@@ -29,28 +29,6 @@ ISSUE_MAP = "bench_issue_map.json"
 
 EXPLORER_NAME = "sourcerer"
 
-# Repos that no longer exist on GitHub and cannot be indexed; skip their instances.
-_SKIP_REPOS: frozenset[tuple[str, str]] = frozenset({
-    ("arup-group", "genet"),
-    ("cunybpl", "isdparser"),
-    ("fennekki", "cdparacord"),
-    ("hcaptcha", "hmt-basemodels"),
-    ("janosh", "pymatviz"),
-    ("jmborr", "nscsim"),
-    ("mediamath", "t1-python"),
-    ("moj-analytical-services", "etl_manager"),
-    ("nrel", "hescore-hpxml"),
-    ("pennsignals", "dsdk"),
-    ("polygraph-python", "polygraph"),
-    ("spacetelescope", "stwcs"),
-    ("tarohi24", "typedflow"),
-    ("thisfred", "val"),
-    ("tobymao", "sqlglot"),
-    ("uxarray", "uxarray"),
-    ("veinar", "envcloak"),
-    ("zerotwentyfifty", "pact_methodology"),
-})
-
 
 def _get_issue(rec: dict, issue_map: dict[str, str]) -> str:
     iid = rec.get("instance_id", "")
@@ -106,7 +84,7 @@ def run(
         _load_existing_results,
     )
 
-    from .explorer import SourcererExplorer, _instance_to_org_repo
+    from .explorer import SourcererExplorer
 
     bench_path = dest / BENCH_FILE
     commit_map_file = dest / COMMIT_MAP
@@ -131,13 +109,12 @@ def run(
         issue_map = {}
 
     # Same guarantee for the issue text: an instance with an empty issue sends
-    # Sourcerer a prompt ending in a bare "Issue:", which cites nothing and
+    # Sourcerer a prompt ending in a bare "ISSUE:", which yields no regions and
     # scores zero without any visible failure.
     no_issue = [
         r["instance_id"]
         for r in records
-        if _instance_to_org_repo(r.get("instance_id", "")) not in _SKIP_REPOS
-        and not _get_issue(r, issue_map).strip()
+        if not _get_issue(r, issue_map).strip()
     ]
     if no_issue:
         raise SystemExit(
@@ -191,15 +168,10 @@ def run(
     remaining = [
         r for r in records
         if r.get("instance_id", "") not in resumed_ids
-        and _instance_to_org_repo(r.get("instance_id", "")) not in _SKIP_REPOS
     ]
-    skipped = sum(
-        1 for r in records
-        if _instance_to_org_repo(r.get("instance_id", "")) in _SKIP_REPOS
-    )
     console.print(
         f"\n[bold cyan]▶ sourcerer[/bold cyan]  "
-        f"({len(remaining)} to run, {len(resumed_ids)} resumed, {skipped} skipped, "
+        f"({len(remaining)} to run, {len(resumed_ids)} resumed, "
         f"top_k={top_k_list}, concurrency={concurrency}, "
         f"connector={connector_id or 'default'})"
     )
@@ -268,7 +240,7 @@ def run(
                 rec, preds = future.result()
                 iid = rec.get("instance_id", "")
                 _score_and_write(rec, preds)
-                console.print(f"[dim]{done}/{total}[/dim]  {iid}  ({len(preds)} citations)")
+                console.print(f"[dim]{done}/{total}[/dim]  {iid}  ({len(preds)} regions)")
 
     for f in out_files.values():
         f.close()
