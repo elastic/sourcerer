@@ -190,3 +190,15 @@ ref — branch, tag, or commit hash — collapses to a single doc (no per-ref du
   in `sourcerer-v1-refs` mapping the branch to its current commit. To search a branch,
   resolve it to a commit via the refs index (the `sourcerer.resolveref` tool), then filter
   content by `git.commit`.
+
+## Releases
+
+`pyproject.toml` is the source of truth for the project version. Release version changes
+must be made with `uv version <major>.<minor>.<patch>`, committed with the resulting
+`uv.lock` update, reviewed, and merged to `main` before publishing.
+
+Publish releases only by running `./scripts/release.sh vMAJOR.MINOR.PATCH` from an
+up-to-date `main`. Do not create or push release tags manually, modify an existing release
+tag, or bypass the script's lockfile, test, build, branch, version, or remote-tag checks.
+Pushing a valid tag triggers `.github/workflows/release.yml`, which repeats the quality
+checks and creates the GitHub release.

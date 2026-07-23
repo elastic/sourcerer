@@ -8,7 +8,7 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
 
 1. Install the `sourcerer` CLI:
    ```sh
-   uv tool install git+https://github.com/elastic/sourcerer
+   uv tool install "git+https://github.com/elastic/sourcerer.git@v1.0.0"
    ```
 2. Add connection details — create a `.env` in your working directory, then fill it in:
    ```sh
@@ -56,12 +56,21 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
 5. Index the repos: `sourcerer index --config repos.yml`
 6. Chat about your software with the Sourcerer agent in Kibana under "Agents".
 
-Upgrading the `sourcerer` CLI:
+To upgrade, reinstall from the desired release tag:
 
 ```sh
-uv tool upgrade sourcerer --reinstall
+uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@v1.0.0"
 ```
 
+Replace `v1.0.0` with the release you want. To intentionally install the latest
+development version from `main` instead:
+
+```sh
+uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@main"
+```
+
+Git tag installations remain pinned to that release; `uv tool upgrade sourcerer`
+does not automatically discover a newer GitHub tag.
 
 ## How it works
 
@@ -162,3 +171,25 @@ Equivalently, you can invoke the module directly: `uv run python -m sourcerer.cl
 ```sh
 uv run pytest tests/
 ```
+
+### Releases
+
+The version in `pyproject.toml` is the source of truth. Prepare a release through
+a normal pull request:
+
+1. Run `uv version <major>.<minor>.<patch>` (without the `v` prefix).
+2. Review and commit the resulting `pyproject.toml` and `uv.lock` changes.
+3. Merge the pull request to `main` after its tests pass.
+
+From an up-to-date `main` with no tracked changes, publish the corresponding tag:
+
+```sh
+./scripts/release.sh v1.0.0
+```
+
+The script requires a strict `vMAJOR.MINOR.PATCH` tag, verifies that it matches
+`pyproject.toml`, confirms that `main` matches `origin/main` and that the tag is
+new, checks the lockfile, runs the tests, and builds the package. After
+confirmation, it creates and pushes an annotated tag. The tag-triggered GitHub
+Actions workflow repeats the checks and creates the GitHub release only if they
+pass.

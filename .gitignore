@@ -10,7 +10,6 @@ vendor/
 
 # Virtual environments & uv
 .venv/
-uv.lock
 
 # Secrets & local config
 .env
