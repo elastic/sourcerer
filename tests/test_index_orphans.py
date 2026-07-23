@@ -13,7 +13,7 @@ from elastic_transport import ApiResponseMeta, HttpHeaders
 from elasticsearch import NotFoundError
 
 # App packages
-from sourcerer.indices import FILES_INDEX_PREFIX, LINES_INDEX_PREFIX, REFS_INDEX
+from sourcerer.indices import FILES_ALIAS, LINES_ALIAS, REFS_ALIAS
 from sourcerer.queries import (
     enumerate_content_commits,
     enumerate_ref_tuples,
@@ -39,18 +39,22 @@ def _composite_response(tuples: list[tuple[str, str, str]], after_key: dict | No
 
 
 class TestListSourcererIndices:
-    def test_queries_only_files_and_lines_prefixes(self):
+    def test_discovers_backing_indices_through_content_aliases(self):
         es = MagicMock()
-        es.cat.indices.return_value = [
-            {"index": "sourcerer-v1-files~acme~widgets"},
-            {"index": "sourcerer-v1-lines~acme~widgets"},
+        es.indices.get_alias.side_effect = [
+            {"sourcerer-v1-files~acme~widgets": {}},
+            {"sourcerer-v1-lines~acme~widgets": {}},
         ]
         names = list_sourcerer_indices(es)
         assert names == ["sourcerer-v1-files~acme~widgets", "sourcerer-v1-lines~acme~widgets"]
-        _, kwargs = es.cat.indices.call_args
-        assert kwargs["index"] == f"{FILES_INDEX_PREFIX}*,{LINES_INDEX_PREFIX}*"
-        assert REFS_INDEX not in kwargs["index"]
-        assert kwargs["h"] == "index"
+        assert es.indices.get_alias.call_args_list[0].kwargs == {"name": FILES_ALIAS}
+        assert es.indices.get_alias.call_args_list[1].kwargs == {"name": LINES_ALIAS}
+
+    def test_missing_aliases_return_no_indices(self):
+        es = MagicMock()
+        es.indices.get_alias.side_effect = _not_found()
+
+        assert list_sourcerer_indices(es) == []
 
 
 class TestCompositeTuples:
@@ -65,7 +69,7 @@ class TestCompositeTuples:
         assert es.search.call_count == 2
         first_kwargs = es.search.call_args_list[0].kwargs
         second_kwargs = es.search.call_args_list[1].kwargs
-        assert first_kwargs["index"] == REFS_INDEX
+        assert first_kwargs["index"] == REFS_ALIAS
         assert "after" not in first_kwargs["aggs"]["tuples"]["composite"]
         assert second_kwargs["aggs"]["tuples"]["composite"]["after"] == {"org": "acme"}
 
@@ -78,20 +82,17 @@ class TestCompositeTuples:
     def test_missing_index_returns_empty_set(self):
         es = MagicMock()
         es.search.side_effect = _not_found()
-        assert enumerate_content_commits(es, "sourcerer-v1-files~acme~widgets") == set()
+        assert enumerate_content_commits(es, FILES_ALIAS) == set()
 
 
 class TestGatherContentCommitTuples:
-    def test_only_queries_org_repo_granularity_indices(self):
+    def test_queries_content_aliases(self):
         es = MagicMock()
-        es.search.return_value = _composite_response([("acme", "widgets", "aaa")], after_key=None)
-        index_names = [
-            "sourcerer-v1-files~acme",                      # org-only: skipped
-            "sourcerer-v1-files~acme~widgets",               # org~repo: queried
-            "sourcerer-v1-lines~acme~widgets~deadbeef",      # org~repo~commit: skipped
-            "sourcerer-v1-refs",                             # unrelated: skipped
+        es.search.side_effect = [
+            _composite_response([("acme", "widgets", "aaa")], after_key=None),
+            _composite_response([("acme", "widgets", "aaa")], after_key=None),
         ]
-        result = gather_content_commit_tuples(es, index_names)
+        result = gather_content_commit_tuples(es)
         assert result == {("acme", "widgets", "aaa")}
-        assert es.search.call_count == 1
-        assert es.search.call_args.kwargs["index"] == "sourcerer-v1-files~acme~widgets"
+        assert es.search.call_count == 2
+        assert [call.kwargs["index"] for call in es.search.call_args_list] == [FILES_ALIAS, LINES_ALIAS]

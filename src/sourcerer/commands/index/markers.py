@@ -1,7 +1,7 @@
 # sourcerer/commands/index/markers.py
 # Refs-index idempotency: content-addressing a ref's indexed state, the guards that decide
-# whether a ref needs (re)indexing, and writing the completion marker. Everything here reads or
-# writes sourcerer-v1-refs / the per-repo content indices for exactly one commit at a time;
+# whether a ref needs (re)indexing, and writing the completion marker. Reads use the sourcerer
+# aliases; writes use sourcerer-v1-refs and the physical per-repo content indices;
 # broader read-only queries across the whole cluster live in sourcerer/queries.py.
 
 # Standard packages
@@ -11,7 +11,7 @@ import datetime
 from elasticsearch import Elasticsearch, NotFoundError
 
 # App packages
-from ...indices import REFS_INDEX, files_index
+from ...indices import FILES_ALIAS, REFS_ALIAS, REFS_INDEX
 from ...utils import make_doc_id
 from .git import resolve_remote
 
@@ -53,7 +53,7 @@ def content_present(es: Elasticsearch, org: str, repo: str, commit_sha: str) -> 
     complete snapshot, since an interrupted run (Ctrl-C) leaves a partial set of docs behind with
     no marker (see commit_fully_indexed). Used only to detect content GC'd out from under a
     surviving complete marker."""
-    return count_commit_docs(es, files_index(org, repo), org, repo, commit_sha) > 0
+    return count_commit_docs(es, FILES_ALIAS, org, repo, commit_sha) > 0
 
 
 def commit_fully_indexed(es: Elasticsearch, org: str, repo: str, commit_sha: str) -> bool:
@@ -77,7 +77,7 @@ def commit_fully_indexed(es: Elasticsearch, org: str, repo: str, commit_sha: str
         }
     }
     try:
-        return int(es.count(index=REFS_INDEX, query=query)["count"]) > 0
+        return int(es.count(index=REFS_ALIAS, query=query)["count"]) > 0
     except NotFoundError:
         return False
 
@@ -102,7 +102,7 @@ def commit_prefix_indexed(es: Elasticsearch, org: str, repo: str, sha_prefix: st
         }
     }
     try:
-        resp = es.search(index=REFS_INDEX, size=1, query=query)
+        resp = es.search(index=REFS_ALIAS, size=1, query=query)
     except NotFoundError:
         return None
     hits = resp["hits"]["hits"]
@@ -118,9 +118,13 @@ def should_index(es: Elasticsearch, org: str, repo: str, ref_type: str, ref: str
     """
     ref_id = build_ref_id(org, repo, ref_type, ref, commit_sha)
     try:
-        marker = es.get(index=REFS_INDEX, id=ref_id)["_source"]
+        resp = es.search(index=REFS_ALIAS, size=1, query={"ids": {"values": [ref_id]}})
     except NotFoundError:
         return True
+    hits = resp["hits"]["hits"]
+    if not hits:
+        return True
+    marker = hits[0]["_source"]
     if marker.get("status") != "complete":
         return True
     return not content_present(es, org, repo, commit_sha)
@@ -205,7 +209,7 @@ def resolve_head(es: Elasticsearch, org: str, repo: str, ref_type: str, ref: str
     content indices, so retained older snapshots never leak into search results. Returns the
     marker _source, or None if the ref has no complete marker."""
     resp = es.search(
-        index=REFS_INDEX,
+        index=REFS_ALIAS,
         size=1,
         query={"bool": {"filter": [
             {"term": {"git.org": org}},

@@ -1,11 +1,14 @@
 {
   "_meta": {
-    "description": "sourcerer-v1-refs"
+    "description": "sourcerer-refs"
   },
   "index_patterns": [
     "sourcerer-v1-refs*"
   ],
   "template": {
+    "aliases": {
+      "sourcerer-refs": {}
+    },
     "settings": {
       "index": {
         "codec": "best_compression",

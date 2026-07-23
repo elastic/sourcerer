@@ -5,7 +5,7 @@ tags: []
 configuration:
   query: |-
     // Scope the search
-    FROM sourcerer-v1-lines*
+    FROM sourcerer-lines
     | WHERE MATCH(git.org, ?git_org)
         AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit

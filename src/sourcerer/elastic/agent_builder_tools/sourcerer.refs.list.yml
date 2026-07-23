@@ -8,7 +8,7 @@ configuration:
     // so calling with no params lists every ref in every repo. Narrow with any combo
     // of org / repo / ref / ref_type / commit to browse what's available to
     // cat/head/tail/grep/search.
-    FROM sourcerer-v1-refs*
+    FROM sourcerer-refs
     | WHERE git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit

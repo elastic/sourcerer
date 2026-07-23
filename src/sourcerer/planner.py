@@ -153,7 +153,7 @@ def content_delete_set(decisions: list[Decision]) -> set[str]:
 # reach -- a repo dropped from the config entirely, a marker deleted by hand, content left
 # behind by an interrupted run whose marker never got written -- is never visited by
 # plan_repo/content_delete_set. The functions below are a second, independent sweep: given
-# just the physical index names, the (org, repo, commit) tuples recorded in sourcerer-v1-refs,
+# just the physical index names, the (org, repo, commit) tuples read through sourcerer-refs,
 # and the (org, repo, commit) tuples with actual content docs, they find every one of those
 # leftovers. Still pure/no-ES, so a fake index-name list and a couple of tuple sets are enough
 # to exercise every case in a test.

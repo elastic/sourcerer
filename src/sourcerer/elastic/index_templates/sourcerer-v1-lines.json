@@ -1,11 +1,14 @@
 {
   "_meta": {
-    "description": "sourcerer-v1-lines"
+    "description": "sourcerer-lines"
   },
   "index_patterns": [
     "sourcerer-v1-lines*"
   ],
   "template": {
+    "aliases": {
+      "sourcerer-lines": {}
+    },
     "settings": {
       "index": {
         "codec": "best_compression",

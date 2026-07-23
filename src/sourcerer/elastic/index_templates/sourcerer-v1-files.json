@@ -1,11 +1,14 @@
 {
   "_meta": {
-    "description": "sourcerer-v1-files"
+    "description": "sourcerer-files"
   },
   "index_patterns": [
     "sourcerer-v1-files*"
   ],
   "template": {
+    "aliases": {
+      "sourcerer-files": {}
+    },
     "settings": {
       "index": {
         "codec": "best_compression",

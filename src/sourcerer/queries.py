@@ -13,8 +13,8 @@ from elasticsearch import Elasticsearch, NotFoundError
 from elasticsearch.helpers import scan
 
 # App packages
-from .indices import FILES_INDEX_PREFIX, LINES_INDEX_PREFIX, REFS_INDEX
-from .planner import Marker, parse_index_name
+from .indices import FILES_ALIAS, LINES_ALIAS, REFS_ALIAS
+from .planner import Marker
 
 _COMPOSITE_PAGE_SIZE = 1000
 
@@ -42,7 +42,7 @@ def fetch_markers(
     body = {"query": {"bool": {"filter": filters}}}
     out: list[Marker] = []
     try:
-        for hit in scan(es, index=REFS_INDEX, query=body, preserve_order=False):
+        for hit in scan(es, index=REFS_ALIAS, query=body, preserve_order=False):
             src = hit["_source"]
             g = src.get("git", {})
             out.append(Marker(
@@ -67,21 +67,25 @@ def fetch_markers(
 
 
 def list_sourcerer_indices(es: Elasticsearch) -> list[str]:
-    """Every physical sourcerer-v1-{files,lines} index name, via one `_cat/indices` read.
-    Read-side wildcards are safe on every cluster (including Serverless) -- only wildcard
-    *deletes* are the compatibility problem this sweep is designed to avoid, so this is the
-    one place a wildcard is used. sourcerer-v1-refs is a single global index (never
-    per-org/repo), so it's intentionally excluded from this pattern."""
-    pattern = f"{FILES_INDEX_PREFIX}*,{LINES_INDEX_PREFIX}*"
-    rows = es.cat.indices(index=pattern, h="index", format="json")
-    return [row["index"] for row in rows]
+    """Every physical content index behind the read aliases.
+
+    The orphan sweep needs concrete backing names to delete a single index, but discovers them
+    through the aliases so it never reads a versioned index pattern directly.
+    """
+    names: set[str] = set()
+    for alias in (FILES_ALIAS, LINES_ALIAS):
+        try:
+            names.update(es.indices.get_alias(name=alias))
+        except NotFoundError:
+            pass
+    return sorted(names)
 
 
 def enumerate_ref_tuples(es: Elasticsearch) -> set[tuple[str, str, str]]:
-    """Every distinct (git.org, git.repo, git.commit) tuple recorded in sourcerer-v1-refs, via
+    """Every distinct (git.org, git.repo, git.commit) tuple recorded in the refs alias, via
     a paginated composite aggregation (safe over an unbounded number of distinct tuples).
     Returns an empty set if the refs index doesn't exist yet."""
-    return _composite_org_repo_commit_tuples(es, REFS_INDEX)
+    return _composite_org_repo_commit_tuples(es, REFS_ALIAS)
 
 
 def enumerate_content_commits(es: Elasticsearch, index: str) -> set[tuple[str, str, str]]:
@@ -119,15 +123,9 @@ def _composite_org_repo_commit_tuples(es: Elasticsearch, index: str) -> set[tupl
             return out
 
 
-def gather_content_commit_tuples(es: Elasticsearch, index_names: list[str]) -> set[tuple[str, str, str]]:
-    """Union of (org, repo, commit) tuples with content docs, across every org~repo-granularity
-    files/lines index in `index_names`. Org-only and org~repo~commit indices are skipped here --
-    Class-A (orphan_indices) already judges those by name alone, with no per-doc commit variety
-    to aggregate over that isn't already implied by the name itself."""
-    out: set[tuple[str, str, str]] = set()
-    for name in index_names:
-        parsed = parse_index_name(name, FILES_INDEX_PREFIX, LINES_INDEX_PREFIX)
-        if parsed is None or parsed.repo is None or parsed.commit is not None:
-            continue
-        out |= enumerate_content_commits(es, name)
-    return out
+def gather_content_commit_tuples(es: Elasticsearch) -> set[tuple[str, str, str]]:
+    """Union of (org, repo, commit) tuples with content docs across the content read aliases."""
+    return (
+        enumerate_content_commits(es, FILES_ALIAS)
+        | enumerate_content_commits(es, LINES_ALIAS)
+    )

@@ -22,7 +22,7 @@ import yaml
 from elasticsearch import Elasticsearch
 
 # App packages
-from ...indices import files_index, lines_index
+from ...indices import FILES_ALIAS, LINES_ALIAS
 from ...planner import Marker, plan_repo
 from ...progress import ProgressReporter, Unit, make_reporter
 from ...utils import ES_ERRORS, make_client
@@ -107,8 +107,8 @@ def index_ref_in_dir(
         # marker, so it falls through to the else branch and re-indexes rather than
         # recording a half-populated commit as done.
         status = "tagged" if tag else "recorded"
-        files_count = count_commit_docs(es, files_index(org, repo), org, repo, commit_sha)
-        lines_count = count_commit_docs(es, lines_index(org, repo), org, repo, commit_sha)
+        files_count = count_commit_docs(es, FILES_ALIAS, org, repo, commit_sha)
+        lines_count = count_commit_docs(es, LINES_ALIAS, org, repo, commit_sha)
     else:
         reporter.set_total_files(unit, count_tracked_files(repo_dir))
         reporter.set_stage(unit, "indexing")

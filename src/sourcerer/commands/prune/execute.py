@@ -71,7 +71,7 @@ def plan_orphans_now(es: Elasticsearch) -> OrphanPlan:
     between classes."""
     index_names = list_sourcerer_indices(es)
     ref_tuples = enumerate_ref_tuples(es)
-    content_tuples = gather_content_commit_tuples(es, index_names)
+    content_tuples = gather_content_commit_tuples(es)
     return plan_orphans(index_names, ref_tuples, content_tuples)
 
 

@@ -8,6 +8,7 @@ import sys
 import click
 import requests
 import yaml
+from elasticsearch import NotFoundError
 
 # App packages
 from ...utils import make_client
@@ -68,6 +69,17 @@ def load_index_templates(es, templates_dir: pathlib.Path = ELASTICSEARCH_INDEX_T
             template=body.get("template"),
             _meta=body.get("_meta"),
         )
+        for alias in body.get("template", {}).get("aliases", {}):
+            try:
+                es.indices.update_aliases(actions=[{
+                    "add": {
+                        "alias": alias,
+                        "index": ",".join(body["index_patterns"]),
+                    },
+                }])
+            except NotFoundError:
+                # Existing installations may not have an index matching this template yet.
+                pass
         loaded.append(name)
     return loaded
 

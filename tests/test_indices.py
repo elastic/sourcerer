@@ -2,11 +2,18 @@
 check against planner.parse_index_name (their documented inverse)."""
 
 # App packages
-from sourcerer.indices import files_index, lines_index
+from sourcerer.indices import FILES_ALIAS, LINES_ALIAS, REFS_ALIAS, files_index, lines_index
 from sourcerer.planner import parse_index_name
 
 
 class TestIndexNameBuilders:
+    def test_read_aliases(self):
+        assert (FILES_ALIAS, LINES_ALIAS, REFS_ALIAS) == (
+            "sourcerer-files",
+            "sourcerer-lines",
+            "sourcerer-refs",
+        )
+
     def test_files_index_shape(self):
         assert files_index("elastic", "elasticsearch") == "sourcerer-v1-files~elastic~elasticsearch"
 

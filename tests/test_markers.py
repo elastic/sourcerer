@@ -10,7 +10,8 @@ from elastic_transport import ApiResponseMeta, HttpHeaders
 from elasticsearch import NotFoundError
 
 # App packages
-from sourcerer.commands.index.markers import commit_prefix_indexed, pre_clone_skip
+from sourcerer.commands.index.markers import build_ref_id, commit_prefix_indexed, pre_clone_skip, should_index
+from sourcerer.indices import REFS_ALIAS
 
 FULL_SHA = "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60"
 
@@ -31,6 +32,7 @@ class TestCommitPrefixIndexed:
         es.search.return_value = _search_hits(FULL_SHA)
         assert commit_prefix_indexed(es, "acme", "widgets", "cfefb3b") == FULL_SHA
         query = es.search.call_args.kwargs["query"]
+        assert es.search.call_args.kwargs["index"] == REFS_ALIAS
         assert {"prefix": {"git.commit": "cfefb3b"}} in query["bool"]["filter"]
         assert {"term": {"status": "complete"}} in query["bool"]["filter"]
         assert {"term": {"git.org": "acme"}} in query["bool"]["filter"]
@@ -73,3 +75,17 @@ class TestPreCloneSkipCommit:
             es, "acme", "widgets", None, None, "cfefb3b", False,
         )
         assert (skip, ref_for_id, remote_sha) == (False, None, None)
+
+
+class TestShouldIndex:
+    def test_reads_marker_by_searching_the_refs_alias(self):
+        es = MagicMock()
+        es.search.return_value = {"hits": {"hits": [{"_source": {"status": "complete"}}]}}
+
+        assert should_index(es, "acme", "widgets", "branch", "main", FULL_SHA) is False
+
+        assert es.search.call_args.kwargs == {
+            "index": REFS_ALIAS,
+            "size": 1,
+            "query": {"ids": {"values": [build_ref_id("acme", "widgets", "branch", "main", FULL_SHA)]}},
+        }

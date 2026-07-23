@@ -182,13 +182,13 @@ Content is addressed by **commit**, not by ref name. A file's bytes are fully de
 by `(git.org, git.repo, git.commit, file.path)`, so the same file reached via any
 ref — branch, tag, or commit hash — collapses to a single doc (no per-ref duplication).
 
-- **Tags** are *not* stored on content docs. Each tag is one tiny doc in `sourcerer-v1-refs`
+- **Tags** are *not* stored on content docs. Each tag is one tiny doc in `sourcerer-refs`
   mapping the tag to its commit. To search a tagged release, resolve it to a commit via the
-  refs index (the `sourcerer.resolveref` tool), then filter content by `git.commit`.
+  refs index (the `sourcerer.refs.list` tool), then filter content by `git.commit`.
 - **Branches** are *not* stored on content docs (a branch moves; keeping it there would
   force expensive rewrites of the lines index on every move). Each branch is one tiny doc
-  in `sourcerer-v1-refs` mapping the branch to its current commit. To search a branch,
-  resolve it to a commit via the refs index (the `sourcerer.resolveref` tool), then filter
+  in `sourcerer-refs` mapping the branch to its current commit. To search a branch,
+  resolve it to a commit via the refs index (the `sourcerer.refs.list` tool), then filter
   content by `git.commit`.
 
 ## Releases

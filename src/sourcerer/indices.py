@@ -9,6 +9,13 @@ FILES_INDEX_PREFIX = "sourcerer-v1-files"
 LINES_INDEX_PREFIX = "sourcerer-v1-lines"
 REFS_INDEX = "sourcerer-v1-refs"
 
+# Read aliases span all versioned backing indices of their respective kinds. Writes, updates,
+# and deletes deliberately use the physical names above so a future index version can coexist
+# without receiving mutations intended for the current version.
+FILES_ALIAS = "sourcerer-files"
+LINES_ALIAS = "sourcerer-lines"
+REFS_ALIAS = "sourcerer-refs"
+
 
 def files_index(org: str, repo: str) -> str:
     """Return the per-repo files index name, e.g. sourcerer-v1-files~elastic~elasticsearch."""
