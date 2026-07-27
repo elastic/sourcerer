@@ -100,7 +100,7 @@ printf 'Checking lockfile...\n'
 uv lock --check
 
 printf 'Syncing environment...\n'
-uv sync --locked
+uv sync --locked --reinstall
 
 printf 'Running tests...\n'
 uv run --locked pytest tests/
