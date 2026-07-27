@@ -20,7 +20,7 @@ def _dest(name: str) -> Path:
 
 
 def available() -> list[str]:
-    """Benchmark names available to `get` — the subdirectories of the
+    """Benchmark names available to `get` - the subdirectories of the
     `sourcerer.benchmarks` package."""
     root = files("sourcerer.benchmarks")
     return sorted(

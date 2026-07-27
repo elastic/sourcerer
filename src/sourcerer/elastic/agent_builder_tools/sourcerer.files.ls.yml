@@ -6,7 +6,8 @@ configuration:
   query: |-
     // Scope the search
     FROM sourcerer-files
-    | WHERE MATCH(git.org, ?git_org)
+    | WHERE git.host LIKE ?git_host
+        AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit
 
@@ -62,7 +63,7 @@ configuration:
       num_segments > num_input_segments + 1
     )
 
-    // Collapse to one row per unique entry — this turns raw paths into an ls listing.
+    // Collapse to one row per unique entry - this turns raw paths into an ls listing.
     | STATS files = COUNT(*), bytes = SUM(file.size) BY name, is_dir
 
     // Append a trailing "/" to directory entries so they read like ls output.
@@ -73,6 +74,11 @@ configuration:
     | KEEP name
     | LIMIT 1000000
   params:
+    git_host:
+      type: string
+      description: Filter by git host(s)
+      optional: true
+      defaultValue: "*"
     git_org:
       type: string
       description: Filter by git org(s)

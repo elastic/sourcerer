@@ -3,7 +3,7 @@
     "description": "sourcerer-refs"
   },
   "index_patterns": [
-    "sourcerer-v1-refs*"
+    "sourcerer-v2-refs*"
   ],
   "template": {
     "aliases": {
@@ -14,11 +14,13 @@
         "codec": "best_compression",
         "sort": {
           "field": [
+            "git.host",
             "git.org",
             "git.repo",
             "git.ref"
           ],
           "order": [
+            "asc",
             "asc",
             "asc",
             "asc"
@@ -30,6 +32,10 @@
       "properties": {
         "git": {
           "properties": {
+            "host": {
+              "type": "keyword",
+              "normalizer": "lowercase"
+            },
             "org": {
               "type": "keyword",
               "normalizer": "lowercase"

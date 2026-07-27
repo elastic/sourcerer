@@ -8,9 +8,9 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
 
 1. Install the `sourcerer` CLI:
    ```sh
-   uv tool install "git+https://github.com/elastic/sourcerer.git@v1.0.0"
+   uv tool install "git+https://github.com/elastic/sourcerer.git@v2.0.0"
    ```
-2. Add connection details — create a `.env` in your working directory, then fill it in:
+2. Add connection details. Create a `.env` in your working directory, then fill it in:
    ```sh
    cat > .env <<'EOF'
    ELASTICSEARCH_URL=
@@ -22,47 +22,42 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
    #ELASTICSEARCH_PASSWORD=
    EOF
    ```
-3. Choose repos to index — create a `repos.yml`, then edit it (each `match` is a glob over remote branch/tag names):
+3. Define the sources to index. Create `sourcerer.yml`, then edit it. Each source requires `git.host`, `git.org`, `git.repo`, and `git.ref_type`, and each `match` is a pattern over the names of remote tags, branches, or commit hashes:
    ```sh
-   cat > repos.yml <<'EOF'
+   cat > sourcerer.yml <<'EOF'
+   sources:
    # https://github.com/elastic/docs-content
-   - org: elastic
-     repo: docs-content
-     refs:
-     - type: branch
-       match: main
-       retain:
-         count: 1  # Keep only the latest commit from the main branch
+   - git: { host: github, org: elastic, repo: docs-content, ref_type: branch }
+     match: main
+     retain:
+       count: 1  # Keep only the latest commit from the main branch
 
    # https://github.com/elastic/elasticsearch
-   - org: elastic
-     repo: elasticsearch
-     refs:
-     - type: tag
-       match:
-         - v{major}.{minor}.{patch}
-         - v{major}.{minor}.{patch}-{prerelease}
-       since:
-         ref: v8.17.0  # Index everything from this point on
-       retain:
-         version:
-           majors: 2   # Keep only the latest 2 major release tags
-           patches: 1  # Keep only the most recent patch release tag for any minor release tag
-         prerelease: superseded  # Keep release candidate tags until their major tags are released
+   - git: { host: github, org: elastic, repo: elasticsearch, ref_type: tag }
+     match:
+       - v{major}.{minor}.{patch}
+       - v{major}.{minor}.{patch}-{prerelease}
+     since:
+       ref: v8.17.0  # Index everything from this point on
+     retain:
+       version:
+         majors: 2   # Keep only the latest 2 major release tags
+         patches: 1  # Keep only the most recent patch release tag for any minor release tag
+       prerelease: superseded  # Keep release candidate tags until their major tags are released
    EOF
    ```
-   See `repos.example.yml` (or [Indexing multiple repos with a config](AGENTS.md#indexing-multiple-repos-with-a-config)) for version-aware matching, `since` floors, and `retain` policies.
-4. Set up the indices and agent: `sourcerer setup`
-5. Index the repos: `sourcerer index --config repos.yml`
+   The [`sourcerer.yml` specification](specs/sourcerer-yml.md) has the full reference of fields supported by the configuration file.
+4. Set up the indices and agent: `sourcerer setup --config sourcerer.yml`
+5. Index the repos: `sourcerer index --config sourcerer.yml`
 6. Chat about your software with the Sourcerer agent in Kibana under "Agents".
 
 To upgrade, reinstall from the desired release tag:
 
 ```sh
-uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@v1.0.0"
+uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@v2.0.0"
 ```
 
-Replace `v1.0.0` with the release you want. To intentionally install the latest
+Replace `v2.0.0` with the release you want. To intentionally install the latest
 development version from `main` instead:
 
 ```sh
@@ -157,10 +152,10 @@ dependencies into an isolated `./.venv` (gitignored) on first run:
 uv run sourcerer help
 uv run sourcerer setup
 uv run sourcerer index elastic/elasticsearch -b main
-uv run sourcerer index --config repos.yml
+uv run sourcerer index --config sourcerer.yml
 ```
 
-The project is installed in editable mode, so edits under `src/` take effect immediately —
+The project is installed in editable mode, so edits under `src/` take effect immediately -
 no reinstall needed. Because the environment is isolated in `./.venv`, this never conflicts
 with a globally installed `sourcerer` (e.g. from `uv tool install`).
 
@@ -184,7 +179,7 @@ a normal pull request:
 From an up-to-date `main` with no tracked changes, publish the corresponding tag:
 
 ```sh
-./scripts/release.sh v1.0.0
+./scripts/release.sh v2.0.0
 ```
 
 The script requires a strict `vMAJOR.MINOR.PATCH` tag, verifies that it matches

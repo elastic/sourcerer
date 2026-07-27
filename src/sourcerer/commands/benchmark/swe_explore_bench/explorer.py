@@ -89,7 +89,7 @@ class SourcererExplorer(Explorer):
 
     `commit_map` should be the complete instance_id -> base_commit mapping produced
     by `sourcerer benchmark get` (bench_commit_map.json), so the commit you ask
-    Sourcerer to scope to matches what you indexed. It must cover every instance —
+    Sourcerer to scope to matches what you indexed. It must cover every instance -
     there is no fallback.
 
     Pass a Rich Console as `console` to print each prompt and response in dim text.
@@ -133,7 +133,7 @@ class SourcererExplorer(Explorer):
         org, repo = _instance_to_org_repo(instance_id)
         # No fallback to the SHA embedded in pro-format IDs: that is the fix/test
         # commit (see SWE-bench_Pro's before_repo_set_cmd), not the base commit
-        # the benchmark trajectories explored. The commit map must be complete —
+        # the benchmark trajectories explored. The commit map must be complete -
         # `sourcerer benchmark get` builds it and fails loudly on any gap.
         commit = self.commit_map.get(instance_id)
         if not commit:

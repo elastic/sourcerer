@@ -3,7 +3,7 @@
     "description": "sourcerer-lines"
   },
   "index_patterns": [
-    "sourcerer-v1-lines*"
+    "sourcerer-v2-lines*"
   ],
   "template": {
     "aliases": {
@@ -20,6 +20,7 @@
         },
         "sort": {
           "field": [
+            "git.host",
             "git.org",
             "git.repo",
             "git.commit",
@@ -27,6 +28,7 @@
             "line.number"
           ],
           "order": [
+            "asc",
             "asc",
             "asc",
             "asc",
@@ -80,6 +82,10 @@
       "properties": {
         "git": {
           "properties": {
+            "host": {
+              "type": "keyword",
+              "normalizer": "lowercase"
+            },
             "org": {
               "type": "keyword",
               "normalizer": "lowercase"

@@ -16,6 +16,7 @@ from elasticsearch import Elasticsearch
 
 # App packages
 from ...config import RepoConfig
+from ...hosts import Host
 from ...indices import REFS_INDEX
 from ...planner import Marker, content_delete_set, plan_repo
 from ...progress import Unit
@@ -30,8 +31,10 @@ from .selection import _effective_since_floor, _resolve_entry
 def _dry_run_repo(
     es: Elasticsearch,
     cfg: RepoConfig | None,
+    host: str,
     org: str,
     repo: str,
+    clone_url: str,
     group: list[Unit],
     cache_root: pathlib.Path | None,
     ephemeral: bool,
@@ -44,8 +47,8 @@ def _dry_run_repo(
     exactly as a real run would (index / reuse content / up-to-date / skip), then, when `prune`,
     plans the post-index prune over existing markers merged with the refs this run would add.
     Returns a result dict consumed by `_print_dry_run_repo`."""
-    result: dict = {"org": org, "repo": repo, "rows": [], "prune": None, "locked": False}
-    with prepared_repo(org, repo, cache_root, ephemeral) as repo_dir:
+    result: dict = {"host": host, "org": org, "repo": repo, "rows": [], "prune": None, "locked": False}
+    with prepared_repo(host, org, repo, clone_url, cache_root, ephemeral) as repo_dir:
         if repo_dir is None:
             result["locked"] = True
             return result
@@ -65,7 +68,7 @@ def _dry_run_repo(
             if not sha:
                 rows.append((unit, "error", "could not resolve ref", None, None))
                 continue
-            if not force and not should_index(es, org, repo, ref_type, unit.ref, sha):
+            if not force and not should_index(es, host, org, repo, ref_type, unit.ref, sha):
                 rows.append((unit, "up-to-date", "already indexed", sha, cd))
                 continue
             floor = _effective_since_floor(cfg, repo_dir, ref_type, unit.ref, now)
@@ -93,10 +96,10 @@ def _dry_run_repo(
             # (and we're not forcing a rewrite), a real run only records the marker -- no
             # re-ingest. A commit with only partial content from an aborted run has no complete
             # marker, so it shows as "index" (re-ingest), matching what the real run will do.
-            shared = not force and commit_fully_indexed(es, org, repo, sha)
+            shared = not force and commit_fully_indexed(es, host, org, repo, sha)
             rows.append((unit, "reuse" if shared else "index", "content shared" if shared else "", sha, cd))
             synth.append(Marker(
-                id=build_ref_id(org, repo, ref_type, unit.ref, sha),
+                id=build_ref_id(host, org, repo, ref_type, unit.ref, sha),
                 ref=unit.ref, ref_type=ref_type, commit=sha, commit_date=cd, indexed_at=now,
             ))
 
@@ -105,7 +108,7 @@ def _dry_run_repo(
         # (dedup by id: a synthesized marker for an already-present ref collapses onto it). This
         # is exactly the set the post-index `--prune` step plans over.
         if prune and cfg is not None:
-            by_id = {m.id: m for m in fetch_markers(es, org, repo)}
+            by_id = {m.id: m for m in fetch_markers(es, host, org, repo)}
             for m in synth:
                 by_id.setdefault(m.id, m)
             result["prune"] = plan_repo(list(by_id.values()), cfg, now)
@@ -125,12 +128,12 @@ _DRY_RUN_LABELS = {
 def _print_dry_run_repo(result: dict, prune: bool) -> tuple[int, int, int]:
     """Print one repo's combined preview (what would be indexed, then what would be pruned) and
     return (index_count, prune_markers, prune_commits) for the run summary."""
-    org, repo = result["org"], result["repo"]
+    host, org, repo = result["host"], result["org"], result["repo"]
     if result["locked"]:
-        click.echo(f"{org}/{repo}: locked by another sourcerer run — skipped")
+        click.echo(f"{host}/{org}/{repo}: locked by another sourcerer run - skipped")
         return (0, 0, 0)
 
-    click.echo(f"{org}/{repo}")
+    click.echo(f"{host}/{org}/{repo}")
     click.echo("  index:")
     index_count = 0
     for unit, status, detail, sha, cd in result["rows"]:
@@ -165,7 +168,8 @@ def _print_dry_run_repo(result: dict, prune: bool) -> tuple[int, int, int]:
 def dry_run_config(
     es: Elasticsearch,
     entries: list[RepoConfig],
-    cfg_by_repo: dict[tuple[str, str], RepoConfig],
+    cfg_by_repo: dict[tuple[str, str, str], RepoConfig],
+    hosts: dict[str, Host],
     cache_root: pathlib.Path | None,
     ephemeral: bool,
     force: bool,
@@ -183,27 +187,28 @@ def dry_run_config(
     # Phase 1: resolve the plan, identical to the real run (see command.run_config).
     units: list[Unit] = []
     with ThreadPoolExecutor(max_workers=max(1, min(_tuning().resolve_concurrency, len(entries) or 1))) as pool:
-        for fut in [pool.submit(_resolve_entry, entry) for entry in entries]:
+        for fut in [pool.submit(_resolve_entry, entry, hosts[entry.host]) for entry in entries]:
             units.extend(fut.result())
-    units.sort(key=lambda u: (u.org, u.repo, u.ref or "", u.kind))
-    groups: dict[tuple[str, str], list[Unit]] = {}
+    units.sort(key=lambda u: (u.host, u.org, u.repo, u.ref or "", u.kind))
+    groups: dict[tuple[str, str, str], list[Unit]] = {}
     for unit in units:
-        groups.setdefault((unit.org, unit.repo), []).append(unit)
+        groups.setdefault((unit.host, unit.org, unit.repo), []).append(unit)
 
-    click.echo("DRY RUN — no changes will be made to Elasticsearch.\n")
+    click.echo("DRY RUN - no changes will be made to Elasticsearch.\n")
     if not groups:
         click.echo("Nothing selected by the config.")
         return
 
     failures = 0
 
-    def work(item: tuple[tuple[str, str], list[Unit]]) -> dict:
-        (org, repo), group = item
-        cfg = cfg_by_repo.get((org, repo))
+    def work(item: tuple[tuple[str, str, str], list[Unit]]) -> dict:
+        (host, org, repo), group = item
+        cfg = cfg_by_repo.get((host, org, repo))
+        clone_url = hosts[host].clone_url(org, repo)
         try:
-            return _dry_run_repo(es, cfg, org, repo, group, cache_root, ephemeral, force, prune, now)
+            return _dry_run_repo(es, cfg, host, org, repo, clone_url, group, cache_root, ephemeral, force, prune, now)
         except (FileNotFoundError, subprocess.CalledProcessError, ValueError, *ES_ERRORS) as e:
-            return {"org": org, "repo": repo, "error": str(e)}
+            return {"host": host, "org": org, "repo": repo, "error": str(e)}
 
     # Clone/fetch + resolve repos concurrently (fetches release the GIL); collect all results and
     # print in sorted plan order so the combined report is deterministic and never interleaved.
@@ -214,7 +219,7 @@ def dry_run_config(
     for r in results:
         if r.get("error"):
             failures += 1
-            click.echo(f"{r['org']}/{r['repo']}: error: {r['error']}", err=True)
+            click.echo(f"{r['host']}/{r['org']}/{r['repo']}: error: {r['error']}", err=True)
             continue
         ci, mk, cm = _print_dry_run_repo(r, prune)
         tot_index += ci

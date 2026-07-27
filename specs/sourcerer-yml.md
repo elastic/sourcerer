@@ -1,0 +1,464 @@
+# Specification for sourcerer.yml
+
+sourcerer.yml is a configuration file that governs how the `sourcerer` CLI performs its `setup`, `index`, and `prune` commands.
+
+## Overview
+
+|Field                                  |Allowed type(s)      |Required|Notes|
+|---------------------------------------|---------------------|--------|-----|
+|`hosts`                                |Array[Object]        |No      ||
+|`hosts[i].id`                          |String               |Yes     ||
+|`hosts[i].name`                        |String               |No      ||
+|`hosts[i].clone`                       |Object               |Yes     ||
+|`hosts[i].clone.protocol`              |String               |No      ||
+|`hosts[i].clone.url`                   |String               |Yes     ||
+|`hosts[i].links`                       |Object               |Yes     ||
+|`hosts[i].links.directory`             |String               |Yes     ||
+|`hosts[i].links.file`                  |String               |Yes     ||
+|`hosts[i].links.line`                  |String               |Yes     ||
+|`hosts[i].links.line_range`            |String               |Yes     ||
+|`schedules`                            |Array                |No      |NOT IMPLEMENTED|
+|`schedules[i].git`                     |Object               |No      |NOT IMPLEMENTED|
+|`schedules[i].git.host`                |String, Array[String]|No      |NOT IMPLEMENTED|
+|`schedules[i].git.org`                 |String, Array[String]|No      |NOT IMPLEMENTED|
+|`schedules[i].git.repo`                |String, Array[String]|No      |NOT IMPLEMENTED|
+|`schedules[i].git.commit`              |String, Array[String]|No      |NOT IMPLEMENTED|
+|`schedules[i].schedule`                |String, Array[String]|No      |NOT IMPLEMENTED|
+|`sources`                              |Array[Object]        |No      ||
+|`sources[i].git`                       |Object               |Yes     ||
+|`sources[i].git.host`                  |String               |Yes     ||
+|`sources[i].git.org`                   |String               |Yes     ||
+|`sources[i].git.repo`                  |String               |Yes     ||
+|`sources[i].git.ref_type`              |String               |Yes     ||
+|`sources[i].match`                     |String, Array[String]|No      ||
+|`sources[i].since`                     |Object               |No      ||
+|`sources[i].since.age`                 |String               |No      ||
+|`sources[i].since.date`                |String               |No      ||
+|`sources[i].since.commit`              |String               |No      ||
+|`sources[i].since.ref`                 |String               |No      ||
+|`sources[i].retain`                    |Object               |No      ||
+|`sources[i].retain.age`                |String               |No      ||
+|`sources[i].retain.count`              |Integer              |No      ||
+|`sources[i].retain.version`            |Object               |No      ||
+|`sources[i].retain.version.majors`     |Integer              |No      ||
+|`sources[i].retain.version.minors`     |Integer              |No      ||
+|`sources[i].retain.version.patches`    |Integer              |No      ||
+|`sources[i].retain.version.builds`     |Integer              |No      ||
+|`sources[i].retain.version.prereleases`|Integer              |No      ||
+|`sources[i].retain.prerelease`         |String               |No      ||
+|`sources[i].schedule`                  |String               |No      |NOT IMPLEMENTED|
+
+Notes:
+- Fields can be expressed either in nested format or flat dotted format.
+- When an optional field has a descendant that is required, it means the descendent is only required if its ancestor exists.
+
+## Fields
+
+### `hosts`
+
+Holds information about git hosts. This is necessary when indexing code from self-managed git hosts.
+
+When omitted, Sourcerer defaults to a hardcoded list of known git hosts (e.g. GitHub, GitLab, BitBucket).
+
+When given, entries are merged with the hardcoded list of known git hosts.
+
+If a given entry overwrites an entry from the hardcoded list of known git hosts, only the given fields overwrite their respective fields in the hardcoded entry, while other fields in the hardcoded entry keep their default values.
+
+- Required: No
+- Default: `null`
+- Type: Array[Object]
+
+### `hosts[i].id`
+
+Value of `git.host` used in sourcerer.yml, documents, index names, and _id generation.
+
+Example: `github`
+
+- Required: Yes (if `hosts` exists)
+- Type: String
+- Validation:
+  - Cannot contain these characters: `~`, `\`, `/`, `*`, `?`, `"`, `<`, `>`, `|`, `:`
+  - Cannot contain uppercase characters or whitespace characters
+
+### `hosts[i].name`
+
+Human-readable name of the git hosting provider used in citation skills.
+
+Example: `GitHub`
+
+- Required: No
+- Type: String
+- Default: Uses the value of `hosts[i].id`
+
+### `hosts[i].clone`
+
+Defines how to perform `git clone` during indexing.
+
+- Required: Yes (unless overwriting the field of a hardcoded host)
+- Type: Object
+
+### `hosts[i].clone.protocol`
+
+Configures the use of `https` or `ssh` when running `git clone` during indexing.
+
+- Required: No
+- Type: String
+- Default: `https`
+- Validation:
+  - Must be either `https` or `ssh` (currently only `https` is implemented)
+
+### `hosts[i].clone.url`
+
+URL template for repositories when running `git clone` during indexing.
+
+The `git` fields from the `sourcerer-v2-refs` index can be referenced as variables with curly braces (e.g. `{git.org}`, `{git.repo}`).
+
+Example: `https://github.com/{git.org}/{git.repo}.git`
+
+- Required: Yes (unless overwriting the field of a hardcoded host)
+- Type: String
+
+### `hosts[i].links`
+
+Holds URLs templates for citation links used by the citation skills in Agent Builder.
+
+- Required: Yes (unless overwriting the field of a hardcoded host)
+- Type: Object
+
+### `hosts[i].links.directory`
+
+URL template for citing links to a directory in a repo. Used by the citation skills in Agent Builder.
+
+Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be referenced as variables with curly braces (e.g. `{git.org}`, `{file.directory}`).
+
+Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.directory}`
+
+- Required: Yes (unless overwriting the field of a hardcoded host)
+- Type: String
+
+### `hosts[i].links.file`
+
+URL template for citing links to a file in a repo. Used by the citation skills in Agent Builder.
+
+Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`).
+
+Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}`
+
+- Required: Yes (unless overwriting the field of a hardcoded host)
+- Type: String
+
+### `hosts[i].links.line`
+
+URL template for citing links to a line of code in a repo. Used by the citation skills in Agent Builder.
+
+Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`, `{line.number}`).
+
+Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number}`
+
+- Required: Yes (unless overwriting the field of a hardcoded host)
+- Type: String
+
+### `hosts[i].links.line_range`
+
+URL template for citing links to a range of lines of code in a repo. Used by the citation skills in Agent Builder.
+
+Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`) as well as fields returned by the `sourcerer.code.*` and `sourcerer.files.*` tools in Agent Builder (e.g. `{line.number_start}`, `{line.number_end}`).
+
+Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number_start}-L{line.number_end}`
+
+- Required: Yes (unless overwriting the field of a hardcoded host)
+- Type: String
+
+### `schedules`
+
+NOT IMPLEMENTED
+
+### `schedules[i].git`
+
+NOT IMPLEMENTED
+
+### `schedules[i].git.host`
+
+NOT IMPLEMENTED
+
+### `schedules[i].git.org`
+
+NOT IMPLEMENTED
+
+### `schedules[i].git.repo`
+
+NOT IMPLEMENTED
+
+### `schedules[i].git.commit`
+
+NOT IMPLEMENTED
+
+### `sources`
+
+Holds information on which refs to index and how long to retain them until they qualify for pruning.
+
+- Required: No
+- Type: Array[Object]
+- Default: `null` (omitted)
+
+### `sources[i].git`
+
+Scopes the selection of refs to match for indexing.
+
+Each source names exactly one `(host, org, repo, ref_type)` to index. Every `sources[i].git.*` field is a single, required, concrete string (no wildcards and no arrays). Sources that share the same `(host, org, repo)` are grouped together, so their retention policies combine (see `sources[i].retain`).
+
+- Required: Yes (if the source exists)
+- Type: Object
+
+### `sources[i].git.host`
+
+The `git.host` of the refs to index.
+
+- Required: Yes
+- Type: String
+- Validation:
+  - Must be a single concrete host id (no wildcards, no arrays)
+  - Must be a known built-in host id, or a host id defined under `hosts:`
+  - Same character rules as `hosts[i].id`
+
+### `sources[i].git.org`
+
+The `git.org` of the refs to index. May include a provider-specific extra segment folded in with a plus sign (e.g. `elastic+us-east-1` for AWS CodeCommit, `elastic+MyProject` for Azure DevOps).
+
+- Required: Yes
+- Type: String
+- Validation:
+  - Must be a single concrete value (no wildcards, no arrays)
+
+### `sources[i].git.repo`
+
+The `git.repo` of the refs to index.
+
+- Required: Yes
+- Type: String
+- Validation:
+  - Must be a single concrete value (no wildcards, no arrays)
+
+### `sources[i].git.ref_type`
+
+The `git.ref_type` of the refs to index.
+
+- Required: Yes
+- Type: String
+- Validation:
+  - Must be exactly one of `"tag"`, `"branch"`, or `"commit"` (no arrays)
+
+### `sources[i].match`
+
+Pattern(s) to match against the ref names of branches, tags, or commits within the scope defined in `sources[i].git`.
+
+Can be a static string (e.g. `"main"`, `"master"`) or a string containing semantic version (SemVer) components expressed with curly braces.
+
+Supported SemVer variables:
+
+- `{major}` (e.g. the `1` in `"v1.2.3.4-rc1"`)
+- `{minor}` (e.g. the `2` in `"v1.2.3.4-rc1"`)
+- `{patch}` (e.g. the `3` in `"v1.2.3.4-rc1"`)
+- `{build}` (e.g. the `4` in `"v1.2.3.4-rc1"`)
+- `{prerelease}` (e.g. the `rc1` in `"v1.2.3.4-rc1"`)
+
+Example: `"v{major}.{minor}.{patch}"` will match `"v1.2.3"` but not  `"1.2.3"`, `"v1.2"`. `"v1.2.3-rc1"`.
+
+Multiple patterns can be given as an array of strings (e.g. `[ "v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}" ]`).
+
+When omitted, all refs within the scope defined in `sources[i].git` will qualify for indexing if they don't also qualify for pruning.
+
+- Required: No
+- Type: String or Array[String]
+- Default: `null` (omitted)
+
+### `sources[i].since`
+
+Defines the starting point for indexing relative to the most recent point in the commit history within the scope defined in `sources[i].git`.  The starting point is an inclusion floor.
+
+Exactly one child field can be given (`age`, `date`, `commit`, or `ref`).
+
+When `null`, empty (`{}`), or omitted, the entire history is considered for indexing, and filtered only by `sources[i].match` and `sources[i].retain`.
+
+- Required: No
+- Type: Object
+- Default: `null` (omitted)
+
+### `sources[i].since.age`
+
+An age relative to the present from which to begin indexing (e.g. `"30d"`, `"1y"`).
+
+- Required: No
+- Type: String
+- Default: `null` (omitted)
+
+### `sources[i].since.date`
+
+A specific date from which to begin indexing (e.g. `"2026-01-01"`).
+
+- Required: No
+- Type: String
+- Default: `null` (omitted)
+- Validation:
+  - Must match the date pattern `YYYY-MM-DD`
+
+### `sources[i].since.commit`
+
+A specific commit hash from which to begin indexing (e.g. `"2d8cdecce194d40c2b5d6a0270a13f7ec125941f"`).
+
+- Required: No
+- Type: String
+- Default: `null` (omitted)
+
+### `sources[i].since.ref`
+
+A specific ref name from which to begin indexing (e.g. `"v1.2.3"`).
+
+- Required: No
+- Type: String
+- Default: `null` (omitted)
+
+### `sources[i].retain`
+
+Defines how long to retain indexed refs before they qualify for pruning. Also prevents indexing refs that already qualify for pruning.
+
+When multiple criteria (`age`, `count`, `version`) are specified, the strictest criteria that matches at runtime will be used.
+
+If omitted, indexed refs will never qualify for pruning and will be kept forever.
+
+All values are inclusive.
+
+- Required: No
+- Type: Object
+- Default: `null` (omitted)
+
+### `sources[i].retain.age`
+
+The age of refs to retain since the present (e.g. `90d`).
+
+- Required: No
+- Type: String
+- Default: `null` (omitted)
+
+### `sources[i].retain.count`
+
+The number of refs to retain.
+
+- Required: No
+- Type: Integer
+- Default: `null` (omitted)
+
+### `sources[i].retain.version`
+
+The semantic version of refs to retain.
+
+Each field keeps the newest *n* values at that level within its parent group (a threshold of `latest − (n−1)`), not a count of existing refs.
+
+Omit a field (or set `null`) for no constraint at that level.
+
+- Required: No
+- Type: Object
+- Default: `null` (omitted)
+
+### `sources[i].retain.version.majors`
+
+The number of major versions to retain before a ref qualifies for pruning.
+
+- Required: No
+- Type: Integer
+- Default: `null` (omitted)
+
+### `sources[i].retain.version.minors`
+
+The number of minor versions to retain for each retained major version before a ref qualifies for pruning.
+
+- Required: No
+- Type: Integer
+- Default: `null` (omitted)
+
+### `sources[i].retain.version.patches`
+
+The number of patch versions to retain for each retained major/minor version (whichever is most specific) before a ref qualifies for pruning.
+
+- Required: No
+- Type: Integer
+- Default: `null` (omitted)
+
+### `sources[i].retain.version.builds`
+
+The number of build versions to retain for each retained major/minor/build version (whichever is most specific) before a ref qualifies for pruning.
+
+- Required: No
+- Type: Integer
+- Default: `null` (omitted)
+
+### `sources[i].retain.version.prereleases`
+
+The number of prerelease versions to retain for each retained major/minor/build/patch version (whichever is most specific) before a ref qualifies for pruning.
+
+- Required: No
+- Type: Integer
+- Default: `null` (omitted)
+
+### `sources[i].retain.prerelease`
+
+Whether to keep or drop prelease versions once its respective version is generally available.
+
+Example: `"v1.2.3-rc1"` qualifies for pruning if `"v1.2.3"` exists and `sources[i].retain.prerelease` is `"superseded"`.
+
+- Required: No
+- Type: String
+- Default: `"keep"`
+- Validation:
+  - Must be either `"keep"` or `"superseded"`
+
+### `sources[i].schedule`
+
+NOT IMPLEMENTED
+
+Configures the indexing schedule for refs that match `sources[i].match`, overriding anything in `schedules` that might have otherwise applied to those refs.
+
+When omitted, refs that match `sources[i].match` will always qualify for indexing (if they don't also qualify for pruning).
+
+- Required: No
+- Type: String
+- Default: `null` (omitted)
+- Validation:
+  - Must use cron syntax (e.g. `"0 * * * *"`)
+
+## Example
+
+Here are the full example contents of sourcerer.yml that will replace repos.yml and remain referenced by the --config argument of commands:
+
+```yaml
+hosts:
+- id: github
+  name: GitHub
+  clone:
+    protocol: "https"
+    url: "https://github.com/{git.org}/{git.repo}.git"
+  links:
+    directory: "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.directory}"
+    file:  "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}"
+    line: "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number}"
+    line_range: "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number_start}-L{line.number_end}"
+
+# NOT IMPLEMENTED
+# # Configure when to index the sources during `sourcerer index`
+# # This is separate from "sources" because most schedules will be coarsely defined, while sources are much more specific (refs).
+# # schedules: # optional, defaults to [{git: {}, schedule: "* * * * *"}]
+# - git: {} # default schedule for everything
+#   schedule: "* * * * *"
+# - git: { host: "github", org: "elastic" }
+#   schedule: "0 * * * *"
+# - git: { host: "github", org: "elastic", repo: "elasticsearch" }
+#   schedule: "0 0 * * *"
+
+sources:
+- git: { host: "github", org: "elastic", repo: "elasticsearch", ref_type: "tag" }
+  match: [ "v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}" ]
+  since.ref: "v1.0.0"
+  retain.version: { majors: 2, patches: 1 }
+  retain.prerelease: superseded
+  # schedule: "0 0 * * *" # override "schedules" (IGNORE: this is a future config field) # NOT IMPLEMENTED
+```

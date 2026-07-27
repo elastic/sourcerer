@@ -29,12 +29,16 @@ def _parse_dt(value: str | None) -> datetime.datetime | None:
 
 
 def fetch_markers(
-    es: Elasticsearch, org: str, repo: str,
+    es: Elasticsearch, host: str, org: str, repo: str,
     ref_type: str | None = None, ref: str | None = None,
 ) -> list[Marker]:
     """Every ref marker for a repo (optionally narrowed to one ref), read via scan. Returns
     [] if the refs index does not exist yet. Shared by `prune` and the inline head-only GC."""
-    filters = [{"term": {"git.org": org}}, {"term": {"git.repo": repo}}]
+    filters = [
+        {"term": {"git.host": host}},
+        {"term": {"git.org": org}},
+        {"term": {"git.repo": repo}},
+    ]
     if ref_type is not None:
         filters.append({"term": {"git.ref_type": ref_type}})
     if ref is not None:
@@ -81,26 +85,28 @@ def list_sourcerer_indices(es: Elasticsearch) -> list[str]:
     return sorted(names)
 
 
-def enumerate_ref_tuples(es: Elasticsearch) -> set[tuple[str, str, str]]:
-    """Every distinct (git.org, git.repo, git.commit) tuple recorded in the refs alias, via
-    a paginated composite aggregation (safe over an unbounded number of distinct tuples).
+def enumerate_ref_tuples(es: Elasticsearch) -> set[tuple[str, str, str, str]]:
+    """Every distinct (git.host, git.org, git.repo, git.commit) tuple recorded in the refs alias,
+    via a paginated composite aggregation (safe over an unbounded number of distinct tuples).
     Returns an empty set if the refs index doesn't exist yet."""
-    return _composite_org_repo_commit_tuples(es, REFS_ALIAS)
+    return _composite_host_org_repo_commit_tuples(es, REFS_ALIAS)
 
 
-def enumerate_content_commits(es: Elasticsearch, index: str) -> set[tuple[str, str, str]]:
-    """Every distinct (git.org, git.repo, git.commit) tuple with at least one doc in `index` (a
-    single files or lines physical index). Returns an empty set if `index` doesn't exist."""
-    return _composite_org_repo_commit_tuples(es, index)
+def enumerate_content_commits(es: Elasticsearch, index: str) -> set[tuple[str, str, str, str]]:
+    """Every distinct (git.host, git.org, git.repo, git.commit) tuple with at least one doc in
+    `index` (a single files or lines physical index). Returns an empty set if `index` doesn't
+    exist."""
+    return _composite_host_org_repo_commit_tuples(es, index)
 
 
-def _composite_org_repo_commit_tuples(es: Elasticsearch, index: str) -> set[tuple[str, str, str]]:
-    out: set[tuple[str, str, str]] = set()
+def _composite_host_org_repo_commit_tuples(es: Elasticsearch, index: str) -> set[tuple[str, str, str, str]]:
+    out: set[tuple[str, str, str, str]] = set()
     after: dict | None = None
     while True:
         composite: dict = {
             "size": _COMPOSITE_PAGE_SIZE,
             "sources": [
+                {"host": {"terms": {"field": "git.host"}}},
                 {"org": {"terms": {"field": "git.org"}}},
                 {"repo": {"terms": {"field": "git.repo"}}},
                 {"commit": {"terms": {"field": "git.commit"}}},
@@ -117,14 +123,15 @@ def _composite_org_repo_commit_tuples(es: Elasticsearch, index: str) -> set[tupl
         if not buckets:
             return out
         for b in buckets:
-            out.add((b["key"]["org"], b["key"]["repo"], b["key"]["commit"]))
+            out.add((b["key"]["host"], b["key"]["org"], b["key"]["repo"], b["key"]["commit"]))
         after = agg.get("after_key")
         if after is None:
             return out
 
 
-def gather_content_commit_tuples(es: Elasticsearch) -> set[tuple[str, str, str]]:
-    """Union of (org, repo, commit) tuples with content docs across the content read aliases."""
+def gather_content_commit_tuples(es: Elasticsearch) -> set[tuple[str, str, str, str]]:
+    """Union of (host, org, repo, commit) tuples with content docs across the content read
+    aliases."""
     return (
         enumerate_content_commits(es, FILES_ALIAS)
         | enumerate_content_commits(es, LINES_ALIAS)

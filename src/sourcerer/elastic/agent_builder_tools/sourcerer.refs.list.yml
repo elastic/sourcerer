@@ -9,17 +9,23 @@ configuration:
     // of org / repo / ref / ref_type / commit to browse what's available to
     // cat/head/tail/grep/search.
     FROM sourcerer-refs
-    | WHERE git.org LIKE ?git_org
+    | WHERE git.host LIKE ?git_host
+        AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit
         AND git.ref LIKE ?git_ref
         AND git.ref_type LIKE ?git_ref_type
 
     // Most recent first so a moved branch's current commit leads
-    | KEEP git.org, git.repo, git.ref, git.ref_type, git.commit, git.commit_date, status, files_count, lines_count, indexed_at
+    | KEEP git.host, git.org, git.repo, git.ref, git.ref_type, git.commit, git.commit_date, status, files_count, lines_count, indexed_at
     | SORT indexed_at DESC
     | LIMIT 1000
   params:
+    git_host:
+      type: string
+      description: Filter by git host(s)
+      optional: true
+      defaultValue: "*"
     git_org:
       type: string
       description: Filter by git org(s) (supports * wildcards)

@@ -65,9 +65,21 @@ def help_cmd(ctx):
 @env_option
 @auth_options
 @click.option("--kb-url", envvar="KIBANA_URL", default=None, help="Kibana URL for agent builder setup.")
-def setup(url, api_key, username, password, kb_url):
-    """Idempotently load index templates and Kibana agent builder objects."""
-    setup_cmd.run(url, api_key, username, password, kb_url)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="sourcerer.yml whose 'hosts:' section customizes/extends the built-in git-host defaults "
+    "used to generate per-host citation skills. Omit to use only the built-in host defaults.",
+)
+def setup(url, api_key, username, password, kb_url, config_path):
+    """Idempotently load index templates and Kibana agent builder objects.
+
+    Generates one citation skill per known/configured git host (built-in defaults merged with
+    the config's 'hosts:' overrides) and pushes them alongside the base tools/skills/agent.
+    """
+    setup_cmd.run(url, api_key, username, password, kb_url, config_path)
 
 
 @cli.command()
@@ -157,7 +169,7 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
 @env_option
 @auth_options
 def prune(config_path, dry_run, quiet, url, api_key, username, password):
-    """Delete indexed refs that fall outside their repos.yml retention policies, then sweep
+    """Delete indexed refs that fall outside their sourcerer.yml retention policies, then sweep
     for orphans.
 
     With --config, applies the same retain policies the `index` command uses to skip doomed

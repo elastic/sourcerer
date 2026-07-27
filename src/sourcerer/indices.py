@@ -4,10 +4,13 @@
 # everywhere. Kept dependency-free (no ES, no click) so both command packages -- and anything
 # that reads index names without touching a cluster -- can import it without pulling in either
 # command's logic.
+#
+# v2 (multi-host): content index names carry a leading git.host segment, so the same org/repo on
+# two different hosts lands in distinct backing indices. See sourcerer/hosts.py.
 
-FILES_INDEX_PREFIX = "sourcerer-v1-files"
-LINES_INDEX_PREFIX = "sourcerer-v1-lines"
-REFS_INDEX = "sourcerer-v1-refs"
+FILES_INDEX_PREFIX = "sourcerer-v2-files"
+LINES_INDEX_PREFIX = "sourcerer-v2-lines"
+REFS_INDEX = "sourcerer-v2-refs"
 
 # Read aliases span all versioned backing indices of their respective kinds. Writes, updates,
 # and deletes deliberately use the physical names above so a future index version can coexist
@@ -17,11 +20,11 @@ LINES_ALIAS = "sourcerer-lines"
 REFS_ALIAS = "sourcerer-refs"
 
 
-def files_index(org: str, repo: str) -> str:
-    """Return the per-repo files index name, e.g. sourcerer-v1-files~elastic~elasticsearch."""
-    return f"{FILES_INDEX_PREFIX}~{org.lower()}~{repo.lower()}"
+def files_index(host: str, org: str, repo: str) -> str:
+    """Per-repo files index name, e.g. sourcerer-v2-files~github~elastic~elasticsearch."""
+    return f"{FILES_INDEX_PREFIX}~{host.lower()}~{org.lower()}~{repo.lower()}"
 
 
-def lines_index(org: str, repo: str) -> str:
-    """Return the per-repo lines index name, e.g. sourcerer-v1-lines~elastic~elasticsearch."""
-    return f"{LINES_INDEX_PREFIX}~{org.lower()}~{repo.lower()}"
+def lines_index(host: str, org: str, repo: str) -> str:
+    """Per-repo lines index name, e.g. sourcerer-v2-lines~github~elastic~elasticsearch."""
+    return f"{LINES_INDEX_PREFIX}~{host.lower()}~{org.lower()}~{repo.lower()}"

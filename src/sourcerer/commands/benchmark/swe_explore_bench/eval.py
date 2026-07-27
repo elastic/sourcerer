@@ -1,8 +1,8 @@
-"""`sourcerer benchmark run swe_explore_bench` — evaluate SourcererExplorer.
+"""`sourcerer benchmark run swe_explore_bench` - evaluate SourcererExplorer.
 
 Imports SWE-Explore-Bench's own reusable, module-level pieces from the checkout
-(`eval.ExploreEvaluator`; `eval_runner`'s loading/formatting helpers) — nothing is
-copied — and drives them with the package's SourcererExplorer. The checkout dir is
+(`eval.ExploreEvaluator`; `eval_runner`'s loading/formatting helpers) - nothing is
+copied - and drives them with the package's SourcererExplorer. The checkout dir is
 put on `sys.path` first so those imports (and the explorer's `from explorers.base
 import ...`) resolve against it.
 
@@ -188,7 +188,7 @@ def run(
     done = 0
 
     def _explore_one(rec):
-        """Network call only — runs in worker thread. Thread-safe: builds its own Session."""
+        """Network call only - runs in worker thread. Thread-safe: builds its own Session."""
         iid = rec.get("instance_id", "")
         try:
             results = explorer.explore(
@@ -200,7 +200,7 @@ def run(
             return rec, []
 
     def _score_and_write(rec, preds):
-        """Scoring + file writes — called on the main thread only (evaluator is not thread-safe)."""
+        """Scoring + file writes - called on the main thread only (evaluator is not thread-safe)."""
         nonlocal done
         iid = rec.get("instance_id", "")
         done += 1

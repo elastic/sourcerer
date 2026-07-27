@@ -32,13 +32,13 @@ class _Row:
 
     WHAT names the actual object being deleted, which differs by tag rather than forcing one
     shape:
-      - policy:*                       -> "org/repo@ref (commit)" -- a marker, addressed by
+      - policy:*                       -> "host/org/repo@ref (commit)" -- a marker, addressed by
         its ref since two refs can point at the same pruned commit and be indistinguishable
         without it.
-      - orphan:content, orphan:marker   -> "org/repo@commit" -- no ref exists for either case.
+      - orphan:content, orphan:marker   -> "host/org/repo@commit" -- no ref exists for either case.
       - orphan:index                    -> the index's own name (e.g.
-        "sourcerer-v1-files~org~repo") -- not commit- or even repo-addressable, since an
-        org-level orphan index spans every repo under that org."""
+        "sourcerer-v2-files~host~org~repo") -- not commit- or even repo-addressable, since a
+        host~org-level orphan index spans every repo under that host+org."""
 
     what: str
     why: str
@@ -48,7 +48,7 @@ def _retention_rows(cfg, decisions: list) -> list[_Row]:
     """Rows for markers a repo's retain policy would prune (see _Row for the WHAT/WHY
     shapes). Only 'delete' decisions are reported -- kept and unmanaged markers aren't being
     deleted, so there's nothing actionable to grep for in them."""
-    return [_Row(f"{cfg.org}/{cfg.repo}@{d.marker.ref} ({d.marker.commit})",
+    return [_Row(f"{cfg.host}/{cfg.org}/{cfg.repo}@{d.marker.ref} ({d.marker.commit})",
                  "policy:" + ",".join(d.criteria))
             for d in decisions if d.action == "delete"]
 
@@ -59,12 +59,12 @@ def _orphan_rows(plan: OrphanPlan) -> list[_Row]:
     rows = []
     for name in plan.orphan_index_names:
         rows.append(_Row(name, "orphan:index"))
-    for (org, repo), commits in sorted(plan.orphan_content.items()):
+    for (host, org, repo), commits in sorted(plan.orphan_content.items()):
         for commit in sorted(commits):
-            rows.append(_Row(f"{org}/{repo}@{commit}", "orphan:content"))
-    for (org, repo), commits in sorted(plan.orphan_marker_commits.items()):
+            rows.append(_Row(f"{host}/{org}/{repo}@{commit}", "orphan:content"))
+    for (host, org, repo), commits in sorted(plan.orphan_marker_commits.items()):
         for commit in sorted(commits):
-            rows.append(_Row(f"{org}/{repo}@{commit}", "orphan:marker"))
+            rows.append(_Row(f"{host}/{org}/{repo}@{commit}", "orphan:marker"))
     return rows
 
 

@@ -6,7 +6,8 @@ configuration:
   query: |-
     // Scope the search
     FROM sourcerer-lines
-    | WHERE MATCH(git.org, ?git_org)
+    | WHERE git.host LIKE ?git_host
+        AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit
         AND file.path LIKE ?file_path
@@ -41,17 +42,22 @@ configuration:
 
     // Collapse each file's lines into one ordered, deduped-safe list (the prefix prevents VALUES from dropping repeated lines)
     | STATS pairs = MV_SORT(VALUES(pair))
-        BY git.org, git.repo, git.commit, file.path
+        BY git.host, git.org, git.repo, git.commit, file.path, file.size
 
     // Join lines with newlines, then strip the 10-digit sort key off each line
     // (the visible show_line_numbers prefix, if any, is the 11th+ chars and is preserved)
     | EVAL content = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(pairs, "\n")), "\n[0-9]{10}", "\n"), 2)
 
     // Format the response
-    | KEEP git.org, git.repo, git.commit, file.path, file.size, content
-    | SORT git.org, git.repo, git.commit, file.path
+    | KEEP git.host, git.org, git.repo, git.commit, file.path, file.size, content
+    | SORT git.host, git.org, git.repo, git.commit, file.path
     | LIMIT 1000000
   params:
+    git_host:
+      type: string
+      description: Filter by git host(s)
+      optional: true
+      defaultValue: "*"
     git_org:
       type: string
       description: Filter by git org(s)

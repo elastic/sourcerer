@@ -1,0 +1,138 @@
+# sourcerer.yml - the config passed to `sourcerer index --config` and `sourcerer prune --config`
+# (and, for its `hosts:` section only, `sourcerer setup --config`).
+#
+# Two optional top-level sections: `hosts:` (override/extend the built-in host defaults)
+# and `sources:` (what to index).
+
+# ---------------------------------------------------------------------------------------------
+# hosts: OPTIONAL. Omit entirely to use the built-in defaults for all known hosts
+# (github, gitlab, bitbucket, codeberg, forgejo, gitea, gogs, sourcehut, launchpad,
+# azure_devops, aws_codecommit, google_cloud_source). Use this only to customize a known
+# host (e.g. a self-hosted host name) or to define a custom host. Values given here are
+# merged OVER the defaults (your value wins); anything omitted keeps the shipped default.
+#
+# URL templates use dotted tokens naming the Elasticsearch field the value comes from:
+#   {git.host} {git.org} {git.repo} {git.commit}
+#   {file.path} {file.directory} {line.number} {line.number_start} {line.number_end}
+# The clone URL is substituted by sourcerer; the link templates are shown to the agent, which
+# fills the tokens from tool output when it formats a citation.
+hosts:
+- id: github                  # value of git.host used in _id, index names, and templates
+  name: GitHub                # human label, used in the generated citation skill's name
+  clone:
+    protocol: https           # optional, defaults to "https" (only "https" is supported today)
+    url: "https://github.com/{git.org}/{git.repo}.git"
+  links:
+    directory: "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.directory}"
+    file: "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}"
+    line: "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number}"
+    line_range: "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number_start}-L{line.number_end}"
+
+# A custom, self-hosted host not in the built-in defaults:
+- id: my_gitea
+  name: My Gitea
+  clone:
+    url: "https://gitea.internal.example/{git.org}/{git.repo}.git"
+  links:
+    directory: "https://gitea.internal.example/{git.org}/{git.repo}/src/commit/{git.commit}/{file.directory}"
+    file: "https://gitea.internal.example/{git.org}/{git.repo}/src/commit/{git.commit}/{file.path}"
+    line: "https://gitea.internal.example/{git.org}/{git.repo}/src/commit/{git.commit}/{file.path}#L{line.number}"
+    line_range: "https://gitea.internal.example/{git.org}/{git.repo}/src/commit/{git.commit}/{file.path}#L{line.number_start}-L{line.number_end}"
+
+# ---------------------------------------------------------------------------------------------
+# sources: what to index. Provider-specific extra namespace belongs inside git.org (for example
+# "elastic+us-east-1" for AWS CodeCommit).
+sources:
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: tag
+
+  # Gather a unique set of refs (tags here) whose names match any pattern (a single
+  # string is also accepted instead of a list):
+  match:
+  - v{major}.{minor}.{patch}
+  - v{major}.{minor}.{patch}-{prerelease}
+
+  # Starting point for indexing - set exactly ONE of age/date/commit/ref:
+  since:
+    ref: v8.17.0                  # from the commit this ref points to
+    # age: 1y                     # OR: commit within this age of now
+    # date: 2025-01-01            # OR: commit on/after this date
+    # commit: cfefb3b2378ccbadefa7 # OR: from this commit
+
+  # Keep a ref only while it satisfies EVERY criterion below (omit/null = no
+  # constraint at that level). All values inclusive.
+  retain:
+    age: 2y
+    count: 10
+    version:                      # requires a versioned match pattern
+      majors: 2                   # newest 2 major VALUES (latest + n-1)
+      minors: null
+      patches: 1                  # newest patch per (major, minor)
+      builds: null
+    prerelease: superseded        # drop -rc once its final ships
+
+# Index the latest commit of an ad-hoc tag; never prune it (no retain).
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: tag
+  match: my-dev-tag
+
+# Index the latest commit of an ad-hoc branch; never prune it.
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: branch
+  match: my-dev-branch
+
+# Index main; keep only the newest 5 indexed commits as the head moves.
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: branch
+  match: main
+  retain:
+    count: 5
+
+# Feature/fix branches as of a week ago; keep the newest commit, prune > 1 month.
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: branch
+  match:
+  - feat-*
+  - fix-*
+  since:
+    age: 1w
+  retain:
+    age: 1m
+    count: 1
+
+# Pin explicit commits (7-40 hex chars). `since` is not valid; only `age` retention
+# (or omit retain to keep forever).
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: commit
+  match:
+  - cfefb3b2378ccbadefa7
+  retain:
+    age: 2y
+
+# A second host hosting a same-named org/repo is a distinct instance:
+- git:
+    host: my_gitea
+    org: elastic
+    repo: elasticsearch
+    ref_type: branch
+  match: main
+  retain:
+    count: 1

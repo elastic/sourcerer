@@ -18,8 +18,6 @@ from collections.abc import Iterator
 # App packages
 from ...queries import _parse_dt
 
-GITHUB_URL_TEMPLATE = "https://github.com/{org}/{repo}.git"
-
 
 def resolve_cache_root(cache_dir: str | None = None) -> pathlib.Path:
     """Resolve the cache root, precedence: --cache-dir > SOURCERER_CACHE_DIR > $XDG_CACHE_HOME/
@@ -34,9 +32,10 @@ def resolve_cache_root(cache_dir: str | None = None) -> pathlib.Path:
     return base / "sourcerer"
 
 
-def repo_cache_dir(cache_root: pathlib.Path, org: str, repo: str) -> pathlib.Path:
-    """The stable per-repo clone path under the cache root: <root>/repos/<org>/<repo>."""
-    return cache_root / "repos" / org / repo
+def repo_cache_dir(cache_root: pathlib.Path, host: str, org: str, repo: str) -> pathlib.Path:
+    """The stable per-repo clone path under the cache root: <root>/repos/<host>/<org>/<repo>.
+    host is in the path so the same org/repo cloned from two hosts never share a working dir."""
+    return cache_root / "repos" / host / org / repo
 
 
 @contextlib.contextmanager
@@ -116,7 +115,7 @@ def _is_clone_of(repo_dir: pathlib.Path, url: str) -> bool:
 
 @contextlib.contextmanager
 def clone_repo(
-    org: str,
+    url: str,
     repo: str,
     repo_dir: pathlib.Path | None = None,
     ephemeral: bool = False,
@@ -124,6 +123,8 @@ def clone_repo(
     """Make a repo available on disk and yield its path. A blobless clone fetches all branches
     and tags (commits, trees, and refs, but not blobs), so the caller can `checkout_ref` any
     number of refs against this one clone -- blobs fault in on demand as each ref is checked out.
+    `url` is the resolved clone URL (from the host registry); `repo` is used only to name the
+    temp subdir in the ephemeral case.
 
     ephemeral (or no repo_dir): blobless-clone into a temp dir and delete it on exit -- the
     original throwaway behaviour, for one-off/CI runs.
@@ -135,7 +136,6 @@ def clone_repo(
     failure falls back to wipe + re-clone once (recovering a corrupt cache) before giving up. The
     dir is NOT deleted on exit. HEAD is left wherever the fetch/clone leaves it; callers check out
     what they need."""
-    url = GITHUB_URL_TEMPLATE.format(org=org, repo=repo)
     if ephemeral or repo_dir is None:
         with tempfile.TemporaryDirectory(prefix="sourcerer-") as tmp:
             tmp_dir = pathlib.Path(tmp) / repo
@@ -166,26 +166,29 @@ def clone_repo(
 
 @contextlib.contextmanager
 def prepared_repo(
+    host: str,
     org: str,
     repo: str,
+    url: str,
     cache_root: pathlib.Path | None,
     ephemeral: bool,
 ) -> Iterator[pathlib.Path | None]:
     """Yield a checked-out-ready repo dir, holding it for the whole `with` body so the caller can
-    index any number of refs against one clone. Ephemeral (or no cache_root): a throwaway temp
-    clone. Persistent: take a per-repo advisory lock, then clone-or-fetch the stable cache dir.
-    Yields None if the persistent clone is locked by another run -- the caller should then skip
-    this repo (the lock is released as soon as this manager exits)."""
+    index any number of refs against one clone. `url` is the resolved clone URL (from the host
+    registry). Ephemeral (or no cache_root): a throwaway temp clone. Persistent: take a per-repo
+    advisory lock, then clone-or-fetch the stable cache dir. Yields None if the persistent clone
+    is locked by another run -- the caller should then skip this repo (the lock is released as
+    soon as this manager exits)."""
     if ephemeral or cache_root is None:
-        with clone_repo(org, repo, ephemeral=True) as repo_dir:
+        with clone_repo(url, repo, ephemeral=True) as repo_dir:
             yield repo_dir
         return
-    repo_dir = repo_cache_dir(cache_root, org, repo)
+    repo_dir = repo_cache_dir(cache_root, host, org, repo)
     with repo_lock(repo_dir) as locked:
         if not locked:
             yield None
             return
-        with clone_repo(org, repo, repo_dir, ephemeral=False) as ready:
+        with clone_repo(url, repo, repo_dir, ephemeral=False) as ready:
             yield ready
 
 
@@ -363,16 +366,15 @@ def _ls_remote(url: str, *patterns: str, flags: tuple[str, ...] = ()) -> str | N
 
 
 def resolve_remote(
-    org: str, repo: str, branch: str | None, tag: str | None
+    url: str, branch: str | None, tag: str | None
 ) -> tuple[str | None, str | None]:
     """
-    Cheaply resolve a ref to its commit SHA via `git ls-remote` (no clone).
+    Cheaply resolve a ref to its commit SHA via `git ls-remote` (no clone) against `url`.
 
     Returns (commit_sha, default_branch). default_branch is only set when neither
     branch nor tag is given (resolving the remote HEAD). Returns (None, None) on any
     failure so callers fall through to cloning.
     """
-    url = GITHUB_URL_TEMPLATE.format(org=org, repo=repo)
     if tag:
         # Prefer the peeled (^{}) line so annotated tags resolve to the underlying
         # commit, matching `git rev-parse HEAD` after checkout.
@@ -416,14 +418,14 @@ def resolve_remote(
     return sha, default_branch
 
 
-def list_remote_ref_names(org: str, repo: str, kind: str) -> list[str] | None:
+def list_remote_ref_names(url: str, kind: str) -> list[str] | None:
     """
     List the short names of a remote's refs of `kind` ("heads" or "tags") via `git ls-remote`,
-    without cloning. Strips the `refs/<kind>/` prefix and the peeled `^{}` suffix (annotated
-    tags appear twice), dedupes, and returns them sorted. Returns None on ls-remote failure
-    after retries (caller should warn); returns [] when the remote has no refs of that kind.
+    without cloning, against `url`. Strips the `refs/<kind>/` prefix and the peeled `^{}` suffix
+    (annotated tags appear twice), dedupes, and returns them sorted. Returns None on ls-remote
+    failure after retries (caller should warn); returns [] when the remote has no refs of that
+    kind.
     """
-    url = GITHUB_URL_TEMPLATE.format(org=org, repo=repo)
     out = None
     for attempt in range(3):
         out = _ls_remote(url, flags=(f"--{kind}",))

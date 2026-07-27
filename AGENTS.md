@@ -4,39 +4,49 @@
 
 Commands:
 
-- `sourcerer setup`
-- `sourcerer index <org>/<repo> [-b <branch>] [-t <tag>] [-c <commit>]`
+- `sourcerer setup [--config <file>]` (reads the config's `hosts:` to generate per-host
+  citation skills; without `--config`, uses only the built-in host defaults)
+- `sourcerer index <org>/<repo> [-b <branch>] [-t <tag>] [-c <commit>]` (single-repo path
+  defaults to `git.host` = `github`)
 - `sourcerer index --config <file> [--prune] [--dry-run]`
 - `sourcerer prune [--config <file>] [--dry-run]` (config-driven retention prune is skipped
   without `--config`; the orphan sweep always runs)
 - `sourcerer help`
 
+The `--config` file is `sourcerer.yml` (see `specs/sourcerer-yml.md` and `sourcerer.example.yml`
+for the authoritative schema). Two optional top-level sections: `hosts:` (override/extend the
+built-in git-host defaults) and `sources:` (what to index).
+
+### Multi-host support (`git.host`)
+
+Content is namespaced by git host as well as org/repo. Each `sources[i].git` block names a single
+concrete `host`, `org`, `repo`, and `ref_type` (no wildcards or arrays). Known hosts have built-in
+clone + citation URL templates in `src/sourcerer/hosts.py`; `hosts:` in the config overrides or
+adds hosts. Provider-specific extra URL segments (Azure DevOps project, AWS CodeCommit region) are
+folded into `git.org` with a plus sign, e.g. `elastic+us-east-1`.
+
 ### Indexing multiple repos with a config
 
-`sourcerer index --config repos.yml` indexes many repos, branches, and tags in one run. The
-config is a YAML list, one entry per repo. See `repos.example.yml`.
+`sourcerer index --config sourcerer.yml` indexes many repos, branches, and tags in one run. The
+config's `sources:` is a YAML list, one entry per (host, org, repo, ref_type). See
+`sourcerer.example.yml`.
 
-#### Top-level fields (per repo entry)
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `org` | yes | GitHub org name |
-| `repo` | yes | GitHub repo name |
-| `refs` | no | List of selectors (see below). Omit or empty = index nothing for this repo. |
-
-#### Selectors (`refs` list entries)
+#### Source fields (per `sources[i]` entry)
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | yes | `branch`, `tag`, or `commit`. |
-| `match` | yes | For `branch`/`tag`: pattern string or list of patterns matched against ref names (version DSL + glob) — a ref matches if any pattern hits. For `commit`: a commit SHA/prefix string or list of them (see below). |
-| `since` | no | Index-side inclusion floor: the earliest commit to start indexing from. See below. Not valid for `type: commit`. |
-| `retain` | no | Retention policy (see below). Omit to keep forever. For `type: commit`, only `age` is valid. |
+| `git.host` | yes | Host id (a `git.host` value); a built-in or a `hosts:`-defined id |
+| `git.org` | yes | Org name (may include a `+extra` segment for some providers) |
+| `git.repo` | yes | Repo name |
+| `git.ref_type` | yes | `branch`, `tag`, or `commit` |
+| `match` | yes | For `branch`/`tag`: pattern string or list of patterns matched against ref names (version DSL + glob), a ref matches if any pattern hits. For `commit`: a commit SHA/prefix string or list of them (see below). |
+| `since` | no | Index-side inclusion floor: the earliest commit to start indexing from. See below. Not valid for `git.ref_type: commit`. |
+| `retain` | no | Retention policy (see below). Omit to keep forever. For `git.ref_type: commit`, only `age` is valid. |
 
-#### `type: commit` (pinning an explicit commit)
+#### `git.ref_type: commit` (pinning an explicit commit)
 
 Pins one or more commits directly, rather than matching named refs. `match` entries are
-7–40 hex chars — a full 40-char SHA, or a shorter prefix (git's own "short hash" convention;
+7-40 hex chars - a full 40-char SHA, or a shorter prefix (git's own "short hash" convention;
 a `git.commit` lookup uses a prefix match against the resolved full SHA). There's nothing to
 index "from" for a single pinned point, so `since` is rejected; likewise `retain.count`,
 `retain.version`, and `retain.prerelease` have no meaning for one commit and are rejected --
@@ -46,11 +56,15 @@ way) -- one that's been force-pushed away or only exists on an unfetched ref wil
 check out, reported as a per-unit error.
 
 ```yaml
-- type: commit
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: commit
   match:
   - cfefb3b              # short prefix (>= 7 hex chars) or a full 40-char SHA
   retain:
-    age: 2y               # only 'age' is valid for commit selectors (or omit = keep forever)
+    age: 2y               # only 'age' is valid for commit sources (or omit = keep forever)
 ```
 
 #### `since` (inclusion floor)
@@ -69,7 +83,7 @@ Sets where indexing starts. Provide **exactly one** of:
 Patterns combine a version DSL with glob syntax:
 
 - **Version placeholders**: `{major}`, `{minor}`, `{patch}`, `{build}` (numeric) plus
-  `{prerelease}` — each numeric placeholder matches one numeric segment, enabling the
+  `{prerelease}` - each numeric placeholder matches one numeric segment, enabling the
   version-aware `since` floor and the `retain.version` policy. Example:
   `"v{major}.{minor}.{patch}"` matches `v8.14.3`; add `"v{major}.{minor}.{patch}-{prerelease}"`
   to also match `v9.0.0-rc1`.
@@ -86,7 +100,7 @@ and all versioned patterns in one selector must agree on their level set. Plain 
 
 Omitting `retain` keeps every matched ref forever. A `retain` block trims the matched set:
 a marker survives only if it satisfies **every** criterion present (intersection). Across
-multiple selectors for the same repo, keeps are **unioned** — a marker is kept if any selector
+multiple selectors for the same repo, keeps are **unioned** - a marker is kept if any selector
 keeps it (so a bare "keep forever" selector acts as an allowlist alongside a trimming rule).
 All values are inclusive.
 
@@ -99,7 +113,7 @@ All values are inclusive.
 
 ##### `version` (value-relative)
 
-Each field keeps the newest N **values** at that level within its parent group — a threshold
+Each field keeps the newest N **values** at that level within its parent group - a threshold
 of `latest − (N − 1)`, **not** a count of existing refs. Omit a field (or set `null`) for no
 constraint at that level.
 
@@ -119,41 +133,59 @@ Duration format (for `age`/`since.age`): `<n><unit>` where unit is `s` (seconds)
 #### Example
 
 ```yaml
-- org: elastic
-  repo: docs-content
-  refs:
-  - type: branch
-    match: main
-    retain:
-      count: 1                # head-only: keep the newest indexed commit
+sources:
+- git:
+    host: github
+    org: elastic
+    repo: docs-content
+    ref_type: branch
+  match: main
+  retain:
+    count: 1                  # head-only: keep the newest indexed commit
 
-- org: elastic
-  repo: elasticsearch
-  refs:
-  - type: tag
-    match:
-    - v{major}.{minor}.{patch}
-    - v{major}.{minor}.{patch}-{prerelease}
-    since:
-      ref: v8.17.0            # start indexing from this release
-    retain:
-      version:
-        majors: 2             # keep the latest major + one behind (n-1)
-        patches: 1            # newest patch per (major, minor)
-      prerelease: superseded  # drop -rc once its final ships
-  - type: branch
-    match: main
-    retain:
-      count: 5                # newest 5 indexed commits of main
-  - type: tag
-    match: my-dev-tag         # no retain -> kept forever (allowlist)
-  - type: commit
-    match: cfefb3b            # pin an ad-hoc commit not on any tracked branch/tag tip
-    retain:
-      age: 2y                 # only 'age' is valid for commit selectors
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: tag
+  match:
+  - v{major}.{minor}.{patch}
+  - v{major}.{minor}.{patch}-{prerelease}
+  since:
+    ref: v8.17.0              # start indexing from this release
+  retain:
+    version:
+      majors: 2               # keep the latest major + one behind (n-1)
+      patches: 1              # newest patch per (major, minor)
+    prerelease: superseded    # drop -rc once its final ships
+
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: branch
+  match: main
+  retain:
+    count: 5                  # newest 5 indexed commits of main
+
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: tag
+  match: my-dev-tag           # no retain -> kept forever (allowlist)
+
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: commit
+  match: cfefb3b              # pin an ad-hoc commit not on any tracked branch/tag tip
+  retain:
+    age: 2y                   # only 'age' is valid for commit sources
 ```
 
-Indexing is idempotent — re-running only indexes refs that are new or have moved.
+Indexing is idempotent - re-running only indexes refs that are new or have moved.
 
 ### Clone cache
 
@@ -163,33 +195,38 @@ nightly) then transfers only the new commits since the last run instead of a ful
 large repo's history. Combined with the cheap pre-clone skip (a repo with no moved refs isn't
 even fetched) and immutable-tag dedup, repeated runs stay fast.
 
-- **Blobless clone**: clones use `git clone --filter=blob:none` — every commit, tree, and ref is
+- **Blobless clone**: clones use `git clone --filter=blob:none` - every commit, tree, and ref is
   present (so any branch/tag/pinned commit stays reachable and checkoutable), but file contents
   are not downloaded up front. A blob is faulted in from `origin` the first time a commit that
   needs it is checked out, so disk usage tracks the working set actually indexed, not the repo's
   full history.
-- **Location** (precedence): `--cache-dir` flag → `SOURCERER_CACHE_DIR` env → `$XDG_CACHE_HOME/sourcerer` → `~/.cache/sourcerer`. Clones live at `<cache>/repos/<org>/<repo>`.
-- **Safe to delete**: the cache is a pure derived artifact (all index state lives in Elasticsearch). Removing it just forces a fresh (blobless) clone on the next run — this is also how a cache directory populated by an older, full-clone version of sourcerer gets converted to blobless: delete it once and let the next run re-create it.
+- **Location** (precedence): `--cache-dir` flag → `SOURCERER_CACHE_DIR` env → `$XDG_CACHE_HOME/sourcerer` → `~/.cache/sourcerer`. Clones live at `<cache>/repos/<host>/<org>/<repo>`.
+- **Safe to delete**: the cache is a pure derived artifact (all index state lives in Elasticsearch). Removing it just forces a fresh (blobless) clone on the next run - this is also how a cache directory populated by an older, full-clone version of sourcerer gets converted to blobless: delete it once and let the next run re-create it.
 - **`--ephemeral`**: skip the cache and clone into a throwaway temp dir (good for one-off or CI runs).
 - **Concurrency**: a per-repo advisory lock prevents two overlapping runs from corrupting the same clone; if a repo is already locked by another run, it is skipped for that run.
 - **Garbage collection**: after each fetch, a best-effort `git gc` expires reflogs and prunes
-  objects that are no longer reachable — chiefly blobs faulted in for commits that fell out of a
+  objects that are no longer reachable - chiefly blobs faulted in for commits that fell out of a
   branch's retained window since the last run. A gc failure never fails the index run.
 
 ## Index fields
 
-Content is addressed by **commit**, not by ref name. A file's bytes are fully determined
-by `(git.org, git.repo, git.commit, file.path)`, so the same file reached via any
-ref — branch, tag, or commit hash — collapses to a single doc (no per-ref duplication).
+Content is addressed by **host + commit**, not by ref name. A file's bytes are fully determined
+by `(git.host, git.org, git.repo, git.commit, file.path)`, so the same file reached via any ref
+collapses to a single doc (no per-ref duplication), while the same org/repo on two different git
+hosts stays distinct. `git.host` is a lowercase keyword, placed before `git.org` in every index
+template's mappings and index sort. Backing indices are `sourcerer-v2-refs`,
+`sourcerer-v2-files~{git.host}~{git.org}~{git.repo}`, and
+`sourcerer-v2-lines~{git.host}~{git.org}~{git.repo}` (read via the unchanged `sourcerer-refs` /
+`sourcerer-files` / `sourcerer-lines` aliases).
 
 - **Tags** are *not* stored on content docs. Each tag is one tiny doc in `sourcerer-refs`
   mapping the tag to its commit. To search a tagged release, resolve it to a commit via the
-  refs index (the `sourcerer.refs.list` tool), then filter content by `git.commit`.
+  refs index (the `sourcerer.refs.list` tool), then filter content by `git.host` + `git.commit`.
 - **Branches** are *not* stored on content docs (a branch moves; keeping it there would
   force expensive rewrites of the lines index on every move). Each branch is one tiny doc
   in `sourcerer-refs` mapping the branch to its current commit. To search a branch,
   resolve it to a commit via the refs index (the `sourcerer.refs.list` tool), then filter
-  content by `git.commit`.
+  content by `git.host` + `git.commit`.
 
 ## Releases
 
@@ -202,3 +239,20 @@ up-to-date `main`. Do not create or push release tags manually, modify an existi
 tag, or bypass the script's lockfile, test, build, branch, version, or remote-tag checks.
 Pushing a valid tag triggers `.github/workflows/release.yml`, which repeats the quality
 checks and creates the GitHub release.
+
+### Upgrading from v1 to v2
+
+v2.0.0 adds a `git.host` dimension so the same org/repo can be indexed and cited across
+different git hosting providers. This is a breaking change:
+
+- **Config**: `repos.yml` becomes `sourcerer.yml` with a new schema. The old flat list of
+  `{org, repo, refs: [{type, ...}]}` entries becomes a `sources:` list where each entry names a
+  single `git: { host, org, repo, ref_type }` plus top-level `match`/`since`/`retain`. See the
+  Quickstart above and `sourcerer.example.yml`.
+- **Indices**: backing indices are renamed `sourcerer-v1-*` to `sourcerer-v2-*` and content is
+  keyed by `(git.host, git.org, git.repo, git.commit, file.path)`. There is no automatic
+  migration - run `sourcerer setup` to create the v2 templates, then re-index. The old
+  `sourcerer-v1-*` indices can be deleted once you have re-indexed.
+- **Citations**: `sourcerer setup --config sourcerer.yml` reads the config's `hosts:` section
+  and generates one citation skill per host so the agent formats links correctly for each
+  provider. Run `setup` again whenever you add or customize a host.

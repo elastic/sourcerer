@@ -5,8 +5,8 @@ HuggingFace `datasets`, which the checkout depends on, not sourcerer):
 
     uv run --directory <checkout> python _build_maps.py --dest <checkout>
 
-It is intentionally self-contained — it imports only `datasets` and the stdlib,
-never `sourcerer` — so it runs cleanly in that separate venv.
+It is intentionally self-contained - it imports only `datasets` and the stdlib,
+never `sourcerer` - so it runs cleanly in that separate venv.
 
 Two outputs, both keyed by the 848 instance_ids in the bench file:
   - bench_commit_map.json  {instance_id: base_commit}
@@ -21,7 +21,7 @@ four source datasets, so no upstream commit_map.json / issue_map.json is needed:
                         embedded in the instance id).
   - multilingual (182): SWE-bench/SWE-bench_Multilingual
 
-Fails loudly (exit 1) if any instance is left without a commit or issue text — a
+Fails loudly (exit 1) if any instance is left without a commit or issue text - a
 partial map would otherwise silently zero-score those instances.
 """
 from __future__ import annotations

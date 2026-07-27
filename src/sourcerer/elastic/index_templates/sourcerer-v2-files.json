@@ -3,7 +3,7 @@
     "description": "sourcerer-files"
   },
   "index_patterns": [
-    "sourcerer-v1-files*"
+    "sourcerer-v2-files*"
   ],
   "template": {
     "aliases": {
@@ -20,12 +20,14 @@
         },
         "sort": {
           "field": [
+            "git.host",
             "git.org",
             "git.repo",
             "git.commit",
             "file.path"
           ],
           "order": [
+            "asc",
             "asc",
             "asc",
             "asc",
@@ -38,6 +40,10 @@
       "properties": {
         "git": {
           "properties": {
+            "host": {
+              "type": "keyword",
+              "normalizer": "lowercase"
+            },
             "org": {
               "type": "keyword",
               "normalizer": "lowercase"

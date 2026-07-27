@@ -153,39 +153,41 @@ def content_delete_set(decisions: list[Decision]) -> set[str]:
 # reach -- a repo dropped from the config entirely, a marker deleted by hand, content left
 # behind by an interrupted run whose marker never got written -- is never visited by
 # plan_repo/content_delete_set. The functions below are a second, independent sweep: given
-# just the physical index names, the (org, repo, commit) tuples read through sourcerer-refs,
-# and the (org, repo, commit) tuples with actual content docs, they find every one of those
-# leftovers. Still pure/no-ES, so a fake index-name list and a couple of tuple sets are enough
-# to exercise every case in a test.
+# just the physical index names, the (host, org, repo, commit) tuples read through
+# sourcerer-refs, and the (host, org, repo, commit) tuples with actual content docs, they find
+# every one of those leftovers. Still pure/no-ES, so a fake index-name list and a couple of
+# tuple sets are enough to exercise every case in a test.
 #
-# Three orphan classes, in the descending-coarseness order deletion should follow (org before
-# org~repo before org~repo~commit; whole-index DELETEs before any delete_by_query):
-#   A. orphan index    -- a physical files/lines index whose org (or org~repo, or
-#                          org~repo~commit) has no corresponding entry in refs at all.
+# Three orphan classes, in the descending-coarseness order deletion should follow (host~org
+# before host~org~repo before host~org~repo~commit; whole-index DELETEs before any
+# delete_by_query):
+#   A. orphan index    -- a physical files/lines index whose host~org (or host~org~repo, or
+#                          host~org~repo~commit) has no corresponding entry in refs at all.
 #                          -> DELETE {index} (near-instant).
-#   B. orphan content  -- a commit with content docs in a *live* org~repo index, but no
+#   B. orphan content  -- a commit with content docs in a *live* host~org~repo index, but no
 #                          marker in refs references it (manual marker deletion, a config
 #                          entry removed, etc). -> delete_by_query on the content index.
 #   C. orphan marker   -- a commit marker in refs with no content docs at all in either
 #                          content index (content manually deleted, or a whole content
 #                          index/repo/org vanished without its markers being cleaned up).
-#                          -> delete_by_query on sourcerer-v1-refs.
+#                          -> delete_by_query on sourcerer-v2-refs.
 #
-# Today the CLI only ever produces org~repo-granularity indices (see files_index/lines_index
-# in sourcerer/indices.py); parse_index_name and orphan_indices also recognize the org-only and
-# org~repo~commit levels so detection keeps working if a future granularity is introduced,
-# even though only one level is exercised in practice right now.
+# Today the CLI only ever produces host~org~repo-granularity indices (see files_index/lines_index
+# in sourcerer/indices.py); parse_index_name and orphan_indices also recognize the host-only,
+# host~org, and host~org~repo~commit levels so detection keeps working if a future granularity is
+# introduced, even though only one level is exercised in practice right now.
 
-_FILES_PREFIX_DEFAULT = "sourcerer-v1-files"
-_LINES_PREFIX_DEFAULT = "sourcerer-v1-lines"
+_FILES_PREFIX_DEFAULT = "sourcerer-v2-files"
+_LINES_PREFIX_DEFAULT = "sourcerer-v2-lines"
 
 
 @dataclass(frozen=True)
 class ParsedIndex:
     kind: str            # "files" | "lines"
-    org: str
-    repo: str | None     # None for an org-only index
-    commit: str | None   # set only for an org~repo~commit index
+    host: str
+    org: str | None      # None for a host-only index
+    repo: str | None     # None for a host-only or host~org index
+    commit: str | None   # set only for a host~org~repo~commit index
     name: str             # the original index name, for reporting/deletion
 
 
@@ -195,81 +197,85 @@ def parse_index_name(
     lines_prefix: str = _LINES_PREFIX_DEFAULT,
 ) -> ParsedIndex | None:
     """Inverse of files_index()/lines_index() (sourcerer/indices.py), extended to also recognize
-    the org-only and org~repo~commit granularities those builders don't produce today. Returns
-    None for anything that doesn't fit the scheme (sourcerer-v1-refs, an unrelated index, or a
-    malformed/empty segment) so callers skip it rather than risk misclassifying it as an orphan."""
+    the host-only, host~org, and host~org~repo~commit granularities those builders don't produce
+    today. Returns None for anything that doesn't fit the scheme (sourcerer-v2-refs, an unrelated
+    index, or a malformed/empty segment) so callers skip it rather than risk misclassifying it as
+    an orphan."""
     for prefix, kind in ((files_prefix, "files"), (lines_prefix, "lines")):
         if not name.startswith(prefix + "~"):
             continue
         parts = name[len(prefix) + 1:].split("~")
-        if not (1 <= len(parts) <= 3) or not all(parts):
+        if not (1 <= len(parts) <= 4) or not all(parts):
             return None
-        org = parts[0]
-        repo = parts[1] if len(parts) >= 2 else None
-        commit = parts[2] if len(parts) == 3 else None
-        return ParsedIndex(kind=kind, org=org, repo=repo, commit=commit, name=name)
+        host = parts[0]
+        org = parts[1] if len(parts) >= 2 else None
+        repo = parts[2] if len(parts) >= 3 else None
+        commit = parts[3] if len(parts) == 4 else None
+        return ParsedIndex(kind=kind, host=host, org=org, repo=repo, commit=commit, name=name)
     return None
 
 
 def orphan_indices(
     index_names: list[str],
-    ref_orgs: set[str],
-    ref_repos: set[tuple[str, str]],
-    ref_commits: set[tuple[str, str, str]],
+    ref_orgs: set[tuple[str, str]],
+    ref_repos: set[tuple[str, str, str]],
+    ref_commits: set[tuple[str, str, str, str]],
 ) -> list[str]:
     """Class-A orphans: physical files/lines indices at any granularity whose identity has no
-    matching entry in refs. Subsumption: once an org's index is orphaned, its org~repo and
-    org~repo~commit siblings are skipped (they're going away with the coarser DELETE); once an
-    org~repo index is orphaned, its org~repo~commit children are skipped the same way.
+    matching entry in refs. Subsumption: once a host~org index is orphaned, its host~org~repo and
+    host~org~repo~commit siblings are skipped (they're going away with the coarser DELETE); once a
+    host~org~repo index is orphaned, its host~org~repo~commit children are skipped the same way.
 
     Subsumption is scoped per index *kind* (files vs. lines): they are separate physical
-    indices with independent lifecycles (e.g. a repo can have already migrated its `files`
-    index to org~repo granularity while `lines` still has legacy org~repo~commit indices per
-    commit -- deleting the orphaned `files~org~repo` index does nothing to the `lines`
-    indices, so they must still be judged and deleted on their own). ref_orgs/ref_repos/
-    ref_commits are kind-agnostic (a ref marker doesn't distinguish files from lines), so only
-    the subsumption bookkeeping needs the kind; the orphan test itself does not.
+    indices with independent lifecycles, so they must each be judged and deleted on their own.
+    ref_orgs/ref_repos/ref_commits are kind-agnostic (a ref marker doesn't distinguish files from
+    lines), so only the subsumption bookkeeping needs the kind; the orphan test itself does not.
 
-    The returned order is org, then org~repo, then org~repo~commit -- descending coarseness,
-    the order deletion should proceed in."""
+    Identity tuples carry the leading host: ref_orgs is (host, org), ref_repos is
+    (host, org, repo), ref_commits is (host, org, repo, commit).
+
+    The returned order is host~org, then host~org~repo, then host~org~repo~commit -- descending
+    coarseness, the order deletion should proceed in. (A bare host-only index has no org to check
+    against refs, so it is never independently orphaned; the CLI never produces one.)"""
     parsed = [p for p in (parse_index_name(n) for n in index_names) if p is not None]
 
     orphans: list[str] = []
-    orphan_kind_orgs: set[tuple[str, str]] = set()            # (kind, org)
-    orphan_kind_repos: set[tuple[str, str, str]] = set()      # (kind, org, repo)
+    orphan_kind_orgs: set[tuple[str, str, str]] = set()            # (kind, host, org)
+    orphan_kind_repos: set[tuple[str, str, str, str]] = set()      # (kind, host, org, repo)
 
     for p in parsed:
-        if p.repo is None and p.org not in ref_orgs:
+        if p.org is not None and p.repo is None and (p.host, p.org) not in ref_orgs:
             orphans.append(p.name)
-            orphan_kind_orgs.add((p.kind, p.org))
+            orphan_kind_orgs.add((p.kind, p.host, p.org))
 
     for p in parsed:
-        if p.repo is not None and p.commit is None and (p.kind, p.org) not in orphan_kind_orgs:
-            if (p.org, p.repo) not in ref_repos:
+        if p.repo is not None and p.commit is None and (p.kind, p.host, p.org) not in orphan_kind_orgs:
+            if (p.host, p.org, p.repo) not in ref_repos:
                 orphans.append(p.name)
-                orphan_kind_repos.add((p.kind, p.org, p.repo))
+                orphan_kind_repos.add((p.kind, p.host, p.org, p.repo))
 
     for p in parsed:
         if (
             p.commit is not None
-            and (p.kind, p.org) not in orphan_kind_orgs
-            and (p.kind, p.org, p.repo) not in orphan_kind_repos
+            and (p.kind, p.host, p.org) not in orphan_kind_orgs
+            and (p.kind, p.host, p.org, p.repo) not in orphan_kind_repos
         ):
-            if (p.org, p.repo, p.commit) not in ref_commits:
+            if (p.host, p.org, p.repo, p.commit) not in ref_commits:
                 orphans.append(p.name)
 
     return orphans
 
 
 def orphan_content_commits(
-    content_commits_by_repo: dict[tuple[str, str], set[str]],
-    ref_commits_by_repo: dict[tuple[str, str], set[str]],
-    skip_repos: set[tuple[str, str]],
-) -> dict[tuple[str, str], set[str]]:
-    """Class-B orphans: commits with content docs in a live org~repo index but no marker
+    content_commits_by_repo: dict[tuple[str, str, str], set[str]],
+    ref_commits_by_repo: dict[tuple[str, str, str], set[str]],
+    skip_repos: set[tuple[str, str, str]],
+) -> dict[tuple[str, str, str], set[str]]:
+    """Class-B orphans: commits with content docs in a live host~org~repo index but no marker
     referencing them. `skip_repos` excludes repos whose whole index is already a Class-A
-    orphan -- their content goes away with the index DELETE, not a separate delete_by_query."""
-    out: dict[tuple[str, str], set[str]] = {}
+    orphan -- their content goes away with the index DELETE, not a separate delete_by_query.
+    Repo keys are (host, org, repo)."""
+    out: dict[tuple[str, str, str], set[str]] = {}
     for repo_key, commits in content_commits_by_repo.items():
         if repo_key in skip_repos:
             continue
@@ -280,17 +286,18 @@ def orphan_content_commits(
 
 
 def orphan_markers(
-    ref_commits_by_repo: dict[tuple[str, str], set[str]],
-    content_commits_by_repo: dict[tuple[str, str], set[str]],
-    skip_repos: set[tuple[str, str]],
-) -> dict[tuple[str, str], set[str]]:
+    ref_commits_by_repo: dict[tuple[str, str, str], set[str]],
+    content_commits_by_repo: dict[tuple[str, str, str], set[str]],
+    skip_repos: set[tuple[str, str, str]],
+) -> dict[tuple[str, str, str], set[str]]:
     """Class-C orphans: commit markers in refs with no content docs in either content index.
     This single per-commit check also covers a whole repo/org's content having vanished
     entirely (every one of that repo's ref commits shows up as "missing"), so it subsumes what
     would otherwise be separate org- and repo-level refs sweeps -- one combined delete_by_query
-    against sourcerer-v1-refs handles all of it. `skip_repos` excludes repos already going away
-    via a Class-A index DELETE (their markers are dropped as part of that, not here)."""
-    out: dict[tuple[str, str], set[str]] = {}
+    against sourcerer-v2-refs handles all of it. `skip_repos` excludes repos already going away
+    via a Class-A index DELETE (their markers are dropped as part of that, not here). Repo keys
+    are (host, org, repo)."""
+    out: dict[tuple[str, str, str], set[str]] = {}
     for repo_key, commits in ref_commits_by_repo.items():
         if repo_key in skip_repos:
             continue
@@ -302,38 +309,39 @@ def orphan_markers(
 
 @dataclass
 class OrphanPlan:
-    orphan_index_names: list[str]                        # Class A -> DELETE {index}
-    orphan_content: dict[tuple[str, str], set[str]]       # Class B -> delete_by_query on content
-    orphan_marker_commits: dict[tuple[str, str], set[str]]  # Class C -> delete_by_query on refs
+    orphan_index_names: list[str]                              # Class A -> DELETE {index}
+    orphan_content: dict[tuple[str, str, str], set[str]]        # Class B -> delete_by_query on content
+    orphan_marker_commits: dict[tuple[str, str, str], set[str]]  # Class C -> delete_by_query on refs
 
 
 def plan_orphans(
     index_names: list[str],
-    ref_commit_tuples: set[tuple[str, str, str]],
-    content_commit_tuples: set[tuple[str, str, str]],
+    ref_commit_tuples: set[tuple[str, str, str, str]],
+    content_commit_tuples: set[tuple[str, str, str, str]],
 ) -> OrphanPlan:
     """Combine the three orphan classes into one plan from three cheap snapshots: the physical
-    index names, the distinct (org, repo, commit) tuples in refs, and the distinct (org, repo,
-    commit) tuples with content docs (already unioned across the files and lines indices
-    present). Pure -- no ES calls -- so this is the one seam orphan-sweep tests need to hit."""
-    ref_orgs = {org for org, _, _ in ref_commit_tuples}
-    ref_repos = {(org, repo) for org, repo, _ in ref_commit_tuples}
+    index names, the distinct (host, org, repo, commit) tuples in refs, and the distinct
+    (host, org, repo, commit) tuples with content docs (already unioned across the files and lines
+    indices present). Pure -- no ES calls -- so this is the one seam orphan-sweep tests need to
+    hit."""
+    ref_orgs = {(host, org) for host, org, _, _ in ref_commit_tuples}
+    ref_repos = {(host, org, repo) for host, org, repo, _ in ref_commit_tuples}
 
     orphan_index_names = orphan_indices(index_names, ref_orgs, ref_repos, ref_commit_tuples)
 
     orphaned_names = set(orphan_index_names)
     skip_repos = {
-        (p.org, p.repo)
+        (p.host, p.org, p.repo)
         for p in (parse_index_name(n) for n in index_names)
         if p is not None and p.repo is not None and p.commit is None and p.name in orphaned_names
     }
 
-    content_by_repo: dict[tuple[str, str], set[str]] = defaultdict(set)
-    for org, repo, commit in content_commit_tuples:
-        content_by_repo[(org, repo)].add(commit)
-    ref_by_repo: dict[tuple[str, str], set[str]] = defaultdict(set)
-    for org, repo, commit in ref_commit_tuples:
-        ref_by_repo[(org, repo)].add(commit)
+    content_by_repo: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    for host, org, repo, commit in content_commit_tuples:
+        content_by_repo[(host, org, repo)].add(commit)
+    ref_by_repo: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    for host, org, repo, commit in ref_commit_tuples:
+        ref_by_repo[(host, org, repo)].add(commit)
 
     orphan_content = orphan_content_commits(content_by_repo, ref_by_repo, skip_repos)
     orphan_marker_commits = orphan_markers(ref_by_repo, content_by_repo, skip_repos)

@@ -11,6 +11,8 @@ import yaml
 from elasticsearch import NotFoundError
 
 # App packages
+from ...config import load_config
+from ...hosts import Host, resolve_hosts
 from ...utils import make_client
 
 _ELASTIC = resources.files("sourcerer") / "elastic"
@@ -18,6 +20,47 @@ ELASTICSEARCH_INDEX_TEMPLATES_DIR = _ELASTIC / "index_templates"
 AGENT_BUILDER_TOOLS_DIR = _ELASTIC / "agent_builder_tools"
 AGENT_BUILDER_AGENTS_DIR = _ELASTIC / "agent_builder_agents"
 AGENT_BUILDER_SKILLS_DIR = _ELASTIC / "agent_builder_skills"
+
+# The id/name of the generated per-host citation skills. The base citations skill tells the
+# agent to load `sourcerer-code-citations-<git.host>` for a result's host-specific URL scheme.
+HOST_CITATION_SKILL_PREFIX = "sourcerer-code-citations-"
+
+
+def host_citation_skill_id(host_id: str) -> str:
+    return f"{HOST_CITATION_SKILL_PREFIX}{host_id}"
+
+
+def build_host_citation_skill(host: Host) -> dict:
+    """One in-memory citation skill for a single git host: its four link templates rendered as a
+    small, self-contained URL-templates reference. Generated at setup time from the resolved host
+    registry (built-in defaults merged with the config's `hosts:` overrides) and pushed to
+    Kibana; not written to disk, so it never goes stale against the registry."""
+    content = (
+        f"# {host.name} Citations\n\n"
+        f"URL templates for citing code hosted on {host.name} (git.host `{host.id}`). Fill the "
+        "tokens from the `sourcerer.code.*` / `sourcerer.files.*` tool output for the row you are "
+        "citing. `{git.org}` already contains any provider-specific extra segment (e.g. a project "
+        "or region) as an `org+extra` value, so substitute it verbatim.\n\n"
+        f"- Directory: `{host.links['directory']}`\n"
+        f"- File: `{host.links['file']}`\n"
+        f"- Single line: `{host.links['line']}`\n"
+        f"- Line range: `{host.links['line_range']}`\n\n"
+        "Use the single-line template for a one-line claim and the line-range template for a "
+        "multi-line span (its anchor must carry both endpoints). Never invent a different URL "
+        "scheme for this host."
+    )
+    return {
+        "id": host_citation_skill_id(host.id),
+        "name": f"{host.name} Citations",
+        "description": (
+            f"Host-specific citation URL templates for {host.name} (git.host {host.id}). Loaded "
+            "by the Code Citations skill when a result's git.host is "
+            f"{host.id}."
+        ),
+        "content": content,
+        "tool_ids": [],
+        "referenced_content": [],
+    }
 
 
 def make_kb_session(
@@ -106,14 +149,26 @@ def load_agent_builder_tools(
 
 
 def load_agent_builder_agents(
-    session: requests.Session, kb_url: str, agents_dir: pathlib.Path = AGENT_BUILDER_AGENTS_DIR
+    session: requests.Session, kb_url: str, host_skill_ids: list[str] | None = None,
+    agents_dir: pathlib.Path = AGENT_BUILDER_AGENTS_DIR,
 ) -> list[str]:
+    """Upsert each agent, patching its `skill_ids` to also reference the generated per-host
+    citation skills (their ids are dynamic, so they can't be listed statically in the YAML).
+    Existing skill ids are preserved; host skill ids are appended without duplicates."""
     agents = _load_yaml_dir(agents_dir)
     if not agents:
         raise FileNotFoundError(f"No agent definitions found in {agents_dir}")
     base = kb_url.rstrip("/")
+    extra = list(host_skill_ids or [])
     loaded = []
     for agent in agents:
+        if extra:
+            cfg = agent.setdefault("configuration", {})
+            existing = list(cfg.get("skill_ids", []))
+            for sid in extra:
+                if sid not in existing:
+                    existing.append(sid)
+            cfg["skill_ids"] = existing
         agent_id = agent["id"]
         item_url = f"{base}/api/agent_builder/agents/{agent_id}"
         get_resp = session.get(item_url)
@@ -126,28 +181,41 @@ def load_agent_builder_agents(
     return loaded
 
 
+def _upsert_skill(session: requests.Session, base: str, skill: dict) -> str:
+    """Create-or-update one skill dict via the Agent Builder API. Returns the skill id."""
+    skill_id = skill["id"]
+    item_url = f"{base}/api/agent_builder/skills/{skill_id}"
+    get_resp = session.get(item_url)
+    if get_resp.status_code == 200:
+        resp = session.put(item_url, json=_skill_put_body(skill))  # update
+    else:
+        resp = session.post(f"{base}/api/agent_builder/skills", json=skill)  # create
+    resp.raise_for_status()
+    return skill_id
+
+
 def load_agent_builder_skills(
-    session: requests.Session, kb_url: str, skills_dir: pathlib.Path = AGENT_BUILDER_SKILLS_DIR
+    session: requests.Session, kb_url: str, hosts: dict[str, Host],
+    skills_dir: pathlib.Path = AGENT_BUILDER_SKILLS_DIR,
 ) -> list[str]:
+    """Upsert the on-disk base skills plus one generated citation skill per resolved git host.
+    Returns every upserted skill id (the host skill ids are needed to patch the agent)."""
     skills = _load_yaml_dir(skills_dir)
     if not skills:
         raise FileNotFoundError(f"No skill definitions found in {skills_dir}")
     base = kb_url.rstrip("/")
     loaded = []
     for skill in skills:
-        skill_id = skill["id"]
-        item_url = f"{base}/api/agent_builder/skills/{skill_id}"
-        get_resp = session.get(item_url)
-        if get_resp.status_code == 200:
-            resp = session.put(item_url, json=_skill_put_body(skill))
-        else:
-            resp = session.post(f"{base}/api/agent_builder/skills", json=skill)
-        resp.raise_for_status()
-        loaded.append(skill_id)
+        loaded.append(_upsert_skill(session, base, skill))
+    # Generated per-host citation skills (in-memory, not on disk). Deterministic order by host id
+    # so setup output and the agent's skill list are stable.
+    for host_id in sorted(hosts):
+        loaded.append(_upsert_skill(session, base, build_host_citation_skill(hosts[host_id])))
     return loaded
 
 
-def run(url: str, api_key: str | None, username: str | None, password: str | None, kb_url: str | None) -> None:
+def run(url: str, api_key: str | None, username: str | None, password: str | None,
+        kb_url: str | None, config_path: str | None = None) -> None:
     es = make_client(url, api_key, username, password)
     try:
         loaded = load_index_templates(es)
@@ -169,17 +237,29 @@ def run(url: str, api_key: str | None, username: str | None, password: str | Non
         )
         sys.exit(1)
 
+    # Resolve the git-host registry: built-in defaults merged with the config's `hosts:` (if a
+    # config was given). One citation skill is generated per resolved host.
+    try:
+        if config_path:
+            hosts = load_config(config_path).hosts
+        else:
+            hosts = resolve_hosts(None)
+    except (OSError, ValueError) as e:
+        click.echo(f"Error: invalid config: {e}", err=True)
+        sys.exit(1)
+
     session = make_kb_session(api_key, username, password)
     try:
         tool_ids = load_agent_builder_tools(session, kb_url)
         for tid in tool_ids:
             click.echo(f"Upserted tool: {tid}")
 
-        skill_ids = load_agent_builder_skills(session, kb_url)
+        skill_ids = load_agent_builder_skills(session, kb_url, hosts)
         for sid in skill_ids:
             click.echo(f"Upserted skill: {sid}")
 
-        agent_ids = load_agent_builder_agents(session, kb_url)
+        host_skill_ids = [host_citation_skill_id(h) for h in sorted(hosts)]
+        agent_ids = load_agent_builder_agents(session, kb_url, host_skill_ids)
         for aid in agent_ids:
             click.echo(f"Upserted agent: {aid}")
     except FileNotFoundError as e:

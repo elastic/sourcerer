@@ -36,13 +36,14 @@ def format_elapsed(seconds: float) -> str:
 
 @dataclasses.dataclass
 class Unit:
-    """One (org, repo, ref) indexing target plus its live/terminal state.
+    """One (host, org, repo, ref) indexing target plus its live/terminal state.
 
     `ref` may be None until a default branch is resolved. `kind` is one of
     branch|tag|commit|default. `status` is set once on completion to one of
     indexed|skipped|tagged|recorded|error.
     """
 
+    host: str
     org: str
     repo: str
     ref: str | None
@@ -58,7 +59,7 @@ class Unit:
 
     @property
     def label(self) -> str:
-        return f"{self.org}/{self.repo} @ {self.ref or '?'} ({self.kind})"
+        return f"{self.host}/{self.org}/{self.repo} @ {self.ref or '?'} ({self.kind})"
 
     def elapsed(self) -> float:
         if self.started_at is None:
@@ -110,13 +111,14 @@ class ProgressReporter:
         self.units = units
         self.total = len(units)
 
-    def reorder_group(self, org: str, repo: str, dates: dict[tuple[str, str], int]) -> None:
+    def reorder_group(self, host: str, org: str, repo: str, dates: dict[tuple[str, str], int]) -> None:
         """Reorder this repo's units newest-first by creation date to match the
         actual indexing order (which also uses `dates`). Called once per repo after
         its clone, when creatordate information first becomes available. Thread-safe:
         the Rich Live render loop reads self.units ~4x/sec from a different thread."""
         with self._lock:
-            idxs = [i for i, u in enumerate(self.units) if u.org == org and u.repo == repo]
+            idxs = [i for i, u in enumerate(self.units)
+                    if u.host == host and u.org == org and u.repo == repo]
             group = sorted(
                 (self.units[i] for i in idxs),
                 key=lambda u: dates.get((u.kind, u.ref or ""), -1),
@@ -158,19 +160,19 @@ class ProgressReporter:
     def _completion_text(self, unit: Unit) -> str:
         counts = f"{unit.files:,} files, {unit.lines:,} lines"
         if unit.status == "indexed":
-            return f"✓ {unit.label} — indexed {counts} ({format_elapsed(unit.elapsed())})"
+            return f"✓ {unit.label} - indexed {counts} ({format_elapsed(unit.elapsed())})"
         if unit.status == "tagged":
-            return f"✓ {unit.label} — tagged existing content ({counts})"
+            return f"✓ {unit.label} - tagged existing content ({counts})"
         if unit.status == "recorded":
-            return f"✓ {unit.label} — content already indexed, recorded ref ({counts})"
+            return f"✓ {unit.label} - content already indexed, recorded ref ({counts})"
         if unit.status == "skipped":
-            return f"• {unit.label} — already indexed, skipped"
+            return f"• {unit.label} - already indexed, skipped"
         if unit.status == "error":
-            return f"✗ {unit.label} — error: {unit.detail}"
-        return f"• {unit.label} — {unit.status}"
+            return f"✗ {unit.label} - error: {unit.detail}"
+        return f"• {unit.label} - {unit.status}"
 
     def _plan_lines(self, units: list[Unit]) -> list[str]:
-        n_repos = len({(u.org, u.repo) for u in units})
+        n_repos = len({(u.host, u.org, u.repo) for u in units})
         lines = [f"Plan: {n_repos} repo(s), {len(units)} ref(s)"]
         # Use the same inline label as the progress lines (org/repo @ ref (kind))
         # so each entry is self-describing without relying on a repo header above it.
@@ -185,7 +187,7 @@ class ProgressReporter:
                  ("skipped", "skipped"), ("error", "failed")]
         parts = [f"{by[k]} {label}" for k, label in order if by.get(k)]
         body = ", ".join(parts) or "nothing to do"
-        return f"Done in {format_elapsed(time.monotonic() - self.start_time)} — {body}; {files:,} files, {lines:,} lines"
+        return f"Done in {format_elapsed(time.monotonic() - self.start_time)} - {body}; {files:,} files, {lines:,} lines"
 
 
 class NullProgressReporter(ProgressReporter):
@@ -240,7 +242,7 @@ class _Dashboard:
 
         if r.total == 0:
             text = r._planning_text or "preparing"
-            rows.append(Text(f"⏳ Resolving refs — {text} · {elapsed}", style="bold"))
+            rows.append(Text(f"⏳ Resolving refs - {text} · {elapsed}", style="bold"))
             return Group(*rows)
 
         with r._lock:
@@ -277,21 +279,21 @@ class _Dashboard:
         if u.stage == "cloning":
             # The clone is shared across all of a repo's refs; don't name a
             # specific (typically oldest) ref -- show the repo instead.
-            t.append(f"{u.org}/{u.repo}", style="bold")
-            t.append(" — cloning…")
+            t.append(f"{u.host}/{u.org}/{u.repo}", style="bold")
+            t.append(" - cloning…")
             return t
         t.append(u.label, style="bold")
         if u.stage == "checkout":
-            t.append(" — checking out…")
+            t.append(" - checking out…")
         elif u.stage == "resolving":
-            t.append(" — resolving…")
+            t.append(" - resolving…")
         elif u.stage == "indexing":
             if u.total_files:
-                t.append(f" — indexing {_bar(u.files / u.total_files, 16)} "
+                t.append(f" - indexing {_bar(u.files / u.total_files, 16)} "
                          f"{u.files:,}/{u.total_files:,} files · {u.lines:,} lines · "
                          f"{format_elapsed(u.elapsed())}")
             else:
-                t.append(f" — indexing {u.files:,} files · {u.lines:,} lines · "
+                t.append(f" - indexing {u.files:,} files · {u.lines:,} lines · "
                          f"{format_elapsed(u.elapsed())}")
         return t
 

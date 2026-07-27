@@ -22,6 +22,7 @@ import yaml
 from elasticsearch import Elasticsearch
 
 # App packages
+from ...hosts import resolve_hosts
 from ...indices import FILES_ALIAS, LINES_ALIAS
 from ...planner import Marker, plan_repo
 from ...progress import ProgressReporter, Unit, make_reporter
@@ -48,6 +49,7 @@ from .selection import _effective_since_floor, _load_config, _resolve_entry
 
 def index_ref_in_dir(
     es: Elasticsearch,
+    host: str,
     org: str,
     repo: str,
     repo_dir,
@@ -68,7 +70,7 @@ def index_ref_in_dir(
         reporter = ProgressReporter()
     if unit is None:
         kind = "branch" if branch else "tag" if tag else "commit" if commit else "default"
-        unit = Unit(org=org, repo=repo, ref=branch or tag or commit, kind=kind)
+        unit = Unit(host=host, org=org, repo=repo, ref=branch or tag or commit, kind=kind)
 
     # The repo is already cloned/fetched (callers clone once, then reuse this dir for every ref);
     # this only checks out the ref, so the stage is "checkout", not "cloning". Branches (and the
@@ -96,35 +98,37 @@ def index_ref_in_dir(
 
     # Post-clone guard: authoritative SHA check (covers -c and any ls-remote
     # peeling mismatch).
-    if not force and not should_index(es, org, repo, ref_type, ref_for_id, commit_sha):
+    if not force and not should_index(es, host, org, repo, ref_type, ref_for_id, commit_sha):
         reporter.finish(unit, "skipped")
         return
 
-    if not force and commit_fully_indexed(es, org, repo, commit_sha):
+    if not force and commit_fully_indexed(es, host, org, repo, commit_sha):
         # Content is keyed by commit, so another ref already fully indexed this exact
         # snapshot. Don't rewrite the (large) content docs -- just record the ref marker.
         # "Fully" is load-bearing: an aborted run leaves partial content but no complete
         # marker, so it falls through to the else branch and re-indexes rather than
         # recording a half-populated commit as done.
         status = "tagged" if tag else "recorded"
-        files_count = count_commit_docs(es, FILES_ALIAS, org, repo, commit_sha)
-        lines_count = count_commit_docs(es, LINES_ALIAS, org, repo, commit_sha)
+        files_count = count_commit_docs(es, FILES_ALIAS, host, org, repo, commit_sha)
+        lines_count = count_commit_docs(es, LINES_ALIAS, host, org, repo, commit_sha)
     else:
         reporter.set_total_files(unit, count_tracked_files(repo_dir))
         reporter.set_stage(unit, "indexing")
         files_count, lines_count = index_repo(
-            es, org, repo, repo_dir, commit_sha,
+            es, host, org, repo, repo_dir, commit_sha,
             on_progress=lambda f, l: reporter.update_counts(unit, f, l),
         )
         status = "indexed"
-    write_ref_marker(es, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso, files_count, lines_count)
+    write_ref_marker(es, host, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso, files_count, lines_count)
     reporter.finish(unit, status, files_count, lines_count)
 
 
 def index_one(
     es: Elasticsearch,
+    host: str,
     org: str,
     repo: str,
+    clone_url: str,
     branch: str | None = None,
     tag: str | None = None,
     commit: str | None = None,
@@ -138,7 +142,8 @@ def index_one(
     Index a single ref (branch, tag, or commit) of one repo into an existing ES client.
     At most one of branch/tag/commit should be set; none means the remote's default branch.
     Used by the single-repo CLI path (`run`); the config-driven batch path (`run_config`)
-    clones once per repo and calls `index_ref_in_dir` directly for each ref.
+    clones once per repo and calls `index_ref_in_dir` directly for each ref. `clone_url` is the
+    resolved clone URL from the host registry.
 
     With `cache_root` set and `ephemeral` false, the clone is kept under the cache dir and
     fetched on later runs; otherwise it is a throwaway temp clone.
@@ -150,23 +155,23 @@ def index_one(
         reporter = ProgressReporter()
     if unit is None:
         kind = "branch" if branch else "tag" if tag else "commit" if commit else "default"
-        unit = Unit(org=org, repo=repo, ref=branch or tag or commit, kind=kind)
+        unit = Unit(host=host, org=org, repo=repo, ref=branch or tag or commit, kind=kind)
 
     reporter.start(unit)
 
     # Pre-clone skip: if the ref is already fully indexed, skip before paying the clone cost.
-    skip, ref_for_id, _ = pre_clone_skip(es, org, repo, branch, tag, commit, force)
+    skip, ref_for_id, _ = pre_clone_skip(es, host, org, repo, branch, tag, commit, clone_url, force)
     if skip:
         unit.ref = ref_for_id
         reporter.finish(unit, "skipped")
         return
 
     reporter.set_stage(unit, "cloning")
-    with prepared_repo(org, repo, cache_root, ephemeral) as repo_dir:
+    with prepared_repo(host, org, repo, clone_url, cache_root, ephemeral) as repo_dir:
         if repo_dir is None:
             reporter.finish(unit, "locked", detail="another sourcerer run holds this repo's cache lock")
             return
-        index_ref_in_dir(es, org, repo, repo_dir, branch, tag, commit, force, reporter, unit)
+        index_ref_in_dir(es, host, org, repo, repo_dir, branch, tag, commit, force, reporter, unit)
 
 
 def run(
@@ -182,6 +187,7 @@ def run(
     quiet: bool = False,
     cache_dir: str | None = None,
     ephemeral: bool = False,
+    host: str = "github",
 ) -> None:
     parts = repo_spec.split("/", 1)
     if len(parts) != 2 or not all(parts):
@@ -194,17 +200,25 @@ def run(
         click.echo("Error: specify at most one of -b/--branch, -t/--tag, -c/--commit", err=True)
         sys.exit(1)
 
+    # The single-repo CLI path has no config, so it uses the built-in host registry. host
+    # defaults to "github"; a caller can pass another built-in id.
+    hosts = resolve_hosts(None)
+    if host not in hosts:
+        click.echo(f"Error: unknown git host {host!r}", err=True)
+        sys.exit(1)
+    clone_url = hosts[host].clone_url(org, repo)
+
     es = make_client(url, api_key, username, password)
     cache_root = None if ephemeral else resolve_cache_root(cache_dir)
 
     kind = "branch" if branch else "tag" if tag else "commit" if commit else "default"
-    unit = Unit(org=org, repo=repo, ref=branch or tag or commit, kind=kind)
+    unit = Unit(host=host, org=org, repo=repo, ref=branch or tag or commit, kind=kind)
     reporter = make_reporter(quiet)
     with handle_interrupts(), reporter, bulk_indexing_settings(es):
         reporter.set_plan([unit])
         try:
             index_one(
-                es, org, repo, branch, tag, commit, force,
+                es, host, org, repo, clone_url, branch, tag, commit, force,
                 reporter=reporter, unit=unit, cache_root=cache_root, ephemeral=ephemeral,
             )
         except FileNotFoundError as e:
@@ -249,19 +263,21 @@ def run_config(
     `prune`) what the post-index prune step would delete. See `report.dry_run_config`.
     """
     try:
-        entries = _load_config(config_path)
+        config = _load_config(config_path)
     except (OSError, ValueError, yaml.YAMLError) as e:
         click.echo(f"Error: invalid config: {e}", err=True)
         sys.exit(1)
 
+    entries = config.repos
+    hosts = config.hosts
     # Look up a repo's selectors when resolving each ref's `since` floor below.
-    cfg_by_repo = {(c.org, c.repo): c for c in entries}
+    cfg_by_repo = {(c.host, c.org, c.repo): c for c in entries}
 
     es = make_client(url, api_key, username, password)
     cache_root = None if ephemeral else resolve_cache_root(cache_dir)
 
     if dry_run:
-        dry_run_config(es, entries, cfg_by_repo, cache_root, ephemeral, force, prune)
+        dry_run_config(es, entries, cfg_by_repo, hosts, cache_root, ephemeral, force, prune)
         return
 
     reporter = make_reporter(quiet)
@@ -278,11 +294,11 @@ def run_config(
         with ThreadPoolExecutor(
             max_workers=max(1, min(_tuning().resolve_concurrency, len(entries) or 1))
         ) as pool:
-            futures = [pool.submit(_resolve_entry, entry) for entry in entries]
+            futures = [pool.submit(_resolve_entry, entry, hosts[entry.host]) for entry in entries]
             done = 0
             for _ in as_completed(futures):
                 done += 1
-                reporter.planning(f"resolving refs — {done}/{len(entries)} repos")
+                reporter.planning(f"resolving refs - {done}/{len(entries)} repos")
             for fut in futures:
                 units.extend(fut.result())
         # Order the plan lexicographically by (org, repo, ref) regardless of config-file order,
@@ -291,7 +307,7 @@ def run_config(
         # dispatch order below -- repos are still indexed up to INDEX_REPO_CONCURRENCY at a time,
         # but they are started in lexicographical order. kind breaks ties between a same-named
         # branch and tag.
-        units.sort(key=lambda u: (u.org, u.repo, u.ref or "", u.kind))
+        units.sort(key=lambda u: (u.host, u.org, u.repo, u.ref or "", u.kind))
         reporter.set_plan(units)
 
         # Phase 2: index each selected ref, cloning each repo at most once. Group units by
@@ -300,20 +316,21 @@ def run_config(
         # to INDEX_REPO_CONCURRENCY groups run concurrently, overlapping one repo's clone
         # (network/disk, GIL-releasing) with another's indexing. refresh is disabled across the
         # whole indexing phase (best-effort) for index-side bulk throughput.
-        groups: dict[tuple[str, str], list[Unit]] = {}
+        groups: dict[tuple[str, str, str], list[Unit]] = {}
         for unit in units:
-            groups.setdefault((unit.org, unit.repo), []).append(unit)
+            groups.setdefault((unit.host, unit.org, unit.repo), []).append(unit)
 
         failures_lock = threading.Lock()
 
-        def process_group(item: tuple[tuple[str, str], list[Unit]]) -> None:
+        def process_group(item: tuple[tuple[str, str, str], list[Unit]]) -> None:
             nonlocal failures
             # These run in pool worker threads, which never receive Ctrl-C themselves -- so they
             # bail by polling the abort flag. A group not yet started just returns; one in flight
             # stops at the next ref boundary (and index_repo's own poll stops a ref mid-stream).
             if _aborted.is_set():
                 return
-            (org, repo), group = item
+            (host, org, repo), group = item
+            clone_url = hosts[host].clone_url(org, repo)
             # 2a. Cheap per-ref skip for the whole group (no clone yet). A transient ES error
             # here fails just that ref (the skip check hits the cluster) and the batch goes on.
             pending: list[tuple[Unit, str | None, str | None, str | None]] = []
@@ -325,7 +342,7 @@ def run_config(
                 tag = unit.ref if unit.kind == "tag" else None
                 commit = unit.ref if unit.kind == "commit" else None
                 try:
-                    skip, ref_for_id, _ = pre_clone_skip(es, org, repo, branch, tag, commit, force)
+                    skip, ref_for_id, _ = pre_clone_skip(es, host, org, repo, branch, tag, commit, clone_url, force)
                 except ES_ERRORS as e:
                     with failures_lock:
                         failures += 1
@@ -346,7 +363,7 @@ def run_config(
             # by another run, prepared_repo yields None and the whole repo is skipped this round.
             try:
                 reporter.set_stage(pending[0][0], "cloning")
-                with prepared_repo(org, repo, cache_root, ephemeral) as repo_dir:
+                with prepared_repo(host, org, repo, clone_url, cache_root, ephemeral) as repo_dir:
                     if repo_dir is None:
                         for unit, _branch, _tag, _commit in pending:
                             reporter.finish(unit, "locked", detail="another sourcerer run holds this repo's cache lock")
@@ -359,8 +376,8 @@ def run_config(
                     pending.sort(key=lambda p: dates.get((p[0].kind, p[0].ref or ""), -1), reverse=True)
                     # Reorder the reporter's unit list to match, so the live
                     # display and actual processing order stay consistent.
-                    reporter.reorder_group(org, repo, dates)
-                    cfg = cfg_by_repo.get((org, repo))
+                    reporter.reorder_group(host, org, repo, dates)
+                    cfg = cfg_by_repo.get((host, org, repo))
                     now = datetime.datetime.now(datetime.timezone.utc)
 
                     # 2c. Prune-aware pre-filter. Among the pending refs, drop those `since`
@@ -403,7 +420,7 @@ def run_config(
                             continue
                         try:
                             index_ref_in_dir(
-                                es, org, repo, repo_dir, branch, tag, commit,
+                                es, host, org, repo, repo_dir, branch, tag, commit,
                                 force, reporter, unit,
                             )
                         except KeyboardInterrupt:

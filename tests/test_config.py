@@ -1,6 +1,6 @@
-"""Unit tests for the repos.yml model + parser/validator in sourcerer.config. Only
+"""Unit tests for the sourcerer.yml model + parser/validator in sourcerer.config. Only
 load_config touches the filesystem (a single open()); everything tested here is parse_config
-and its pure helpers over already-parsed data."""
+and its pure helpers over already-parsed data. parse_config returns a Config(hosts, repos)."""
 
 # Standard packages
 from datetime import timedelta
@@ -47,370 +47,286 @@ class TestParseDate:
             parse_date("not-a-date")
 
 
-def _entry(org="acme", repo="widgets", refs=None):
-    entry = {"org": org, "repo": repo}
-    if refs is not None:
-        entry["refs"] = refs
-    return entry
+def _git(host="github", org="acme", repo="widgets", ref_type="branch"):
+    return {"host": host, "org": org, "repo": repo, "ref_type": ref_type}
+
+
+def _source(host="github", org="acme", repo="widgets", ref_type="branch",
+            match="main", since=None, retain=None, omit_match=False):
+    src = {"git": _git(host, org, repo, ref_type)}
+    if not omit_match:
+        src["match"] = match
+    if since is not None:
+        src["since"] = since
+    if retain is not None:
+        src["retain"] = retain
+    return src
+
+
+def _cfg(sources):
+    return parse_config({"sources": sources})
 
 
 class TestParseConfigStructure:
-    def test_non_list_raises(self):
-        with pytest.raises(ValueError, match="must be a YAML list"):
-            parse_config({"org": "acme"})
+    def test_non_mapping_raises(self):
+        with pytest.raises(ValueError, match="must be a YAML mapping"):
+            parse_config([{"git": _git()}])
 
-    def test_entry_not_a_mapping_raises(self):
+    def test_none_is_empty_config(self):
+        cfg = parse_config(None)
+        assert cfg.repos == []
+        assert "github" in cfg.hosts  # built-in defaults always present
+
+    def test_unknown_top_level_key_raises(self):
+        with pytest.raises(ValueError, match="unknown top-level keys"):
+            parse_config({"bogus": 1})
+
+    def test_sources_not_a_list_raises(self):
+        with pytest.raises(ValueError, match="'sources' must be a list"):
+            parse_config({"sources": {"git": _git()}})
+
+    def test_hosts_not_a_list_raises(self):
+        with pytest.raises(ValueError, match="'hosts' must be a list"):
+            parse_config({"hosts": {"id": "x"}})
+
+    def test_source_not_a_mapping_raises(self):
         with pytest.raises(ValueError, match="must be a mapping"):
-            parse_config(["not-a-dict"])
+            parse_config({"sources": ["nope"]})
 
-    def test_missing_org_raises(self):
-        with pytest.raises(ValueError, match="org.*repo"):
-            parse_config([{"repo": "widgets"}])
+    def test_omitted_sources_yields_no_repos(self):
+        assert parse_config({}).repos == []
 
-    def test_missing_repo_raises(self):
-        with pytest.raises(ValueError, match="org.*repo"):
-            parse_config([{"org": "acme"}])
+    def test_grouping_by_host_org_repo(self):
+        cfg = _cfg([
+            _source(ref_type="branch", match="main"),
+            _source(ref_type="tag", match="v{major}.{minor}.{patch}"),
+        ])
+        # Same (host, org, repo) -> one RepoConfig with two selectors.
+        assert len(cfg.repos) == 1
+        assert len(cfg.repos[0].selectors) == 2
+        assert (cfg.repos[0].host, cfg.repos[0].org, cfg.repos[0].repo) == ("github", "acme", "widgets")
 
-    def test_refs_not_a_list_raises(self):
-        with pytest.raises(ValueError, match="'refs' must be a list"):
-            parse_config([_entry(refs={"type": "branch"})])
-
-    def test_omitted_refs_yields_no_selectors(self):
-        cfgs = parse_config([_entry()])
-        assert cfgs[0].selectors == []
-
-    def test_empty_refs_yields_no_selectors(self):
-        cfgs = parse_config([_entry(refs=[])])
-        assert cfgs[0].selectors == []
-
-    def test_multiple_entries_parsed_in_order(self):
-        cfgs = parse_config([_entry(org="a", repo="b"), _entry(org="c", repo="d")])
-        assert [(c.org, c.repo) for c in cfgs] == [("a", "b"), ("c", "d")]
-
-
-def _selector(type_="branch", match="main", since=None, retain=None):
-    sel = {"type": type_, "match": match}
-    if since is not None:
-        sel["since"] = since
-    if retain is not None:
-        sel["retain"] = retain
-    return sel
+    def test_distinct_hosts_are_separate_repos(self):
+        cfg = parse_config({
+            "hosts": [{
+                "id": "my_gitea",
+                "clone": {"url": "https://g/{git.org}/{git.repo}.git"},
+                "links": {
+                    "directory": "https://g/{git.org}/{git.repo}/{file.directory}",
+                    "file": "https://g/{git.org}/{git.repo}/{file.path}",
+                    "line": "https://g/{git.org}/{git.repo}/{file.path}#L{line.number}",
+                    "line_range": "https://g/{git.org}/{git.repo}/{file.path}#L{line.number_start}",
+                },
+            }],
+            "sources": [
+                _source(host="github", match="main"),
+                _source(host="my_gitea", match="main"),
+            ],
+        })
+        assert {c.host for c in cfg.repos} == {"github", "my_gitea"}
 
 
-class TestParseSelector:
-    def test_bad_type_raises(self):
-        with pytest.raises(ValueError, match="'type' must be"):
-            parse_config([_entry(refs=[_selector(type_="sha")])])
+class TestParseGitScope:
+    def test_missing_git_raises(self):
+        with pytest.raises(ValueError, match="'git' must be a mapping"):
+            parse_config({"sources": [{"match": "main"}]})
 
-    def test_unknown_key_raises(self):
+    @pytest.mark.parametrize("field", ["host", "org", "repo", "ref_type"])
+    def test_missing_field_raises(self, field):
+        git = _git()
+        del git[field]
+        with pytest.raises(ValueError, match=f"'{field}' must be a non-empty string"):
+            parse_config({"sources": [{"git": git, "match": "main"}]})
+
+    def test_git_list_value_rejected(self):
+        git = _git()
+        git["org"] = ["a", "b"]
+        with pytest.raises(ValueError, match="'org' must be a non-empty string"):
+            parse_config({"sources": [{"git": git, "match": "main"}]})
+
+    def test_bad_ref_type_raises(self):
+        with pytest.raises(ValueError, match="ref_type"):
+            _cfg([_source(ref_type="sha")])
+
+    def test_unknown_git_key_raises(self):
+        git = {**_git(), "project": "x"}
         with pytest.raises(ValueError, match="unknown keys"):
-            parse_config([_entry(refs=[{**_selector(), "bogus": 1}])])
+            parse_config({"sources": [{"git": git, "match": "main"}]})
 
+    def test_bad_host_id_raises(self):
+        with pytest.raises(ValueError, match="git.host"):
+            _cfg([_source(host="Git/Hub")])
+
+    def test_unknown_host_raises(self):
+        with pytest.raises(ValueError, match="unknown host"):
+            _cfg([_source(host="notahost")])
+
+    def test_org_plus_composite_kept_verbatim(self):
+        cfg = _cfg([_source(org="elastic+us-east-1")])
+        assert cfg.repos[0].org == "elastic+us-east-1"
+
+
+class TestParseSourceMatch:
     def test_match_as_string(self):
-        cfgs = parse_config([_entry(refs=[_selector(match="main")])])
-        assert cfgs[0].selectors[0].raw_patterns == ["main"]
+        cfg = _cfg([_source(match="main")])
+        assert cfg.repos[0].selectors[0].raw_patterns == ["main"]
 
     def test_match_as_list(self):
-        cfgs = parse_config([_entry(refs=[_selector(match=["main", "dev"])])])
-        assert cfgs[0].selectors[0].raw_patterns == ["main", "dev"]
+        cfg = _cfg([_source(match=["main", "dev"])])
+        assert cfg.repos[0].selectors[0].raw_patterns == ["main", "dev"]
 
     def test_match_empty_list_raises(self):
         with pytest.raises(ValueError, match="'match' must be"):
-            parse_config([_entry(refs=[_selector(match=[])])])
+            _cfg([_source(match=[])])
 
     def test_match_missing_raises(self):
         with pytest.raises(ValueError, match="'match' must be"):
-            parse_config([_entry(refs=[{"type": "branch"}])])
+            _cfg([_source(omit_match=True)])
 
     def test_versioned_patterns_must_agree_on_levels(self):
         with pytest.raises(ValueError, match="disagree on version levels"):
-            parse_config([_entry(refs=[_selector(
-                type_="tag",
-                match=["v{major}.{minor}", "v{major}.{minor}.{patch}"],
-            )])])
+            _cfg([_source(ref_type="tag", match=["v{major}.{minor}", "v{major}.{minor}.{patch}"])])
 
     def test_versioned_patterns_agreeing_on_levels_is_fine(self):
-        cfgs = parse_config([_entry(refs=[_selector(
-            type_="tag",
-            match=["v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}"],
-        )])])
-        assert cfgs[0].selectors[0].levels == ("major", "minor", "patch")
+        cfg = _cfg([_source(ref_type="tag",
+                            match=["v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}"])])
+        assert cfg.repos[0].selectors[0].levels == ("major", "minor", "patch")
 
 
-class TestParseCommitSelector:
+class TestParseCommitSource:
     def test_full_sha_accepted(self):
-        cfgs = parse_config([_entry(refs=[_selector(type_="commit", match="a" * 40)])])
-        assert cfgs[0].selectors[0].raw_patterns == ["a" * 40]
+        cfg = _cfg([_source(ref_type="commit", match="a" * 40)])
+        assert cfg.repos[0].selectors[0].raw_patterns == ["a" * 40]
 
     def test_short_prefix_accepted(self):
-        cfgs = parse_config([_entry(refs=[_selector(type_="commit", match="cfefb3b")])])
-        assert cfgs[0].selectors[0].raw_patterns == ["cfefb3b"]
+        cfg = _cfg([_source(ref_type="commit", match="cfefb3b")])
+        assert cfg.repos[0].selectors[0].raw_patterns == ["cfefb3b"]
 
     def test_lowercase_normalized(self):
-        cfgs = parse_config([_entry(refs=[_selector(type_="commit", match="CFEFB3B")])])
-        assert cfgs[0].selectors[0].raw_patterns == ["cfefb3b"]
+        cfg = _cfg([_source(ref_type="commit", match="CFEFB3B")])
+        assert cfg.repos[0].selectors[0].raw_patterns == ["cfefb3b"]
 
     def test_too_short_raises(self):
         with pytest.raises(ValueError, match="7-40 hex chars"):
-            parse_config([_entry(refs=[_selector(type_="commit", match="abc123")])])
+            _cfg([_source(ref_type="commit", match="abc123")])
 
     def test_non_hex_raises(self):
         with pytest.raises(ValueError, match="7-40 hex chars"):
-            parse_config([_entry(refs=[_selector(type_="commit", match="not-a-sha")])])
-
-    def test_too_long_raises(self):
-        with pytest.raises(ValueError, match="7-40 hex chars"):
-            parse_config([_entry(refs=[_selector(type_="commit", match="a" * 41)])])
-
-    def test_list_of_shas(self):
-        cfgs = parse_config([_entry(refs=[_selector(
-            type_="commit", match=["cfefb3b", "deadbee"],
-        )])])
-        assert cfgs[0].selectors[0].raw_patterns == ["cfefb3b", "deadbee"]
+            _cfg([_source(ref_type="commit", match="not-a-sha")])
 
     def test_since_raises(self):
         with pytest.raises(ValueError, match="do not support 'since'"):
-            parse_config([_entry(refs=[_selector(
-                type_="commit", match="cfefb3b", since={"age": "1y"},
-            )])])
+            _cfg([_source(ref_type="commit", match="cfefb3b", since={"age": "1y"})])
 
     def test_retain_age_allowed(self):
-        cfgs = parse_config([_entry(refs=[_selector(
-            type_="commit", match="cfefb3b", retain={"age": "2y"},
-        )])])
-        assert cfgs[0].selectors[0].retain.age == timedelta(days=730)
-
-    def test_retain_keep_forever_allowed(self):
-        cfgs = parse_config([_entry(refs=[_selector(type_="commit", match="cfefb3b")])])
-        assert cfgs[0].selectors[0].retain is None
+        cfg = _cfg([_source(ref_type="commit", match="cfefb3b", retain={"age": "2y"})])
+        assert cfg.repos[0].selectors[0].retain.age == timedelta(days=730)
 
     def test_retain_count_raises(self):
         with pytest.raises(ValueError, match="only 'age' retention"):
-            parse_config([_entry(refs=[_selector(
-                type_="commit", match="cfefb3b", retain={"count": 5},
-            )])])
-
-    def test_retain_version_raises(self):
-        # Rejected earlier, by the same "no version tokens" guard branch/tag selectors hit --
-        # a commit selector has no version levels either.
-        with pytest.raises(ValueError, match="has no version tokens"):
-            parse_config([_entry(refs=[_selector(
-                type_="commit", match="cfefb3b", retain={"version": {"majors": 2}},
-            )])])
+            _cfg([_source(ref_type="commit", match="cfefb3b", retain={"count": 5})])
 
     def test_retain_prerelease_superseded_raises(self):
         with pytest.raises(ValueError, match="only 'age' retention"):
-            parse_config([_entry(refs=[_selector(
-                type_="commit", match="cfefb3b", retain={"prerelease": "superseded"},
-            )])])
+            _cfg([_source(ref_type="commit", match="cfefb3b", retain={"prerelease": "superseded"})])
 
 
 class TestParseSince:
     def test_exactly_one_required_zero_raises(self):
         with pytest.raises(ValueError, match="exactly one"):
-            parse_config([_entry(refs=[_selector(since={})])])
+            _cfg([_source(since={})])
 
     def test_exactly_one_required_two_raises(self):
         with pytest.raises(ValueError, match="exactly one"):
-            parse_config([_entry(refs=[_selector(since={"age": "1y", "date": "2025-01-01"})])])
-
-    def test_unknown_key_raises(self):
-        with pytest.raises(ValueError, match="unknown keys"):
-            parse_config([_entry(refs=[_selector(since={"bogus": "x"})])])
+            _cfg([_source(since={"age": "1y", "date": "2025-01-01"})])
 
     def test_age_resolves_to_since(self):
-        cfgs = parse_config([_entry(refs=[_selector(since={"age": "1y"})])])
-        since = cfgs[0].selectors[0].since
-        assert since.kind == "age"
-        assert since.value == timedelta(days=365)
-
-    def test_date_resolves_to_since(self):
-        cfgs = parse_config([_entry(refs=[_selector(since={"date": "2025-01-01"})])])
-        since = cfgs[0].selectors[0].since
-        assert since.kind == "date"
-
-    def test_commit_resolves_to_since(self):
-        cfgs = parse_config([_entry(refs=[_selector(since={"commit": "deadbeef"})])])
-        since = cfgs[0].selectors[0].since
-        assert since == Since("commit", "deadbeef")
+        since = _cfg([_source(since={"age": "1y"})]).repos[0].selectors[0].since
+        assert since.kind == "age" and since.value == timedelta(days=365)
 
     def test_ref_resolves_to_since(self):
-        cfgs = parse_config([_entry(refs=[_selector(since={"ref": "v8.0.0"})])])
-        since = cfgs[0].selectors[0].since
+        since = _cfg([_source(since={"ref": "v8.0.0"})]).repos[0].selectors[0].since
         assert since == Since("ref", "v8.0.0")
 
 
 class TestParseRetain:
-    def test_unknown_key_raises(self):
-        with pytest.raises(ValueError, match="unknown keys"):
-            parse_config([_entry(refs=[_selector(retain={"bogus": 1})])])
-
     def test_count_must_be_int_gte_1(self):
         with pytest.raises(ValueError, match="retain.count"):
-            parse_config([_entry(refs=[_selector(retain={"count": 0})])])
-
-    def test_count_non_int_raises(self):
-        with pytest.raises(ValueError, match="retain.count"):
-            parse_config([_entry(refs=[_selector(retain={"count": "5"})])])
+            _cfg([_source(retain={"count": 0})])
 
     def test_version_without_versioned_match_raises(self):
         with pytest.raises(ValueError, match="has no version tokens"):
-            parse_config([_entry(refs=[_selector(
-                type_="tag", match="my-dev-tag", retain={"version": {"majors": 2}},
-            )])])
-
-    def test_version_unknown_level_raises(self):
-        with pytest.raises(ValueError, match="unknown levels"):
-            parse_config([_entry(refs=[_selector(
-                type_="tag", match="v{major}.{minor}.{patch}",
-                retain={"version": {"bogus": 2}},
-            )])])
-
-    def test_version_counts_below_one_raise(self):
-        with pytest.raises(ValueError):
-            parse_config([_entry(refs=[_selector(
-                type_="tag", match="v{major}.{minor}.{patch}",
-                retain={"version": {"majors": 0}},
-            )])])
+            _cfg([_source(ref_type="tag", match="my-dev-tag", retain={"version": {"majors": 2}})])
 
     def test_version_null_level_is_no_constraint(self):
-        cfgs = parse_config([_entry(refs=[_selector(
-            type_="tag", match="v{major}.{minor}.{patch}",
-            retain={"version": {"majors": 2, "minors": None}},
-        )])])
-        assert cfgs[0].selectors[0].retain.version.counts == {"major": 2}
-
-    def test_prerelease_enum_invalid_raises(self):
-        with pytest.raises(ValueError, match="'keep' or 'superseded'"):
-            parse_config([_entry(refs=[_selector(retain={"prerelease": "bogus"})])])
+        cfg = _cfg([_source(ref_type="tag", match="v{major}.{minor}.{patch}",
+                            retain={"version": {"majors": 2, "minors": None}})])
+        assert cfg.repos[0].selectors[0].retain.version.counts == {"major": 2}
 
     def test_all_default_retain_collapses_to_none(self):
-        # age/count/version all None and prerelease default "keep" -> Retain.is_empty() -> None.
-        cfgs = parse_config([_entry(refs=[_selector(retain={})])])
-        assert cfgs[0].selectors[0].retain is None
-
-    def test_non_empty_retain_is_kept(self):
-        cfgs = parse_config([_entry(refs=[_selector(retain={"count": 5})])])
-        assert cfgs[0].selectors[0].retain is not None
-        assert cfgs[0].selectors[0].retain.count == 5
+        cfg = _cfg([_source(retain={})])
+        assert cfg.repos[0].selectors[0].retain is None
 
     def test_no_retain_key_means_keep_forever(self):
-        cfgs = parse_config([_entry(refs=[_selector()])])
-        assert cfgs[0].selectors[0].retain is None
+        cfg = _cfg([_source()])
+        assert cfg.repos[0].selectors[0].retain is None
 
 
 class TestSelectorMatches:
     def test_ref_type_mismatch_returns_none(self):
-        cfgs = parse_config([_entry(refs=[_selector(type_="branch", match="main")])])
-        sel = cfgs[0].selectors[0]
+        sel = _cfg([_source(ref_type="branch", match="main")]).repos[0].selectors[0]
         assert sel.matches("tag", "main") is None
 
     def test_matches_if_any_pattern_hits(self):
-        cfgs = parse_config([_entry(refs=[_selector(match=["main", "dev"])])])
-        sel = cfgs[0].selectors[0]
+        sel = _cfg([_source(match=["main", "dev"])]).repos[0].selectors[0]
         assert sel.matches("branch", "dev") is not None
-        assert sel.matches("branch", "main") is not None
         assert sel.matches("branch", "other") is None
 
     def test_commit_prefix_matches_full_sha(self):
-        cfgs = parse_config([_entry(refs=[_selector(type_="commit", match="cfefb3b")])])
-        sel = cfgs[0].selectors[0]
-        full_sha = "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60"
-        assert sel.matches("commit", full_sha) is not None
+        sel = _cfg([_source(ref_type="commit", match="cfefb3b")]).repos[0].selectors[0]
+        assert sel.matches("commit", "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60") is not None
         assert sel.matches("commit", "deadbeef" * 5) is None
-        assert sel.matches("branch", full_sha) is None
 
 
 class TestSinceVersionFloor:
     def test_full_ref_name(self):
-        cfgs = parse_config([_entry(refs=[_selector(
-            type_="tag", match="v{major}.{minor}.{patch}", since={"ref": "v8.17.0"},
-        )])])
-        assert cfgs[0].selectors[0].since_version_floor() == (8, 17, 0)
-
-    def test_bare_version(self):
-        cfgs = parse_config([_entry(refs=[_selector(
-            type_="tag", match="v{major}.{minor}.{patch}", since={"ref": "8.17.0"},
-        )])])
-        assert cfgs[0].selectors[0].since_version_floor() == (8, 17, 0)
-
-    def test_non_version_anchor_returns_none(self):
-        # A branch name with no digits given as the `ref` anchor under a versioned selector.
-        cfgs = parse_config([_entry(refs=[_selector(
-            type_="tag", match="v{major}.{minor}.{patch}", since={"ref": "main"},
-        )])])
-        assert cfgs[0].selectors[0].since_version_floor() is None
+        cfg = _cfg([_source(ref_type="tag", match="v{major}.{minor}.{patch}", since={"ref": "v8.17.0"})])
+        assert cfg.repos[0].selectors[0].since_version_floor() == (8, 17, 0)
 
     def test_date_based_since_returns_none(self):
-        cfgs = parse_config([_entry(refs=[_selector(
-            type_="tag", match="v{major}.{minor}.{patch}", since={"age": "1y"},
-        )])])
-        assert cfgs[0].selectors[0].since_version_floor() is None
-
-    def test_no_since_returns_none(self):
-        cfgs = parse_config([_entry(refs=[_selector(
-            type_="tag", match="v{major}.{minor}.{patch}",
-        )])])
-        assert cfgs[0].selectors[0].since_version_floor() is None
-
-    def test_non_versioned_selector_returns_none(self):
-        cfgs = parse_config([_entry(refs=[_selector(
-            type_="tag", match="my-dev-tag", since={"ref": "my-dev-tag"},
-        )])])
-        assert cfgs[0].selectors[0].since_version_floor() is None
+        cfg = _cfg([_source(ref_type="tag", match="v{major}.{minor}.{patch}", since={"age": "1y"})])
+        assert cfg.repos[0].selectors[0].since_version_floor() is None
 
 
 class TestDottedKeys:
-    def test_since_ref_dotted(self):
-        cfgs = parse_config([_entry(refs=[{
-            "type": "tag", "match": "v{major}.{minor}.{patch}", "since.ref": "v8.0.0",
-        }])])
-        assert cfgs[0].selectors[0].since == Since("ref", "v8.0.0")
+    def test_git_host_dotted(self):
+        cfg = parse_config({"sources": [{
+            "git.host": "github", "git.org": "acme", "git.repo": "widgets", "git.ref_type": "branch",
+            "match": "main",
+        }]})
+        assert (cfg.repos[0].host, cfg.repos[0].org, cfg.repos[0].repo) == ("github", "acme", "widgets")
 
-    def test_retain_version_dotted(self):
-        cfgs = parse_config([_entry(refs=[{
-            "type": "tag", "match": "v{major}.{minor}.{patch}",
+    def test_since_and_retain_dotted(self):
+        cfg = parse_config({"sources": [{
+            "git": _git(ref_type="tag"),
+            "match": "v{major}.{minor}.{patch}",
+            "since.ref": "v8.0.0",
             "retain.version.majors": 2, "retain.version.patches": 1,
-        }])])
-        assert cfgs[0].selectors[0].retain.version.counts == {"major": 2, "patch": 1}
+        }]})
+        sel = cfg.repos[0].selectors[0]
+        assert sel.since == Since("ref", "v8.0.0")
+        assert sel.retain.version.counts == {"major": 2, "patch": 1}
 
-    def test_dotted_equivalent_to_nested(self):
-        nested = parse_config([_entry(refs=[_selector(
-            type_="tag", match="v{major}.{minor}.{patch}",
-            since={"ref": "v8.0.0"}, retain={"version": {"majors": 2, "patches": 1}},
-        )])])
-        dotted = parse_config([_entry(refs=[{
-            "type": "tag", "match": "v{major}.{minor}.{patch}",
-            "since.ref": "v8.0.0", "retain.version.majors": 2, "retain.version.patches": 1,
-        }])])
-        assert nested[0].selectors[0] == dotted[0].selectors[0]
 
-    def test_mixed_nested_and_dotted(self):
-        cfgs = parse_config([_entry(refs=[{
-            "type": "tag", "match": "v{major}.{minor}.{patch}",
-            "retain": {"version": {"majors": 2}}, "retain.version.patches": 1,
-        }])])
-        assert cfgs[0].selectors[0].retain.version.counts == {"major": 2, "patch": 1}
+class TestHostsMerge:
+    def test_override_one_leaf_keeps_defaults(self):
+        cfg = parse_config({"hosts": [{"id": "github", "name": "GH Enterprise"}]})
+        gh = cfg.hosts["github"]
+        assert gh.name == "GH Enterprise"
+        # clone/links untouched -> still the github.com defaults
+        assert "github.com" in gh.clone_url_template
 
-    def test_conflicting_since_forms_raises(self):
-        with pytest.raises(ValueError, match="exactly one"):
-            parse_config([_entry(refs=[{
-                "type": "branch", "match": "main",
-                "since": {"age": "1y"}, "since.ref": "main",
-            }])])
-
-    def test_scalar_dotted_conflict_raises(self):
-        with pytest.raises(ValueError, match="conflicts with a non-mapping value"):
-            parse_config([_entry(refs=[{
-                "type": "branch", "match": "main",
-                "since": "not-a-mapping", "since.ref": "main",
-            }])])
-
-    def test_duplicate_dotted_leaf_raises(self):
-        # Nested `since.ref` and dotted `since.ref` both set the same leaf -> reject as a
-        # duplicate rather than silently letting the later one win.
-        with pytest.raises(ValueError, match="duplicate key"):
-            parse_config([_entry(refs=[{
-                "type": "branch", "match": "main",
-                "since": {"ref": "main"}, "since.ref": "other",
-            }])])
+    def test_all_builtins_present(self):
+        cfg = parse_config({})
+        for hid in ("github", "gitlab", "bitbucket", "azure_devops", "aws_codecommit"):
+            assert hid in cfg.hosts

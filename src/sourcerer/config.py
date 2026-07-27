@@ -1,44 +1,44 @@
-"""repos.yml model + loader, shared by `index` and `prune`.
+"""sourcerer.yml model + loader, shared by `index`, `prune`, and `setup`.
 
-Per repo entry:
+Two optional top-level sections:
 
-    - org: elastic
-      repo: elasticsearch
-      refs:
-      - type: tag | branch
-        match: <pattern> | [<pattern>, ...]     # version.py DSL; a ref matches if ANY hits
-        since:                                   # inclusion floor (index-side); at most ONE of:
-          age: 1y                                #   commit within this age of now
-          date: 2025-01-01                       #   commit on/after this date
-          commit: <sha>                          #   from this commit
-          ref: v8.0.0                            #   from the commit this ref points to
-        retain:                                  # omit -> keep forever. Prune if ANY fires:
-          age: 2y                                #   keep commits within this age, prune older
-          count: 10                              #   keep newest N by commit date, prune rest
-          version:                               #   value-relative, needs versioned match:
-            majors: 2                            #     keep newest 2 major values (latest + n-1)
-            minors: null                         #     null/omit -> no constraint
-            patches: 1                           #     newest patch per (major, minor)
-            builds: null
-          prerelease: superseded | keep          #   sibling of version; default keep
+    hosts:                         # override/extend the built-in git-host defaults
+    - id: github
+      name: GitHub
+      clone: { protocol: https, url: "https://github.com/{git.org}/{git.repo}.git" }
+      links: { directory: ..., file: ..., line: ..., line_range: ... }
 
-      - type: commit
-        match: <sha/prefix> | [<sha/prefix>, ...]  # 7-40 hex chars each; a ref matches if its
-                                                    # full commit SHA starts with any entry
-        retain:                                    # omit -> keep forever. Only 'age' is valid:
-          age: 2y                                  #   keep commits within this age, prune older
+    sources:                       # what to index
+    - git:
+        host: github               # single required host id (a git.host value)
+        org: elastic               # single required org (may be a "+"-composite, e.g.
+        repo: elasticsearch        #   "elastic+us-east-1" for AWS CodeCommit)
+        ref_type: tag              # single required: branch | tag | commit
+      match: <pattern> | [<pattern>, ...]     # version.py DSL; a ref matches if ANY hits
+      since:                                   # inclusion floor (index-side); at most ONE of:
+        age: 1y                                #   commit within this age of now
+        date: 2025-01-01                       #   commit on/after this date
+        commit: <sha>                          #   from this commit
+        ref: v8.0.0                            #   from the commit this ref points to
+      retain:                                  # omit -> keep forever. Prune if ANY fires:
+        age: 2y                                #   keep commits within this age, prune older
+        count: 10                              #   keep newest N by commit date, prune rest
+        version:                               #   value-relative, needs versioned match:
+          majors: 2                            #     keep newest 2 major values (latest + n-1)
+          minors: null                         #     null/omit -> no constraint
+          patches: 1                           #     newest patch per (major, minor)
+          builds: null
+        prerelease: superseded | keep          #   sibling of version; default keep
 
-Dotted keys are accepted as flat shorthand for nesting, e.g. `since.ref: v8.0.0` or
-`retain.version.majors: 2` instead of the nested form above. Dotted and nested forms may be
-mixed; conflicting values raise the same errors as duplicate nested keys.
+For `git.ref_type: commit`, `match` holds one or more commit SHA/prefixes (7-40 hex chars each);
+`since` is not allowed and only `retain.age` (or omitting retain) is valid.
 
-A `commit` selector pins one or more explicit commits rather than matching named refs. It does
-not support `since` (there is nothing to index "from" -- the selector already names the exact
-point) or the `count`/`version`/`prerelease` retain criteria (they have no meaning for a single
-pinned point); only `retain.age` (or omitting `retain` to keep forever) is allowed. A pinned
-commit must be reachable from some fetched branch or tag -- the clone only contains commits
-reachable that way, so a commit orphaned from all refs (e.g. force-pushed away) will fail to
-check out.
+Dotted keys are accepted as flat shorthand for nesting, e.g. `git.host: github`, `since.ref:
+v8.0.0`, or `retain.version.majors: 2`. Dotted and nested forms may be mixed; conflicting values
+raise the same errors as duplicate nested keys.
+
+Sources sharing the same (host, org, repo) are grouped into one RepoConfig (a list of selectors),
+so cross-selector union retention semantics (see planner.plan_repo) hold across a repo's sources.
 
 Duration units: s, h, d, w, m (=30d month), y (=365d year).
 """
@@ -54,6 +54,7 @@ from datetime import datetime, timedelta, timezone
 import yaml
 
 # App packages
+from .hosts import Host, resolve_hosts, validate_host_id
 from .version import CompiledPattern, Version, compile_pattern, match_version, parse_bound
 
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*(s|h|d|w|m|y)\s*$")
@@ -153,6 +154,7 @@ class Selector:
 
 @dataclass
 class RepoConfig:
+    host: str
     org: str
     repo: str
     selectors: list[Selector] = field(default_factory=list)
@@ -229,13 +231,41 @@ def _parse_commit_match(raw: dict, ctx: str) -> list[str]:
     return normalized
 
 
-def _parse_selector(raw: dict, ctx: str) -> Selector:
-    if raw.get("type") not in ("branch", "tag", "commit"):
-        raise ValueError(f"{ctx}: 'type' must be 'branch', 'tag', or 'commit'")
-    unknown = set(raw) - {"type", "match", "since", "retain"}
+_GIT_KEYS = {"host", "org", "repo", "ref_type"}
+
+
+def _parse_git_scope(raw: dict, ctx: str) -> tuple[str, str, str, str]:
+    """Validate a source's `git:` block and return (host, org, repo, ref_type). Every field is a
+    single required concrete string; ref_type is one of branch/tag/commit; host is validated as a
+    legal git.host value. No wildcards or lists (that keeps the config simple to parse and use)."""
+    git = raw.get("git")
+    if not isinstance(git, dict):
+        raise ValueError(f"{ctx}: 'git' must be a mapping with host/org/repo/ref_type")
+    unknown = set(git) - _GIT_KEYS
+    if unknown:
+        raise ValueError(f"{ctx} git: unknown keys {sorted(unknown)}")
+    values: dict[str, str] = {}
+    for key in ("host", "org", "repo", "ref_type"):
+        val = git.get(key)
+        if not isinstance(val, str) or not val:
+            raise ValueError(f"{ctx} git: '{key}' must be a non-empty string")
+        values[key] = val
+    if values["ref_type"] not in ("branch", "tag", "commit"):
+        raise ValueError(f"{ctx} git: 'ref_type' must be 'branch', 'tag', or 'commit'")
+    try:
+        validate_host_id(values["host"])
+    except ValueError as e:
+        raise ValueError(f"{ctx} git.host: {e}") from e
+    return values["host"], values["org"], values["repo"], values["ref_type"]
+
+
+def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
+    """Parse one `sources[i]` entry into (host, org, repo, Selector). The ref_type comes from the
+    `git` block; `match`/`since`/`retain` are top-level siblings."""
+    unknown = set(raw) - {"git", "match", "since", "retain", "schedule"}
     if unknown:
         raise ValueError(f"{ctx}: unknown keys {sorted(unknown)}")
-    ref_type = raw["type"]
+    host, org, repo, ref_type = _parse_git_scope(raw, ctx)
 
     if ref_type == "commit":
         # A pinned commit has no enumerable name to pattern-match against (see selection.py),
@@ -263,7 +293,7 @@ def _parse_selector(raw: dict, ctx: str) -> Selector:
     if ref_type == "commit" and raw.get("since") is not None:
         # A commit selector already names the exact point to index -- there is nothing to
         # index "from".
-        raise ValueError(f"{ctx}: commit selectors do not support 'since'")
+        raise ValueError(f"{ctx}: commit sources do not support 'since'")
     since = _parse_since(raw["since"], ctx) if raw.get("since") is not None else None
 
     retain = None
@@ -271,12 +301,13 @@ def _parse_selector(raw: dict, ctx: str) -> Selector:
         retain = _parse_retain(raw["retain"], ctx, has_versioned, levels)
         if ref_type == "commit" and (retain.count is not None or retain.version is not None
                                       or retain.prerelease != "keep"):
-            raise ValueError(f"{ctx}: commit selectors support only 'age' retention")
+            raise ValueError(f"{ctx}: commit sources support only 'age' retention")
         if retain.is_empty():
             retain = None
 
-    return Selector(ref_type=ref_type, raw_patterns=patterns, compiled=compiled,
-                    since=since, retain=retain, levels=levels)
+    selector = Selector(ref_type=ref_type, raw_patterns=patterns, compiled=compiled,
+                        since=since, retain=retain, levels=levels)
+    return host, org, repo, selector
 
 
 def _deep_merge(dst: dict, src: dict) -> None:
@@ -322,25 +353,58 @@ def _expand_dotted_keys(obj):
     return out
 
 
-def load_config(config_path: str) -> list[RepoConfig]:
+@dataclass
+class Config:
+    """A parsed sourcerer.yml: the resolved git-host registry (built-in defaults merged with the
+    file's `hosts:` overrides) and the repos/selectors the `sources:` section selects."""
+    hosts: dict[str, Host]
+    repos: list[RepoConfig]
+
+
+def load_config(config_path: str) -> Config:
     with open(config_path) as f:
         return parse_config(yaml.safe_load(f))
 
 
-def parse_config(data) -> list[RepoConfig]:
-    if not isinstance(data, list):
-        raise ValueError("config must be a YAML list of repo entries")
+def parse_config(data) -> Config:
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError("config must be a YAML mapping with optional 'hosts:' and 'sources:'")
     data = _expand_dotted_keys(data)
-    out: list[RepoConfig] = []
-    for i, entry in enumerate(data):
-        ctx = f"config entry {i}"
+
+    unknown = set(data) - {"hosts", "sources", "schedules"}
+    if unknown:
+        raise ValueError(f"config: unknown top-level keys {sorted(unknown)}")
+
+    raw_hosts = data.get("hosts")
+    if raw_hosts is not None and not isinstance(raw_hosts, list):
+        raise ValueError("config: 'hosts' must be a list")
+    hosts = resolve_hosts(raw_hosts)
+
+    sources = data.get("sources")
+    if sources is not None and not isinstance(sources, list):
+        raise ValueError("config: 'sources' must be a list")
+
+    # Group sources sharing (host, org, repo) into one RepoConfig (a list of selectors), so the
+    # planner's cross-selector union retention holds across a repo's sources. Insertion order is
+    # preserved so plan/report order is stable.
+    grouped: dict[tuple[str, str, str], RepoConfig] = {}
+    for i, entry in enumerate(sources or []):
+        ctx = f"sources[{i}]"
         if not isinstance(entry, dict):
             raise ValueError(f"{ctx} must be a mapping")
-        if not entry.get("org") or not entry.get("repo"):
-            raise ValueError(f"{ctx} must set both 'org' and 'repo'")
-        refs = entry.get("refs")
-        if refs is not None and not isinstance(refs, list):
-            raise ValueError(f"{ctx}: 'refs' must be a list")
-        selectors = [_parse_selector(s, f"{ctx} refs[{j}]") for j, s in enumerate(refs or [])]
-        out.append(RepoConfig(org=entry["org"], repo=entry["repo"], selectors=selectors))
-    return out
+        host, org, repo, selector = _parse_source(entry, ctx)
+        # A source may name a host id not present in the (possibly overridden) registry only if it
+        # is a built-in; resolve_hosts always includes every built-in, so an unknown id here means
+        # a custom host was referenced without being defined in `hosts:`.
+        if host not in hosts:
+            raise ValueError(
+                f"{ctx} git.host: unknown host {host!r}; define it under 'hosts:' in the config"
+            )
+        key = (host, org, repo)
+        if key not in grouped:
+            grouped[key] = RepoConfig(host=host, org=org, repo=repo, selectors=[])
+        grouped[key].selectors.append(selector)
+
+    return Config(hosts=hosts, repos=list(grouped.values()))

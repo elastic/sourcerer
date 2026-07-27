@@ -6,7 +6,8 @@ configuration:
   query: |-
     // Scope the search
     FROM sourcerer-lines METADATA _score
-    | WHERE MATCH(git.org, ?git_org)
+    | WHERE git.host LIKE ?git_host
+        AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit
         AND file.path LIKE ?file_path
@@ -32,9 +33,14 @@ configuration:
 
     // Format the response
     | SORT _score DESC
-    | KEEP git.org, git.repo, git.commit, file.path, file.size, line.number, line.content
+    | KEEP git.host, git.org, git.repo, git.commit, file.path, file.size, line.number, line.content
     | LIMIT ?n
   params:
+    git_host:
+      type: string
+      description: Filter by git host(s)
+      optional: true
+      defaultValue: "*"
     git_org:
       type: string
       description: Filter by git org(s)

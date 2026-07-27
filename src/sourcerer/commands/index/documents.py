@@ -41,6 +41,7 @@ def file_attributes(
 
 
 def build_file_doc(
+    host: str,
     org: str,
     repo: str,
     commit_sha: str,
@@ -84,20 +85,23 @@ def build_file_doc(
             file_fields["target_size"] = target_size
     doc = {
         "git": {
+            "host": host,
             "org": org,
             "repo": repo,
             "commit": commit_sha,
         },
         "file": file_fields,
     }
-    # Content identity is (org, repo, commit, path): the same blob reached via any ref
+    # Content identity is (host, org, repo, commit, path): the same blob reached via any ref
     # (branch/tag/commit) collapses to one doc. Branch is intentionally absent -- it lives
-    # only in the refs index (see markers.write_ref_marker) since a branch moves.
-    _id = make_doc_id(org, repo, commit_sha, rel_path)
+    # only in the refs index (see markers.write_ref_marker) since a branch moves. host is folded
+    # in so the same org/repo on two different hosts never collide.
+    _id = make_doc_id(host, org, repo, commit_sha, rel_path)
     return _id, doc
 
 
 def iter_line_docs(
+    host: str,
     org: str,
     repo: str,
     commit_sha: str,
@@ -128,6 +132,7 @@ def iter_line_docs(
         file_fields["attributes"] = attributes
     base = {
         "git": {
+            "host": host,
             "org": org,
             "repo": repo,
             "commit": commit_sha,
@@ -135,7 +140,7 @@ def iter_line_docs(
         "file": file_fields,
     }
     for line_num, line_content in enumerate(content.splitlines(), start=1):
-        _id = make_doc_id(org, repo, commit_sha, rel_path, str(line_num))
+        _id = make_doc_id(host, org, repo, commit_sha, rel_path, str(line_num))
         yield _id, {**base, "line": {"number": line_num, "content": line_content}}
 
 
@@ -145,7 +150,7 @@ _WORKER_CTX: dict = {}
 
 
 def _init_worker(
-    org: str, repo: str, commit_sha: str, repo_dir: str, symlink_paths: frozenset[str] = frozenset()
+    host: str, org: str, repo: str, commit_sha: str, repo_dir: str, symlink_paths: frozenset[str] = frozenset()
 ) -> None:
     # Ignore Ctrl-C in the worker processes. The terminal delivers SIGINT to the whole process
     # group, so without this every worker dumps its own KeyboardInterrupt traceback -- and, worse,
@@ -154,7 +159,7 @@ def _init_worker(
     # pool down (see index_repo / runtime.handle_interrupts).
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _WORKER_CTX.update(
-        org=org, repo=repo, commit_sha=commit_sha, repo_dir=pathlib.Path(repo_dir),
+        host=host, org=org, repo=repo, commit_sha=commit_sha, repo_dir=pathlib.Path(repo_dir),
         symlink_paths=symlink_paths,
     )
 
@@ -164,10 +169,10 @@ def build_file_actions(rel_path: str) -> list[dict]:
     text. Runs in a worker process (see _init_worker for the shared context). Mirrors the old
     inline generator -- a binary file or one that can't be read yields only its file doc."""
     ctx = _WORKER_CTX
-    org, repo, commit_sha = ctx["org"], ctx["repo"], ctx["commit_sha"]
+    host, org, repo, commit_sha = ctx["host"], ctx["org"], ctx["repo"], ctx["commit_sha"]
     abs_path = ctx["repo_dir"] / rel_path
-    f_index = files_index(org, repo)
-    l_index = lines_index(org, repo)
+    f_index = files_index(host, org, repo)
+    l_index = lines_index(host, org, repo)
     # Read the file's bytes once: detect binary from the first 8 KB, and (if text) decode the
     # same buffer for line splitting -- no second read of the file. Binary flag must be computed
     # before build_file_doc so it reaches file.attributes.
@@ -208,7 +213,7 @@ def build_file_actions(rel_path: str) -> list[dict]:
         git_target_path = None
         git_target_size = None
     file_id, file_doc = build_file_doc(
-        org, repo, commit_sha, rel_path, abs_path, binary=binary,
+        host, org, repo, commit_sha, rel_path, abs_path, binary=binary,
         is_symlink=True if is_git_symlink else None,
         target_path=git_target_path,
         target_size=git_target_size,
@@ -219,7 +224,7 @@ def build_file_actions(rel_path: str) -> list[dict]:
     content = raw.decode("utf-8", errors="surrogateescape")
     ff = file_doc["file"]
     for line_id, line_doc in iter_line_docs(
-        org, repo, commit_sha, rel_path, content,
+        host, org, repo, commit_sha, rel_path, content,
         size=ff["size"],
         target_path=ff.get("target_path"),
         target_size=ff.get("target_size"),
@@ -231,6 +236,7 @@ def build_file_actions(rel_path: str) -> list[dict]:
 
 def index_repo(
     es: Elasticsearch,
+    host: str,
     org: str,
     repo: str,
     repo_dir: pathlib.Path,
@@ -241,7 +247,7 @@ def index_repo(
     lines_count = 0
     # Compute the per-repo files index name once so we can distinguish file vs line docs
     # in the response metadata without relying on a fixed constant.
-    f_index = files_index(org, repo)
+    f_index = files_index(host, org, repo)
 
     # Generation (read + decode + per-line dict build + id hashing) is the throughput ceiling,
     # so fan it out across worker processes; each returns one file's actions, which we flatten
@@ -252,7 +258,7 @@ def index_repo(
     with ProcessPoolExecutor(
         max_workers=max(1, t.index_workers),
         initializer=_init_worker,
-        initargs=(org, repo, commit_sha, str(repo_dir), symlink_paths),
+        initargs=(host, org, repo, commit_sha, str(repo_dir), symlink_paths),
     ) as executor:
         def generate_actions():
             for file_actions in executor.map(

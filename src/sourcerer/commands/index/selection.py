@@ -12,18 +12,21 @@ import pathlib
 import click
 
 # App packages
-from ...config import RepoConfig, load_config
+from ...config import Config, RepoConfig, load_config
+from ...hosts import Host
 from ...planner import Marker, plan_repo
 from ...progress import Unit
 from .git import _commit_date_of, list_remote_ref_names
 
 
-def _resolve_entry(cfg: RepoConfig) -> list[Unit]:
+def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
     """Resolve one RepoConfig into the Units it selects: list the remote branches/tags once
     per kind and keep those matching a selector's version-aware pattern (+ min/max_version).
     Pure network + filtering with no reporter calls, so it is safe to run concurrently.
     ls-remote failures (after retries) are reported to stderr; that ref type contributes
-    no units so the run continues with the repos that did resolve."""
+    no units so the run continues with the repos that did resolve. `host` supplies the clone
+    URL and is carried on every emitted Unit."""
+    clone_url = host.clone_url(cfg.org, cfg.repo)
     fetched: dict[str, list[str] | None] = {}  # kind -> names (None = ls-remote failed)
     seen: set[tuple[str, str]] = set()
     units: list[Unit] = []
@@ -37,11 +40,11 @@ def _resolve_entry(cfg: RepoConfig) -> list[Unit]:
                 if (rt, prefix) in seen:
                     continue
                 seen.add((rt, prefix))
-                units.append(Unit(org=cfg.org, repo=cfg.repo, ref=prefix, kind=rt))
+                units.append(Unit(host=cfg.host, org=cfg.org, repo=cfg.repo, ref=prefix, kind=rt))
             continue
         if rt not in fetched:
             fetched[rt] = list_remote_ref_names(
-                cfg.org, cfg.repo, "heads" if rt == "branch" else "tags"
+                clone_url, "heads" if rt == "branch" else "tags"
             )
         names = fetched[rt]
         if names is None:
@@ -56,13 +59,13 @@ def _resolve_entry(cfg: RepoConfig) -> list[Unit]:
             if floor is not None and v.components < floor:
                 continue  # below the since version floor
             seen.add((rt, name))
-            units.append(Unit(org=cfg.org, repo=cfg.repo, ref=name, kind=rt))
+            units.append(Unit(host=cfg.host, org=cfg.org, repo=cfg.repo, ref=name, kind=rt))
 
     failed_kinds = sorted(k for k, v in fetched.items() if v is None)
     if failed_kinds:
         click.echo(
             f"Warning: {cfg.org}/{cfg.repo}: git ls-remote failed for "
-            f"{'/'.join(failed_kinds)} after retries — skipped",
+            f"{'/'.join(failed_kinds)} after retries - skipped",
             err=True,
         )
 
@@ -124,7 +127,8 @@ def _effective_since_floor(
     return min(floors) if floors else None
 
 
-def _load_config(config_path: str) -> list[RepoConfig]:
-    """Load and validate repos.yml into RepoConfig entries (the new `index:` schema, shared
-    with `sourcerer prune`). Raises OSError/ValueError/yaml.YAMLError on a malformed file."""
+def _load_config(config_path: str) -> Config:
+    """Load and validate sourcerer.yml into a Config (resolved hosts + RepoConfig entries),
+    shared with `sourcerer prune`. Raises OSError/ValueError/yaml.YAMLError on a malformed
+    file."""
     return load_config(config_path)

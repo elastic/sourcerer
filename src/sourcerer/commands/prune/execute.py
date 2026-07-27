@@ -14,7 +14,7 @@ from ...queries import enumerate_ref_tuples, gather_content_commit_tuples, list_
 
 
 def execute_deletions(
-    es: Elasticsearch, org: str, repo: str, decisions,
+    es: Elasticsearch, host: str, org: str, repo: str, decisions,
 ) -> tuple[int, int]:
     """Apply a retention prune plan. Deletes the marker docs, then fires async delete-by-query
     for each pruned commit's content in both shared indices. Content is dropped ONLY for
@@ -33,11 +33,12 @@ def execute_deletions(
     )
 
     for sha in drop_commits:
-        for idx in (lines_index(org, repo), files_index(org, repo)):
+        for idx in (lines_index(host, org, repo), files_index(host, org, repo)):
             try:
                 es.delete_by_query(
                     index=idx,
                     query={"bool": {"filter": [
+                        {"term": {"git.host": host}},
                         {"term": {"git.org": org}},
                         {"term": {"git.repo": repo}},
                         {"term": {"git.commit": sha}},
@@ -78,9 +79,9 @@ def plan_orphans_now(es: Elasticsearch) -> OrphanPlan:
 def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, int, int]:
     """Apply an OrphanPlan in ascending-cost order: index DELETEs first (near-instant), then
     the per-repo content delete_by_query (Class B -- expensive, one call per content index per
-    repo), then a single delete_by_query against sourcerer-v1-refs covering every orphaned
+    repo), then a single delete_by_query against sourcerer-v2-refs covering every orphaned
     marker tuple across every repo (Class C -- refs is tiny, so one combined query costs one
-    merge cycle instead of one per repo). Returns
+    merge cycle instead of one per repo). Repo keys are (host, org, repo). Returns
     (indices_deleted, content_commits_dropped, marker_commits_dropped)."""
     indices_deleted = 0
     for name in plan.orphan_index_names:
@@ -88,13 +89,14 @@ def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, 
             indices_deleted += 1
 
     commits_dropped = 0
-    for (org, repo), commits in plan.orphan_content.items():
+    for (host, org, repo), commits in plan.orphan_content.items():
         commits_dropped += len(commits)
-        for idx in (lines_index(org, repo), files_index(org, repo)):
+        for idx in (lines_index(host, org, repo), files_index(host, org, repo)):
             try:
                 es.delete_by_query(
                     index=idx,
                     query={"bool": {"filter": [
+                        {"term": {"git.host": host}},
                         {"term": {"git.org": org}},
                         {"term": {"git.repo": repo}},
                         {"terms": {"git.commit": sorted(commits)}},
@@ -111,11 +113,12 @@ def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, 
     if plan.orphan_marker_commits:
         should = [
             {"bool": {"filter": [
+                {"term": {"git.host": host}},
                 {"term": {"git.org": org}},
                 {"term": {"git.repo": repo}},
                 {"terms": {"git.commit": sorted(commits)}},
             ]}}
-            for (org, repo), commits in plan.orphan_marker_commits.items()
+            for (host, org, repo), commits in plan.orphan_marker_commits.items()
         ]
         try:
             es.delete_by_query(

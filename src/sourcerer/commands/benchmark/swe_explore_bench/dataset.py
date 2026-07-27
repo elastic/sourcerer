@@ -1,4 +1,4 @@
-"""`sourcerer benchmark get swe_explore_bench` — download + build the dataset.
+"""`sourcerer benchmark get swe_explore_bench` - download + build the dataset.
 
 Reproduces the SWE-Explore-Bench setup into a benchmark directory (no data is
 vendored into sourcerer):

@@ -30,30 +30,31 @@ class TestCommitPrefixIndexed:
     def test_hit_returns_full_sha(self):
         es = MagicMock()
         es.search.return_value = _search_hits(FULL_SHA)
-        assert commit_prefix_indexed(es, "acme", "widgets", "cfefb3b") == FULL_SHA
+        assert commit_prefix_indexed(es, "github", "acme", "widgets", "cfefb3b") == FULL_SHA
         query = es.search.call_args.kwargs["query"]
         assert es.search.call_args.kwargs["index"] == REFS_ALIAS
         assert {"prefix": {"git.commit": "cfefb3b"}} in query["bool"]["filter"]
         assert {"term": {"status": "complete"}} in query["bool"]["filter"]
+        assert {"term": {"git.host": "github"}} in query["bool"]["filter"]
         assert {"term": {"git.org": "acme"}} in query["bool"]["filter"]
         assert {"term": {"git.repo": "widgets"}} in query["bool"]["filter"]
 
     def test_no_hit_returns_none(self):
         es = MagicMock()
         es.search.return_value = _search_hits(None)
-        assert commit_prefix_indexed(es, "acme", "widgets", "cfefb3b") is None
+        assert commit_prefix_indexed(es, "github", "acme", "widgets", "cfefb3b") is None
 
     def test_missing_index_returns_none_not_raise(self):
         es = MagicMock()
         es.search.side_effect = _not_found()
-        assert commit_prefix_indexed(es, "acme", "widgets", "cfefb3b") is None
+        assert commit_prefix_indexed(es, "github", "acme", "widgets", "cfefb3b") is None
 
 
 class TestPreCloneSkipCommit:
     def test_force_bypasses_without_querying(self):
         es = MagicMock()
         skip, ref_for_id, remote_sha = pre_clone_skip(
-            es, "acme", "widgets", None, None, "cfefb3b", True,
+            es, "github", "acme", "widgets", None, None, "cfefb3b", "https://x", True,
         )
         assert (skip, ref_for_id, remote_sha) == (False, None, None)
         es.search.assert_not_called()
@@ -62,7 +63,7 @@ class TestPreCloneSkipCommit:
         es = MagicMock()
         es.search.return_value = _search_hits(FULL_SHA)
         skip, ref_for_id, remote_sha = pre_clone_skip(
-            es, "acme", "widgets", None, None, "CFEFB3B", False,
+            es, "github", "acme", "widgets", None, None, "CFEFB3B", "https://x", False,
         )
         assert skip is True
         assert ref_for_id == FULL_SHA
@@ -72,7 +73,7 @@ class TestPreCloneSkipCommit:
         es = MagicMock()
         es.search.return_value = _search_hits(None)
         skip, ref_for_id, remote_sha = pre_clone_skip(
-            es, "acme", "widgets", None, None, "cfefb3b", False,
+            es, "github", "acme", "widgets", None, None, "cfefb3b", "https://x", False,
         )
         assert (skip, ref_for_id, remote_sha) == (False, None, None)
 
@@ -82,10 +83,14 @@ class TestShouldIndex:
         es = MagicMock()
         es.search.return_value = {"hits": {"hits": [{"_source": {"status": "complete"}}]}}
 
-        assert should_index(es, "acme", "widgets", "branch", "main", FULL_SHA) is False
+        assert should_index(es, "github", "acme", "widgets", "branch", "main", FULL_SHA) is False
 
         assert es.search.call_args.kwargs == {
             "index": REFS_ALIAS,
             "size": 1,
-            "query": {"ids": {"values": [build_ref_id("acme", "widgets", "branch", "main", FULL_SHA)]}},
+            "query": {"ids": {"values": [build_ref_id("github", "acme", "widgets", "branch", "main", FULL_SHA)]}},
         }
+
+    def test_host_changes_ref_id(self):
+        assert build_ref_id("github", "acme", "widgets", "branch", "main", FULL_SHA) != \
+            build_ref_id("gitlab", "acme", "widgets", "branch", "main", FULL_SHA)

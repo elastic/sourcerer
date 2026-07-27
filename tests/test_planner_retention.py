@@ -10,8 +10,11 @@ from sourcerer.planner import Decision, _describe, content_delete_set, plan_repo
 from conftest import dt, make_marker
 
 
-def _cfg(refs, org="acme", repo="widgets"):
-    return parse_config([{"org": org, "repo": repo, "refs": refs}])[0]
+def _cfg(refs, host="github", org="acme", repo="widgets"):
+    sources = [{"git": {"host": host, "org": org, "repo": repo, "ref_type": r["type"]},
+                **{k: v for k, v in r.items() if k != "type"}}
+               for r in refs]
+    return parse_config({"sources": sources}).repos[0]
 
 
 def _sel(type_="branch", match="main", retain=None):

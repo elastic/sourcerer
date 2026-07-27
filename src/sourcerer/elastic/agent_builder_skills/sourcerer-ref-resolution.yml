@@ -1,7 +1,7 @@
 id: sourcerer-ref-resolution
 name: Ref Resolution
 description: |-
-  Use any time a branch, tag, or version in the user's question is ambiguous or unspecified — whether at the start of a question or mid-conversation (e.g. when comparing behavior across versions).
+  Use any time a branch, tag, or version in the user's question is ambiguous or unspecified - whether at the start of a question or mid-conversation (e.g. when comparing behavior across versions).
 content: |-
   # Ref Resolution
 
@@ -15,16 +15,16 @@ content: |-
 
   ## Tool
   Use `sourcerer.refs.list` to explore available refs. It accepts wildcards on `git_ref`:
-  - `git_ref: v8.*` — all refs starting with "v8."
-  - `git_ref: v8.17.*` — all 8.17.x tags
-  - `git_ref: main` — exact branch match
+  - `git_ref: v8.*` - all refs starting with "v8."
+  - `git_ref: v8.17.*` - all 8.17.x tags
+  - `git_ref: main` - exact branch match
 
   Combine with `git_ref_type: tag`, `git_ref_type: branch`, or `git_ref_type: commit` (a pinned,
   ad-hoc commit not on a tracked branch/tag tip) to narrow further.
 
   ## Resolution scenarios
 
-  ### No ref specified — default to latest stable
+  ### No ref specified - default to latest stable
   1. Call `refs.list` with `git_ref_type: tag` for the repo.
   2. Exclude pre-release tags (suffixes like `-rc`, `-beta`, `-alpha`, `-SNAPSHOT`, `-M1`). A pre-release sorts *below* its final release (`v9.0.0 > v9.0.0-rc1`).
   3. Pick the highest semver tag, comparing numerically (major → minor → patch). Do not sort lexically, and do not assume `indexed_at DESC` order equals semver order (`v9.0.0 > v8.14.3 > v8.2.0`).
@@ -41,7 +41,7 @@ content: |-
   Resolve each ref independently using the steps above. Run content queries against each commit, then compare results. Label each finding with its version.
 
   ### Explicit ref (branch name, exact tag, commit hash)
-  Use as given. If it is a branch, call `refs.list` with `git_ref_type: branch` to confirm it exists and retrieve its current commit. If it is a tag, confirm and get its commit. If it is a commit hash, use it directly — optionally confirm with `git_ref_type: commit` if it may be a pinned commit rather than one reached via a branch/tag.
+  Use as given. If it is a branch, call `refs.list` with `git_ref_type: branch` to confirm it exists and retrieve its current commit. If it is a tag, confirm and get its commit. If it is a commit hash, use it directly - optionally confirm with `git_ref_type: commit` if it may be a pinned commit rather than one reached via a branch/tag.
 
   ## Pinning the commit
   Once a ref resolves to a `git.commit`, use that commit in every subsequent `sourcerer.code.*` and `sourcerer.files.*` call for that repo and ref. Re-invoke this skill only when the question introduces a new or additional ref.

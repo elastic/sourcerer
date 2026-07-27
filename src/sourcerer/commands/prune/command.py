@@ -30,7 +30,7 @@ def run(config_path=None, url=None, api_key=None, username=None, password=None,
     entries = []
     if config_path:
         try:
-            entries = load_config(config_path)
+            entries = load_config(config_path).repos
         except (OSError, ValueError, yaml.YAMLError) as e:
             click.echo(f"Error: invalid config: {e}", err=True)
             sys.exit(1)
@@ -47,11 +47,11 @@ def run(config_path=None, url=None, api_key=None, username=None, password=None,
 
     for cfg in entries:
         try:
-            markers = fetch_markers(es, cfg.org, cfg.repo)
+            markers = fetch_markers(es, cfg.host, cfg.org, cfg.repo)
             decisions = plan_repo(markers, cfg, now)
         except ES_ERRORS as e:
             failures += 1
-            click.echo(f"{cfg.org}/{cfg.repo}: error planning: {e}", err=True)
+            click.echo(f"{cfg.host}/{cfg.org}/{cfg.repo}: error planning: {e}", err=True)
             continue
         rows.extend(_retention_rows(cfg, decisions))
         repo_decisions.append((cfg, decisions))
@@ -79,12 +79,12 @@ def run(config_path=None, url=None, api_key=None, username=None, password=None,
         for cfg, decisions in repo_decisions:
             if any(d.action == "delete" for d in decisions):
                 try:
-                    n_markers, n_commits = execute_deletions(es, cfg.org, cfg.repo, decisions)
+                    n_markers, n_commits = execute_deletions(es, cfg.host, cfg.org, cfg.repo, decisions)
                     total_markers += n_markers
                     total_commits += n_commits
                 except ES_ERRORS as e:
                     failures += 1
-                    click.echo(f"{cfg.org}/{cfg.repo}: error deleting: {e}", err=True)
+                    click.echo(f"{cfg.host}/{cfg.org}/{cfg.repo}: error deleting: {e}", err=True)
 
         if orphan_plan is not None:
             has_orphans = bool(

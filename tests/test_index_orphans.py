@@ -27,11 +27,11 @@ def _not_found() -> NotFoundError:
     return NotFoundError("index_not_found_exception", meta, None)
 
 
-def _composite_response(tuples: list[tuple[str, str, str]], after_key: dict | None) -> dict:
+def _composite_response(tuples: list[tuple[str, str, str, str]], after_key: dict | None) -> dict:
     return {
         "aggregations": {
             "tuples": {
-                "buckets": [{"key": {"org": o, "repo": r, "commit": c}} for o, r, c in tuples],
+                "buckets": [{"key": {"host": h, "org": o, "repo": r, "commit": c}} for h, o, r, c in tuples],
                 **({"after_key": after_key} if after_key else {}),
             }
         }
@@ -42,11 +42,11 @@ class TestListSourcererIndices:
     def test_discovers_backing_indices_through_content_aliases(self):
         es = MagicMock()
         es.indices.get_alias.side_effect = [
-            {"sourcerer-v1-files~acme~widgets": {}},
-            {"sourcerer-v1-lines~acme~widgets": {}},
+            {"sourcerer-v2-files~github~acme~widgets": {}},
+            {"sourcerer-v2-lines~github~acme~widgets": {}},
         ]
         names = list_sourcerer_indices(es)
-        assert names == ["sourcerer-v1-files~acme~widgets", "sourcerer-v1-lines~acme~widgets"]
+        assert names == ["sourcerer-v2-files~github~acme~widgets", "sourcerer-v2-lines~github~acme~widgets"]
         assert es.indices.get_alias.call_args_list[0].kwargs == {"name": FILES_ALIAS}
         assert es.indices.get_alias.call_args_list[1].kwargs == {"name": LINES_ALIAS}
 
@@ -61,17 +61,20 @@ class TestCompositeTuples:
     def test_paginates_until_no_after_key(self):
         es = MagicMock()
         es.search.side_effect = [
-            _composite_response([("acme", "widgets", "aaa")], after_key={"org": "acme"}),
-            _composite_response([("acme", "widgets", "bbb")], after_key=None),
+            _composite_response([("github", "acme", "widgets", "aaa")], after_key={"host": "github"}),
+            _composite_response([("github", "acme", "widgets", "bbb")], after_key=None),
         ]
         result = enumerate_ref_tuples(es)
-        assert result == {("acme", "widgets", "aaa"), ("acme", "widgets", "bbb")}
+        assert result == {("github", "acme", "widgets", "aaa"), ("github", "acme", "widgets", "bbb")}
         assert es.search.call_count == 2
         first_kwargs = es.search.call_args_list[0].kwargs
         second_kwargs = es.search.call_args_list[1].kwargs
         assert first_kwargs["index"] == REFS_ALIAS
         assert "after" not in first_kwargs["aggs"]["tuples"]["composite"]
-        assert second_kwargs["aggs"]["tuples"]["composite"]["after"] == {"org": "acme"}
+        assert second_kwargs["aggs"]["tuples"]["composite"]["after"] == {"host": "github"}
+        # host is the leading composite source
+        sources = first_kwargs["aggs"]["tuples"]["composite"]["sources"]
+        assert list(sources[0]) == ["host"]
 
     def test_empty_buckets_stops_pagination(self):
         es = MagicMock()
@@ -89,10 +92,10 @@ class TestGatherContentCommitTuples:
     def test_queries_content_aliases(self):
         es = MagicMock()
         es.search.side_effect = [
-            _composite_response([("acme", "widgets", "aaa")], after_key=None),
-            _composite_response([("acme", "widgets", "aaa")], after_key=None),
+            _composite_response([("github", "acme", "widgets", "aaa")], after_key=None),
+            _composite_response([("github", "acme", "widgets", "aaa")], after_key=None),
         ]
         result = gather_content_commit_tuples(es)
-        assert result == {("acme", "widgets", "aaa")}
+        assert result == {("github", "acme", "widgets", "aaa")}
         assert es.search.call_count == 2
         assert [call.kwargs["index"] for call in es.search.call_args_list] == [FILES_ALIAS, LINES_ALIAS]
