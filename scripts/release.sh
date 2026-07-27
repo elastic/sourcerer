@@ -99,6 +99,9 @@ fi
 printf 'Checking lockfile...\n'
 uv lock --check
 
+printf 'Syncing environment...\n'
+uv sync --locked
+
 printf 'Running tests...\n'
 uv run --locked pytest tests/
 
