@@ -7,9 +7,15 @@
 # ---------------------------------------------------------------------------------------------
 # hosts: OPTIONAL. Omit entirely to use the built-in defaults for all known hosts
 # (github, gitlab, bitbucket, codeberg, forgejo, gitea, gogs, sourcehut, launchpad,
-# azure_devops, aws_codecommit, google_cloud_source). Use this only to customize a known
+# azure-devops, aws-codecommit, google-cloud-source, gcp-ssm). Use this only to customize a known
 # host (e.g. a self-hosted host name) or to define a custom host. Values given here are
 # merged OVER the defaults (your value wins); anything omitted keeps the shipped default.
+#
+# Providers like AWS CodeCommit, Azure DevOps, and GCP Secure Source Manager are
+# region/project-scoped deployments with no fixed multi-tenant domain. Define a separate
+# hosts entry per deployment (e.g. aws-codecommit-us-east-1) with the region or project
+# baked directly into the URL templates. git.org and git.repo are then plain, unambiguous
+# values with no extra scoping embedded in them.
 #
 # URL templates use dotted tokens naming the Elasticsearch field the value comes from:
 #   {git.host} {git.org} {git.repo} {git.commit}
@@ -39,9 +45,49 @@ hosts:
     line: "https://gitea.internal.example/{git.org}/{git.repo}/src/commit/{git.commit}/{file.path}#L{line.number}"
     line_range: "https://gitea.internal.example/{git.org}/{git.repo}/src/commit/{git.commit}/{file.path}#L{line.number_start}-L{line.number_end}"
 
+# A per-region AWS CodeCommit deployment. git.org is the bare org/account label (no region
+# embedded in it); the region is baked directly into this hosts entry's URLs. Define one
+# entry per region you use, each with its own id.
+- id: aws-codecommit-us-east-1
+  name: AWS CodeCommit (us-east-1)
+  clone:
+    url: "https://git-codecommit.us-east-1.amazonaws.com/v1/repos/{git.repo}"
+  links:
+    directory: "https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/{git.repo}/browse/{git.commit}/--/{file.directory}?region=us-east-1"
+    file: "https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/{git.repo}/browse/{git.commit}/--/{file.path}?region=us-east-1"
+    line: "https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/{git.repo}/browse/{git.commit}/--/{file.path}?region=us-east-1&lines={line.number}"
+    line_range: "https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/{git.repo}/browse/{git.commit}/--/{file.path}?region=us-east-1&lines={line.number_start}-{line.number_end}"
+
+# A per-project Azure DevOps deployment. git.org is the bare Azure org name; the project is
+# baked directly into this hosts entry's URLs. Define one entry per project you use, each
+# with its own id. For org-level repos (no project segment), use the built-in azure-devops
+# entry directly.
+- id: azure-devops-myproject
+  name: Azure DevOps (myproject)
+  clone:
+    url: "https://dev.azure.com/{git.org}/myproject/_git/{git.repo}"
+  links:
+    directory: "https://dev.azure.com/{git.org}/myproject/_git/{git.repo}?path=/{file.directory}&version=GC{git.commit}"
+    file: "https://dev.azure.com/{git.org}/myproject/_git/{git.repo}?path=/{file.path}&version=GC{git.commit}"
+    line: "https://dev.azure.com/{git.org}/myproject/_git/{git.repo}?path=/{file.path}&version=GC{git.commit}&line={line.number}&lineEnd={line.number_plus_one}&lineStartColumn=1&lineEndColumn=1&lineStyle=plain"
+    line_range: "https://dev.azure.com/{git.org}/myproject/_git/{git.repo}?path=/{file.path}&version=GC{git.commit}&line={line.number_start}&lineEnd={line.number_end_plus_one}&lineStartColumn=1&lineEndColumn=1&lineStyle=plain"
+
+# A GCP Secure Source Manager instance. git.org is the GCP project name; git.repo is the
+# repository name. The full instance hostname (instance-projectnumber.location) is baked
+# directly into this hosts entry's URLs -- the git clone subdomain appends "-git" before
+# the location segment. Define one entry per instance you use, each with its own id.
+- id: gcp-ssm-us-central1
+  name: GCP Secure Source Manager (us-central1)
+  clone:
+    url: "https://myinstance-123456789-git.us-central1.sourcemanager.dev/{git.org}/{git.repo}.git"
+  links:
+    directory: "https://myinstance-123456789.us-central1.sourcemanager.dev/{git.org}/{git.repo}/src/commit/{git.commit}/{file.directory}"
+    file: "https://myinstance-123456789.us-central1.sourcemanager.dev/{git.org}/{git.repo}/src/commit/{git.commit}/{file.path}"
+    line: "https://myinstance-123456789.us-central1.sourcemanager.dev/{git.org}/{git.repo}/src/commit/{git.commit}/{file.path}#L{line.number}"
+    line_range: "https://myinstance-123456789.us-central1.sourcemanager.dev/{git.org}/{git.repo}/src/commit/{git.commit}/{file.path}#L{line.number_start}-L{line.number_end}"
+
 # ---------------------------------------------------------------------------------------------
-# sources: what to index. Provider-specific extra namespace belongs inside git.org (for example
-# "elastic+us-east-1" for AWS CodeCommit).
+# sources: what to index.
 sources:
 - git:
     host: github
@@ -132,6 +178,36 @@ sources:
     host: my_gitea
     org: elastic
     repo: elasticsearch
+    ref_type: branch
+  match: main
+  retain:
+    count: 1
+
+# AWS CodeCommit: git.org is the bare account/org label; region lives in the host id.
+- git:
+    host: aws-codecommit-us-east-1
+    org: myaccount
+    repo: myrepo
+    ref_type: branch
+  match: main
+  retain:
+    count: 1
+
+# Azure DevOps: git.org is the bare Azure org name; project lives in the host id.
+- git:
+    host: azure-devops-myproject
+    org: myorg
+    repo: myrepo
+    ref_type: branch
+  match: main
+  retain:
+    count: 1
+
+# GCP Secure Source Manager: git.org is the GCP project name; instance lives in the host id.
+- git:
+    host: gcp-ssm-us-central1
+    org: my-gcp-project
+    repo: myrepo
     ref_type: branch
   match: main
   retain:

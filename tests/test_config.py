@@ -161,11 +161,6 @@ class TestParseGitScope:
         with pytest.raises(ValueError, match="unknown host"):
             _cfg([_source(host="notahost")])
 
-    def test_org_plus_composite_kept_verbatim(self):
-        cfg = _cfg([_source(org="elastic+us-east-1")])
-        assert cfg.repos[0].org == "elastic+us-east-1"
-
-
 class TestParseSourceMatch:
     def test_match_as_string(self):
         cfg = _cfg([_source(match="main")])
@@ -328,5 +323,5 @@ class TestHostsMerge:
 
     def test_all_builtins_present(self):
         cfg = parse_config({})
-        for hid in ("github", "gitlab", "bitbucket", "azure_devops", "aws_codecommit"):
+        for hid in ("github", "gitlab", "bitbucket", "azure-devops", "aws-codecommit"):
             assert hid in cfg.hosts

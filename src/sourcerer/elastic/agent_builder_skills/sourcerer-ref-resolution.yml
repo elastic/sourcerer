@@ -1,9 +1,9 @@
 id: sourcerer-ref-resolution
-name: Ref Resolution
+name: sourcerer-ref-resolution
 description: |-
   Use any time a branch, tag, or version in the user's question is ambiguous or unspecified - whether at the start of a question or mid-conversation (e.g. when comparing behavior across versions).
 content: |-
-  # Ref Resolution
+  # sourcerer-ref-resolution
 
   ## When this applies
   Apply whenever a ref is ambiguous or unspecified. This includes:

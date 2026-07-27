@@ -22,8 +22,9 @@ built-in git-host defaults) and `sources:` (what to index).
 Content is namespaced by git host as well as org/repo. Each `sources[i].git` block names a single
 concrete `host`, `org`, `repo`, and `ref_type` (no wildcards or arrays). Known hosts have built-in
 clone + citation URL templates in `src/sourcerer/hosts.py`; `hosts:` in the config overrides or
-adds hosts. Provider-specific extra URL segments (Azure DevOps project, AWS CodeCommit region) are
-folded into `git.org` with a plus sign, e.g. `elastic+us-east-1`.
+adds hosts. For providers whose deployments are instance-scoped (AWS CodeCommit, Azure DevOps, GCP
+Secure Source Manager), define one `hosts:` entry per deployment with the region/project/instance
+baked into the URL templates; `git.org` then holds only the plain org or project name.
 
 ### Indexing multiple repos with a config
 

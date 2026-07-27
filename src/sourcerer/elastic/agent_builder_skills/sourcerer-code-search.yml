@@ -1,9 +1,9 @@
 id: sourcerer-code-search
-name: Code Search
+name: sourcerer-code-search
 description: |-
   Use when you need to find where something is defined, understand how a feature is implemented, or explore an unfamiliar repo. Guides which tools to use and in what order.
 content: |-
-  # Code Search
+  # sourcerer-code-search
 
   ## Choosing the right tool
 

@@ -56,11 +56,13 @@ Notes:
 
 ### `hosts`
 
-Holds information about git hosts. This is necessary when indexing code from self-managed git hosts.
+Holds information about git hosts. This is necessary when indexing code from self-managed git hosts, or when using a provider whose deployments are instance-scoped (AWS CodeCommit, Azure DevOps, GCP Secure Source Manager).
 
 When omitted, Sourcerer defaults to a hardcoded list of known git hosts (e.g. GitHub, GitLab, BitBucket).
 
 When given, entries are merged with the hardcoded list of known git hosts.
+
+For providers whose deployments are scoped by region, project, or instance hostname (i.e. AWS CodeCommit, Azure DevOps, GCP Secure Source Manager), you should define one entry per deployment, each with its own unique `id` suffixed with the region, project, instance, or any other values needed to properly namespace the repo (e.g. `aws-codecommit-us-east-1`). Put the region, project, or instance hostname directly into that entry's `clone.url` and `links.*` templates. `git.org` then holds only the plain org or project name, with no extra scoping embedded in it.
 
 If a given entry overwrites an entry from the hardcoded list of known git hosts, only the given fields overwrite their respective fields in the hardcoded entry, while other fields in the hardcoded entry keep their default values.
 
@@ -73,6 +75,10 @@ If a given entry overwrites an entry from the hardcoded list of known git hosts,
 Value of `git.host` used in sourcerer.yml, documents, index names, and _id generation.
 
 Example: `github`
+
+For AWS CodeCommit, Azure DevOps, or GCP Secure Source Manager, you should suffix this value with the additional namespace values that they require (e.g. region, project, instance hostname) to prevent collisions.
+
+Example: `aws-codecommit-us-east-1`
 
 - Required: Yes (if `hosts` exists)
 - Type: String
@@ -223,7 +229,7 @@ The `git.host` of the refs to index.
 
 ### `sources[i].git.org`
 
-The `git.org` of the refs to index. May include a provider-specific extra segment folded in with a plus sign (e.g. `elastic+us-east-1` for AWS CodeCommit, `elastic+MyProject` for Azure DevOps).
+The `git.org` of the refs to index. This should be the plain org or project name on the hosting provider.
 
 - Required: Yes
 - Type: String

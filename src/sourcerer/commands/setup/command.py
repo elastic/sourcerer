@@ -36,11 +36,10 @@ def build_host_citation_skill(host: Host) -> dict:
     registry (built-in defaults merged with the config's `hosts:` overrides) and pushed to
     Kibana; not written to disk, so it never goes stale against the registry."""
     content = (
-        f"# {host.name} Citations\n\n"
-        f"URL templates for citing code hosted on {host.name} (git.host `{host.id}`). Fill the "
+        f"# sourcerer-code-citations-{host.id}\n\n"
+        f"URL templates for citing code hosted on {host.name} (`git.host = \"{host.id}\"`). Fill the "
         "tokens from the `sourcerer.code.*` / `sourcerer.files.*` tool output for the row you are "
-        "citing. `{git.org}` already contains any provider-specific extra segment (e.g. a project "
-        "or region) as an `org+extra` value, so substitute it verbatim.\n\n"
+        "citing.\n\n"
         f"- Directory: `{host.links['directory']}`\n"
         f"- File: `{host.links['file']}`\n"
         f"- Single line: `{host.links['line']}`\n"
@@ -51,11 +50,9 @@ def build_host_citation_skill(host: Host) -> dict:
     )
     return {
         "id": host_citation_skill_id(host.id),
-        "name": f"{host.name} Citations",
+        "name": f"sourcerer-code-citations-{host.id}",
         "description": (
-            f"Host-specific citation URL templates for {host.name} (git.host {host.id}). Loaded "
-            "by the Code Citations skill when a result's git.host is "
-            f"{host.id}."
+            f"Host-specific citation URL templates for {host.name} (`git.host = \"{host.id}\"`)"
         ),
         "content": content,
         "tool_ids": [],
@@ -198,7 +195,10 @@ def load_agent_builder_skills(
     session: requests.Session, kb_url: str, hosts: dict[str, Host],
     skills_dir: pathlib.Path = AGENT_BUILDER_SKILLS_DIR,
 ) -> list[str]:
-    """Upsert the on-disk base skills plus one generated citation skill per resolved git host.
+    """Upsert the on-disk base skills plus one generated citation skill per resolved git host
+    whose auto_skill flag is True. Hosts with auto_skill=False are built-in placeholders that
+    require a user-supplied hosts: override before their URLs are usable; their citation skills
+    are not pushed until the user defines a concrete per-deployment hosts entry.
     Returns every upserted skill id (the host skill ids are needed to patch the agent)."""
     skills = _load_yaml_dir(skills_dir)
     if not skills:
@@ -207,10 +207,12 @@ def load_agent_builder_skills(
     loaded = []
     for skill in skills:
         loaded.append(_upsert_skill(session, base, skill))
-    # Generated per-host citation skills (in-memory, not on disk). Deterministic order by host id
-    # so setup output and the agent's skill list are stable.
+    # Generated per-host citation skills (in-memory, not on disk). Only for hosts with
+    # auto_skill=True. Deterministic order by host id so setup output and the agent's skill
+    # list are stable.
     for host_id in sorted(hosts):
-        loaded.append(_upsert_skill(session, base, build_host_citation_skill(hosts[host_id])))
+        if hosts[host_id].auto_skill:
+            loaded.append(_upsert_skill(session, base, build_host_citation_skill(hosts[host_id])))
     return loaded
 
 
@@ -258,7 +260,7 @@ def run(url: str, api_key: str | None, username: str | None, password: str | Non
         for sid in skill_ids:
             click.echo(f"Upserted skill: {sid}")
 
-        host_skill_ids = [host_citation_skill_id(h) for h in sorted(hosts)]
+        host_skill_ids = [host_citation_skill_id(h) for h in sorted(hosts) if hosts[h].auto_skill]
         agent_ids = load_agent_builder_agents(session, kb_url, host_skill_ids)
         for aid in agent_ids:
             click.echo(f"Upserted agent: {aid}")

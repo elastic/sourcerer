@@ -11,8 +11,8 @@ Two optional top-level sections:
     sources:                       # what to index
     - git:
         host: github               # single required host id (a git.host value)
-        org: elastic               # single required org (may be a "+"-composite, e.g.
-        repo: elasticsearch        #   "elastic+us-east-1" for AWS CodeCommit)
+        org: elastic               # single required org
+        repo: elasticsearch        #
         ref_type: tag              # single required: branch | tag | commit
       match: <pattern> | [<pattern>, ...]     # version.py DSL; a ref matches if ANY hits
       since:                                   # inclusion floor (index-side); at most ONE of:

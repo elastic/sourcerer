@@ -1,9 +1,9 @@
 id: sourcerer-repo-discovery
-name: Repo Discovery
+name: sourcerer-repo-discovery
 description: |-
   Use at the start of most questions to identify which repos are indexed before querying content. Also use mid-conversation when an answer may require expanding into a related or upstream repo (e.g. tracing from an application repo into a lower-level dependency).
 content: |-
-  # Repo Discovery
+  # sourcerer-repo-discovery
 
   ## When this applies
   - **At the start of a question**: confirm which repos are indexed and plan where to look before issuing any content queries.

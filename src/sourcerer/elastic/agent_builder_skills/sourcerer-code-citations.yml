@@ -1,9 +1,9 @@
 id: sourcerer-code-citations
-name: Code Citations
+name: sourcerer-code-citations
 description: |-
   Use whenever an answer names a code symbol, class, function, config key, endpoint, file, directory, or file extension - or makes any checkable claim about repository behavior (a default value, a version, a recall/latency figure, a behavioral guarantee). This is nearly every substantive answer this agent produces, so treat it as the default path, not an edge case reserved for explicit "cite your sources" requests.
 content: |-
-  # Code Citations
+  # sourcerer-code-citations
 
   ## When this applies
   Trigger this on any answer where you:
