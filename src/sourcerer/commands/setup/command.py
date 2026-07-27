@@ -20,6 +20,7 @@ ELASTICSEARCH_INDEX_TEMPLATES_DIR = _ELASTIC / "index_templates"
 AGENT_BUILDER_TOOLS_DIR = _ELASTIC / "agent_builder_tools"
 AGENT_BUILDER_AGENTS_DIR = _ELASTIC / "agent_builder_agents"
 AGENT_BUILDER_SKILLS_DIR = _ELASTIC / "agent_builder_skills"
+KIBANA_SAVED_OBJECTS_DIR = _ELASTIC / "kibana_saved_objects"
 
 # The id/name of the generated per-host citation skills. The base citations skill tells the
 # agent to load `sourcerer-code-citations-<git.host>` for a result's host-specific URL scheme.
@@ -216,24 +217,85 @@ def load_agent_builder_skills(
     return loaded
 
 
+def load_kibana_saved_objects(
+    session: requests.Session, kb_url: str,
+    saved_objects_dir: pathlib.Path = KIBANA_SAVED_OBJECTS_DIR,
+) -> list[str]:
+    """Idempotently import Kibana saved objects (index patterns, dashboards, lenses, tags, etc.)
+    from every .ndjson file in `saved_objects_dir`.
+
+    Uses `POST /api/saved_objects/_import?overwrite=true` so repeated runs are safe.
+    Per-object failures are returned as (id, error_message) pairs in a separate list;
+    the caller is responsible for reporting them.
+
+    Returns (imported_ids, errors) where errors is a list of (object_id, message) tuples."""
+    ndjson_files = sorted(saved_objects_dir.glob("*.ndjson"))
+    if not ndjson_files:
+        raise FileNotFoundError(f"No saved-objects .ndjson files found in {saved_objects_dir}")
+    base = kb_url.rstrip("/")
+    url = f"{base}/api/saved_objects/_import?overwrite=true"
+    imported: list[str] = []
+    errors: list[tuple[str, str]] = []
+    for path in ndjson_files:
+        raw_lines = path.read_bytes().splitlines(keepends=True)
+        # The last line of a Kibana export is a metadata summary (exportedCount/missingRefCount),
+        # not a saved object; strip it before importing.
+        object_lines = [
+            line for line in raw_lines
+            if not (line.strip().startswith(b"{") and b"exportedCount" in line)
+        ]
+        ndjson_bytes = b"".join(object_lines)
+        # Kibana import requires multipart/form-data. Omitting the key from `headers` is NOT
+        # enough to drop it - requests.Session merges session.headers underneath whatever you
+        # pass, so a missing key just falls back to the session's Content-Type: application/json.
+        # Setting it to None here is what actually removes it from the merged result, letting
+        # requests generate the correct multipart/form-data; boundary=... header itself.
+        headers = {k: v for k, v in session.headers.items() if k.lower() != "content-type"}
+        headers["Content-Type"] = None
+        resp = session.post(
+            url,
+            files={"file": (path.name, ndjson_bytes, "application/ndjson")},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        for obj in result.get("successResults", []):
+            imported.append(obj.get("id", "unknown"))
+        for err in result.get("errors", []):
+            obj_id = err.get("id", "unknown")
+            msg = err.get("error", {}).get("message") or str(err.get("error", err))
+            errors.append((obj_id, msg))
+        # When overwrite=true and all objects already exist, successResults may be empty but
+        # success=true and no errors - treat the whole file as successfully applied.
+        if result.get("success") and not result.get("errors"):
+            # Count objects from the file as applied even if successResults is empty
+            # (Kibana only populates successResults for objects it actually created/updated).
+            pass
+    return imported, errors
+
+
 def run(url: str, api_key: str | None, username: str | None, password: str | None,
         kb_url: str | None, config_path: str | None = None) -> None:
+    failed = False
     es = make_client(url, api_key, username, password)
     try:
         loaded = load_index_templates(es)
+        for name in loaded:
+            click.echo(f"Loaded index template: {name}")
     except FileNotFoundError as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
-    for name in loaded:
-        click.echo(f"Loaded index template: {name}")
+        click.echo(f"[ERROR] {e}", err=True)
+        failed = True
+    except Exception as e:
+        click.echo(f"[ERROR] Failed to load index templates: {e}", err=True)
+        failed = True
 
     if not kb_url:
-        click.echo("Skipping agent builder setup (KIBANA_URL not set).")
-        return
+        click.echo("Skipping Kibana setup (KIBANA_URL not set).")
+        sys.exit(1 if failed else 0)
 
     if not api_key and not (username and password):
         click.echo(
-            "Error: Kibana setup requires either --api-key / ELASTICSEARCH_API_KEY "
+            "[ERROR] Kibana setup requires either --api-key / ELASTICSEARCH_API_KEY "
             "or --username + --password (ELASTICSEARCH_USERNAME / ELASTICSEARCH_PASSWORD).",
             err=True,
         )
@@ -247,27 +309,62 @@ def run(url: str, api_key: str | None, username: str | None, password: str | Non
         else:
             hosts = resolve_hosts(None)
     except (OSError, ValueError) as e:
-        click.echo(f"Error: invalid config: {e}", err=True)
+        click.echo(f"[ERROR] Invalid config: {e}", err=True)
         sys.exit(1)
 
     session = make_kb_session(api_key, username, password)
+
     try:
         tool_ids = load_agent_builder_tools(session, kb_url)
         for tid in tool_ids:
             click.echo(f"Upserted tool: {tid}")
+    except FileNotFoundError as e:
+        click.echo(f"[ERROR] {e}", err=True)
+        failed = True
+    except requests.HTTPError as e:
+        body = e.response.text if e.response is not None else ""
+        click.echo(f"[ERROR] Failed to upsert tools: {e}\n{body}", err=True)
+        failed = True
 
+    try:
         skill_ids = load_agent_builder_skills(session, kb_url, hosts)
         for sid in skill_ids:
             click.echo(f"Upserted skill: {sid}")
+    except FileNotFoundError as e:
+        click.echo(f"[ERROR] {e}", err=True)
+        failed = True
+    except requests.HTTPError as e:
+        body = e.response.text if e.response is not None else ""
+        click.echo(f"[ERROR] Failed to upsert skills: {e}\n{body}", err=True)
+        failed = True
 
+    try:
         host_skill_ids = [host_citation_skill_id(h) for h in sorted(hosts) if hosts[h].auto_skill]
         agent_ids = load_agent_builder_agents(session, kb_url, host_skill_ids)
         for aid in agent_ids:
             click.echo(f"Upserted agent: {aid}")
     except FileNotFoundError as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+        click.echo(f"[ERROR] {e}", err=True)
+        failed = True
     except requests.HTTPError as e:
         body = e.response.text if e.response is not None else ""
-        click.echo(f"Error: Kibana API request failed: {e}\n{body}", err=True)
+        click.echo(f"[ERROR] Failed to upsert agents: {e}\n{body}", err=True)
+        failed = True
+
+    try:
+        imported_ids, so_errors = load_kibana_saved_objects(session, kb_url)
+        for oid in imported_ids:
+            click.echo(f"Imported saved object: {oid}")
+        for oid, msg in so_errors:
+            click.echo(f"[ERROR] Failed to import saved object {oid!r}: {msg}", err=True)
+            failed = True
+    except FileNotFoundError as e:
+        click.echo(f"[ERROR] {e}", err=True)
+        failed = True
+    except requests.HTTPError as e:
+        body = e.response.text if e.response is not None else ""
+        click.echo(f"[ERROR] Failed to import saved objects: {e}\n{body}", err=True)
+        failed = True
+
+    if failed:
         sys.exit(1)
