@@ -12,6 +12,7 @@
     "settings": {
       "index": {
         "codec": "best_compression",
+        "mode": "lookup",
         "sort": {
           "field": [
             "git.host",
