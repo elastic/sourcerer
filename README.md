@@ -26,24 +26,16 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
    ```sh
    cat > sourcerer.yml <<'EOF'
    sources:
-   # https://github.com/elastic/docs-content
-   - git: { host: github, org: elastic, repo: docs-content, ref_type: branch }
-     match: main
-     retain:
-       count: 1  # Keep only the latest commit from the main branch
+   # Example: Keep the latest commit from the main branch
+   - git: { host: "github", org: "elastic", repo: "docs-content", ref_type: "branch" }
+     match: "main"
+     retain.count: 1
 
-   # https://github.com/elastic/elasticsearch
-   - git: { host: github, org: elastic, repo: elasticsearch, ref_type: tag }
-     match:
-       - v{major}.{minor}.{patch}
-       - v{major}.{minor}.{patch}-{prerelease}
-     since:
-       ref: v8.17.0  # Index everything from this point on
-     retain:
-       version:
-         majors: 2   # Keep only the latest 2 major release tags
-         patches: 1  # Keep only the most recent patch release tag for any minor release tag
-       prerelease: superseded  # Keep release candidate tags until their major tags are released
+   # Example: Keep the latest patch release for the last two major releases
+   - git: { host: "github", org: "elastic", repo: "elasticsearch", ref_type: "tag" }
+     match: "v{major}.{minor}.{patch}"
+     since.ref: "v8.17.0"
+     retain.version: { majors: 2, patches: 1 }
    EOF
    ```
    The [`sourcerer.yml` specification](specs/sourcerer-yml.md) has the full reference of fields supported by the configuration file.
@@ -51,21 +43,15 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
 5. Index the repos: `sourcerer index --config sourcerer.yml`
 6. Chat about your software with the Sourcerer agent in Kibana under "Agents".
 
-To upgrade, reinstall from the desired release tag:
+## Upgrades
+
+To upgrade, reinstall from the desired release tag, replacing `v2.0.0` with the release you want:
 
 ```sh
 uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@v2.0.0"
 ```
 
-Replace `v2.0.0` with the release you want. To intentionally install the latest
-development version from `main` instead:
-
-```sh
-uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@main"
-```
-
-Git tag installations remain pinned to that release; `uv tool upgrade sourcerer`
-does not automatically discover a newer GitHub tag.
+Git tag installations remain pinned to that release. `uv tool upgrade sourcerer` does not automatically discover a newer GitHub tag.
 
 ## How it works
 
