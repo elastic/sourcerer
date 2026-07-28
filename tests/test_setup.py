@@ -72,7 +72,7 @@ class TestBuildHostCitationSkill:
         assert skill["name"] == "sourcerer-code-citations-github"
         # the four link templates appear in the content
         for kind in ("directory", "file", "line", "line_range"):
-            assert gh.links[kind] in skill["content"]
+            assert gh.urls[kind] in skill["content"]
         assert skill["tool_ids"] == []
 
     def test_one_skill_per_auto_skill_host_and_deterministic_id(self):
@@ -97,8 +97,8 @@ class TestBuildHostCitationSkill:
         hosts = resolve_hosts([{
             "id": "aws-codecommit-us-east-1",
             "name": "AWS CodeCommit (us-east-1)",
-            "clone": {"url": "https://git-codecommit.us-east-1.amazonaws.com/v1/repos/{git.repo}"},
-            "links": {
+            "urls": {
+                "clone": "https://git-codecommit.us-east-1.amazonaws.com/v1/repos/{git.repo}",
                 "directory": "https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/{git.repo}/browse/{git.commit}/--/{file.directory}",
                 "file": "https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/{git.repo}/browse/{git.commit}/--/{file.path}",
                 "line": "https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/{git.repo}/browse/{git.commit}/--/{file.path}?lines={line.number}",
@@ -113,8 +113,8 @@ class TestBuildHostCitationSkill:
         hosts = resolve_hosts([{
             "id": "my_gitea",
             "name": "My Gitea",
-            "clone": {"url": "https://g/{git.org}/{git.repo}.git"},
-            "links": {
+            "urls": {
+                "clone": "https://g/{git.org}/{git.repo}.git",
                 "directory": "https://g/{git.org}/{git.repo}/{file.directory}",
                 "file": "https://g/{git.org}/{git.repo}/{file.path}",
                 "line": "https://g/{git.org}/{git.repo}/{file.path}#L{line.number}",

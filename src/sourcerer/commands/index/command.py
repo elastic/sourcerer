@@ -187,13 +187,12 @@ def run(
     quiet: bool = False,
     cache_dir: str | None = None,
     ephemeral: bool = False,
-    host: str = "github",
 ) -> None:
-    parts = repo_spec.split("/", 1)
-    if len(parts) != 2 or not all(parts):
-        click.echo(f"Error: repo_spec must be '<org>/<repo>', got: {repo_spec!r}", err=True)
+    parts = repo_spec.split("/", 2)
+    if len(parts) != 3 or not all(parts):
+        click.echo(f"Error: repo_spec must be '<host>/<org>/<repo>', got: {repo_spec!r}", err=True)
         sys.exit(1)
-    org, repo = parts
+    host, org, repo = parts
 
     refs = {k: v for k, v in [("branch", branch), ("tag", tag), ("commit", commit)] if v}
     if len(refs) > 1:

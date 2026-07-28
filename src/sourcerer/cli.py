@@ -129,7 +129,7 @@ def setup(url, api_key, username, password, kb_url, config_path):
 def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, prune, dry_run, url, api_key, username, password):
     """Index a remote GitHub repo's git-tracked files into Elasticsearch.
 
-    Provide a REPO_SPEC ('<org>/<repo>') for a single repo, or --config to index multiple
+    Provide a REPO_SPEC ('<host>/<org>/<repo>') for a single repo, or --config to index multiple
     repos/branches/tags selected by glob patterns from a YAML file.
 
     Clones are cached under --cache-dir (default ~/.cache/sourcerer) and refreshed with
@@ -146,7 +146,7 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
         if dry_run:
             raise click.UsageError("--dry-run requires --config")
         if not repo_spec:
-            raise click.UsageError("provide a REPO_SPEC ('<org>/<repo>') or --config")
+            raise click.UsageError("provide a REPO_SPEC ('<host>/<org>/<repo>') or --config")
         index_cmd.run(repo_spec, branch, tag, commit, url, api_key, username, password, force, quiet, cache_dir, ephemeral)
 
 

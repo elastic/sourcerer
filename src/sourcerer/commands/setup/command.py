@@ -32,7 +32,7 @@ def host_citation_skill_id(host_id: str) -> str:
 
 
 def build_host_citation_skill(host: Host) -> dict:
-    """One in-memory citation skill for a single git host: its four link templates rendered as a
+    """One in-memory citation skill for a single git host: its URL templates rendered as a
     small, self-contained URL-templates reference. Generated at setup time from the resolved host
     registry (built-in defaults merged with the config's `hosts:` overrides) and pushed to
     Kibana; not written to disk, so it never goes stale against the registry."""
@@ -41,10 +41,10 @@ def build_host_citation_skill(host: Host) -> dict:
         f"URL templates for citing code hosted on {host.name} (`git.host = \"{host.id}\"`). Fill the "
         "tokens from the `sourcerer.code.*` / `sourcerer.files.*` tool output for the row you are "
         "citing.\n\n"
-        f"- Directory: `{host.links['directory']}`\n"
-        f"- File: `{host.links['file']}`\n"
-        f"- Single line: `{host.links['line']}`\n"
-        f"- Line range: `{host.links['line_range']}`\n\n"
+        f"- Directory: `{host.urls['directory']}`\n"
+        f"- File: `{host.urls['file']}`\n"
+        f"- Single line: `{host.urls['line']}`\n"
+        f"- Line range: `{host.urls['line_range']}`\n\n"
         "Use the single-line template for a one-line claim and the line-range template for a "
         "multi-line span (its anchor must carry both endpoints). Never invent a different URL "
         "scheme for this host."

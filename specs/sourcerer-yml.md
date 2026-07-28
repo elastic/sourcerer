@@ -9,14 +9,12 @@ sourcerer.yml is a configuration file that governs how the `sourcerer` CLI perfo
 |`hosts`                                |Array[Object]        |No      ||
 |`hosts[i].id`                          |String               |Yes     ||
 |`hosts[i].name`                        |String               |No      ||
-|`hosts[i].clone`                       |Object               |Yes     ||
-|`hosts[i].clone.protocol`              |String               |No      ||
-|`hosts[i].clone.url`                   |String               |Yes     ||
-|`hosts[i].links`                       |Object               |Yes     ||
-|`hosts[i].links.directory`             |String               |Yes     ||
-|`hosts[i].links.file`                  |String               |Yes     ||
-|`hosts[i].links.line`                  |String               |Yes     ||
-|`hosts[i].links.line_range`            |String               |Yes     ||
+|`hosts[i].urls`                        |Object               |Yes     ||
+|`hosts[i].urls.clone`                  |String               |Yes     ||
+|`hosts[i].urls.directory`              |String               |Yes     ||
+|`hosts[i].urls.file`                   |String               |Yes     ||
+|`hosts[i].urls.line`                   |String               |Yes     ||
+|`hosts[i].urls.line_range`             |String               |Yes     ||
 |`schedules`                            |Array                |No      |NOT IMPLEMENTED|
 |`schedules[i].git`                     |Object               |No      |NOT IMPLEMENTED|
 |`schedules[i].git.host`                |String, Array[String]|No      |NOT IMPLEMENTED|
@@ -96,24 +94,14 @@ Example: `GitHub`
 - Type: String
 - Default: Uses the value of `hosts[i].id`
 
-### `hosts[i].clone`
+### `hosts[i].urls`
 
-Defines how to perform `git clone` during indexing.
+Holds URLs templates for cloning and citations used by the citation skills in Agent Builder.
 
 - Required: Yes (unless overwriting the field of a hardcoded host)
 - Type: Object
 
-### `hosts[i].clone.protocol`
-
-Configures the use of `https` or `ssh` when running `git clone` during indexing.
-
-- Required: No
-- Type: String
-- Default: `https`
-- Validation:
-  - Must be either `https` or `ssh` (currently only `https` is implemented)
-
-### `hosts[i].clone.url`
+### `hosts[i].urls.clone`
 
 URL template for repositories when running `git clone` during indexing.
 
@@ -124,14 +112,7 @@ Example: `https://github.com/{git.org}/{git.repo}.git`
 - Required: Yes (unless overwriting the field of a hardcoded host)
 - Type: String
 
-### `hosts[i].links`
-
-Holds URLs templates for citation links used by the citation skills in Agent Builder.
-
-- Required: Yes (unless overwriting the field of a hardcoded host)
-- Type: Object
-
-### `hosts[i].links.directory`
+### `hosts[i].urls.directory`
 
 URL template for citing links to a directory in a repo. Used by the citation skills in Agent Builder.
 
@@ -142,7 +123,7 @@ Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.direct
 - Required: Yes (unless overwriting the field of a hardcoded host)
 - Type: String
 
-### `hosts[i].links.file`
+### `hosts[i].urls.file`
 
 URL template for citing links to a file in a repo. Used by the citation skills in Agent Builder.
 
@@ -153,7 +134,7 @@ Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}`
 - Required: Yes (unless overwriting the field of a hardcoded host)
 - Type: String
 
-### `hosts[i].links.line`
+### `hosts[i].urls.line`
 
 URL template for citing links to a line of code in a repo. Used by the citation skills in Agent Builder.
 
@@ -164,7 +145,7 @@ Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#
 - Required: Yes (unless overwriting the field of a hardcoded host)
 - Type: String
 
-### `hosts[i].links.line_range`
+### `hosts[i].urls.line_range`
 
 URL template for citing links to a range of lines of code in a repo. Used by the citation skills in Agent Builder.
 

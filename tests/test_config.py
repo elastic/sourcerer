@@ -110,8 +110,8 @@ class TestParseConfigStructure:
         cfg = parse_config({
             "hosts": [{
                 "id": "my_gitea",
-                "clone": {"url": "https://g/{git.org}/{git.repo}.git"},
-                "links": {
+                "urls": {
+                    "clone": "https://g/{git.org}/{git.repo}.git",
                     "directory": "https://g/{git.org}/{git.repo}/{file.directory}",
                     "file": "https://g/{git.org}/{git.repo}/{file.path}",
                     "line": "https://g/{git.org}/{git.repo}/{file.path}#L{line.number}",
@@ -318,8 +318,8 @@ class TestHostsMerge:
         cfg = parse_config({"hosts": [{"id": "github", "name": "GH Enterprise"}]})
         gh = cfg.hosts["github"]
         assert gh.name == "GH Enterprise"
-        # clone/links untouched -> still the github.com defaults
-        assert "github.com" in gh.clone_url_template
+        # urls untouched -> still the github.com defaults
+        assert "github.com" in gh.url_template("clone")
 
     def test_all_builtins_present(self):
         cfg = parse_config({})

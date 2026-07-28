@@ -45,9 +45,8 @@ class TestResolveHostsDefaults:
     def test_github_defaults(self):
         gh = resolve_hosts(None)["github"]
         assert gh.name == "GitHub"
-        assert gh.clone_protocol == "https"
-        assert gh.clone_url_template == "https://github.com/{git.org}/{git.repo}.git"
-        assert set(gh.links) == {"directory", "file", "line", "line_range"}
+        assert gh.url_template("clone") == "https://github.com/{git.org}/{git.repo}.git"
+        assert set(gh.urls) == {"clone", "directory", "file", "line", "line_range"}
 
     def test_auto_skill_false_for_placeholder_builtins(self):
         hosts = resolve_hosts(None)
@@ -57,7 +56,7 @@ class TestResolveHostsDefaults:
     def test_auto_skill_true_for_standard_builtins(self):
         hosts = resolve_hosts(None)
         for host_id in ("github", "gitlab", "bitbucket", "codeberg", "gitea",
-                        "forgejo", "launchpad", "sourcehut", "gcp-cloud-source"):
+                        "launchpad", "sourcehut", "gcp-cloud-source"):
             assert hosts[host_id].auto_skill is True, f"{host_id} should have auto_skill=True"
 
 
@@ -67,33 +66,32 @@ class TestResolveHostsMerge:
         gh = hosts["github"]
         assert gh.name == "GH Enterprise"
         # unspecified fields keep their defaults
-        assert gh.clone_url_template == KNOWN_HOSTS["github"]["clone"]["url"]
-        assert gh.links["file"] == KNOWN_HOSTS["github"]["links"]["file"]
+        assert gh.url_template("clone") == KNOWN_HOSTS["github"]["urls"]["clone"]
+        assert gh.urls["file"] == KNOWN_HOSTS["github"]["urls"]["file"]
 
     def test_override_clone_url_only(self):
-        hosts = resolve_hosts([{"id": "github", "clone": {"url": "https://ghe.corp/{git.org}/{git.repo}.git"}}])
+        hosts = resolve_hosts([{"id": "github", "urls": {"clone": "https://ghe.corp/{git.org}/{git.repo}.git"}}])
         gh = hosts["github"]
-        assert gh.clone_url_template == "https://ghe.corp/{git.org}/{git.repo}.git"
-        assert gh.clone_protocol == "https"  # default preserved
+        assert gh.url_template("clone") == "https://ghe.corp/{git.org}/{git.repo}.git"
 
     def test_custom_host_requires_clone_url(self):
-        with pytest.raises(ValueError, match="clone.url is required"):
-            resolve_hosts([{"id": "custom", "links": {
+        with pytest.raises(ValueError, match="urls.clone is required"):
+            resolve_hosts([{"id": "custom", "urls": {
                 "directory": "d", "file": "f", "line": "l", "line_range": "lr"}}])
 
-    def test_custom_host_requires_all_links(self):
-        with pytest.raises(ValueError, match="links.line_range is required"):
-            resolve_hosts([{"id": "custom", "clone": {"url": "u"},
-                            "links": {"directory": "d", "file": "f", "line": "l"}}])
+    def test_custom_host_requires_all_urls(self):
+        with pytest.raises(ValueError, match="urls.line_range is required"):
+            resolve_hosts([{"id": "custom",
+                            "urls": {"clone": "u", "directory": "d", "file": "f", "line": "l"}}])
 
     def test_custom_host_name_defaults_to_id(self):
-        hosts = resolve_hosts([{"id": "myhost", "clone": {"url": "u"}, "links": {
-            "directory": "d", "file": "f", "line": "l", "line_range": "lr"}}])
+        hosts = resolve_hosts([{"id": "myhost", "urls": {
+            "clone": "u", "directory": "d", "file": "f", "line": "l", "line_range": "lr"}}])
         assert hosts["myhost"].name == "myhost"
 
     def test_custom_host_auto_skill_defaults_to_true(self):
-        hosts = resolve_hosts([{"id": "myhost", "clone": {"url": "u"}, "links": {
-            "directory": "d", "file": "f", "line": "l", "line_range": "lr"}}])
+        hosts = resolve_hosts([{"id": "myhost", "urls": {
+            "clone": "u", "directory": "d", "file": "f", "line": "l", "line_range": "lr"}}])
         assert hosts["myhost"].auto_skill is True
 
     def test_overriding_placeholder_builtin_preserves_auto_skill_false(self):
@@ -103,22 +101,14 @@ class TestResolveHostsMerge:
                                 "clone": {"url": "https://git-codecommit.us-east-1.amazonaws.com/v1/repos/{git.repo}"}}])
         assert hosts["aws-codecommit"].auto_skill is False
 
-    def test_ssh_protocol_rejected(self):
-        with pytest.raises(ValueError, match="ssh"):
-            resolve_hosts([{"id": "github", "clone": {"protocol": "ssh"}}])
-
-    def test_bad_protocol_rejected(self):
-        with pytest.raises(ValueError, match="clone.protocol"):
-            resolve_hosts([{"id": "github", "clone": {"protocol": "ftp"}}])
-
     def test_missing_id_raises(self):
         with pytest.raises(ValueError, match="'id' is required"):
             resolve_hosts([{"name": "x"}])
 
     def test_bad_id_raises(self):
         with pytest.raises(ValueError, match="uppercase"):
-            resolve_hosts([{"id": "BadId", "clone": {"url": "u"}, "links": {
-                "directory": "d", "file": "f", "line": "l", "line_range": "lr"}}])
+            resolve_hosts([{"id": "BadId", "urls": {
+                "clone": "u", "directory": "d", "file": "f", "line": "l", "line_range": "lr"}}])
 
     def test_duplicate_id_raises(self):
         with pytest.raises(ValueError, match="duplicate host id"):
@@ -130,6 +120,6 @@ class TestUrlSubstitution:
         gh = resolve_hosts(None)["github"]
         assert gh.clone_url("elastic", "elasticsearch") == "https://github.com/elastic/elasticsearch.git"
 
-    def test_link_template(self):
+    def test_url_template(self):
         gh = resolve_hosts(None)["github"]
-        assert gh.link_template("file") == "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}"
+        assert gh.url_template("file") == "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}"

@@ -5,8 +5,7 @@ Two optional top-level sections:
     hosts:                         # override/extend the built-in git-host defaults
     - id: github
       name: GitHub
-      clone: { protocol: https, url: "https://github.com/{git.org}/{git.repo}.git" }
-      links: { directory: ..., file: ..., line: ..., line_range: ... }
+      url: { clone: ..., directory: ..., file: ..., line: ..., line_range: ... }
 
     sources:                       # what to index
     - git:
