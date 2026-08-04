@@ -112,9 +112,6 @@ hosts:
   urls.clone: "git@code.forgejo.org:{git.org}/{git.repo}.git"
 
 # GCP Cloud Source
-# Note: SSH identity is your GCP account name. Add it to ~/.ssh/config:
-#     Host source.developers.google.com
-#     User you@example.com
 - id: gcp-cloud-source
   urls.clone: "ssh://source.developers.google.com:2022/p/{git.org}/r/{git.repo}"
 
@@ -131,9 +128,6 @@ hosts:
   urls.clone: "git@gitlab.com:{git.org}/{git.repo}.git"
 
 # Launchpad
-# Note: SSH identity is your Launchpad account name. Add it to ~/.ssh/config:
-#     Host git.launchpad.net
-#     User <your-launchpad-username>
 - id: launchpad
   urls.clone: "git+ssh://git.launchpad.net/{git.repo}"
 
