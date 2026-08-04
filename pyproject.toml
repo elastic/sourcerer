@@ -34,6 +34,7 @@ testpaths = ["tests"]
 [tool.setuptools.package-data]
 sourcerer = [
     "elastic/index_templates/*.json",
+    "elastic/kibana_saved_objects/*.ndjson",
     "elastic/agent_builder_tools/*.yml",
     "elastic/agent_builder_tools/*.yaml",
     "elastic/agent_builder_agents/*.yml",
