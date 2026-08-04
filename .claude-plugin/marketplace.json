@@ -1,21 +1,16 @@
 {
   "$schema": "https://www.schemastore.org/claude-code-marketplace.json",
   "name": "elastic-sourcerer",
+  "description": "Official plugin marketplace for Sourcerer by Elastic",
   "owner": {
     "name": "Elastic"
   },
-  "metadata": {
-    "description": "Skills for Sourcerer by Elastic"
-  },
   "plugins": [
     {
-      "name": "elastic-sourcerer",
+      "name": "sourcerer",
       "version": "2.0.1",
-      "description": "Skills for Sourcerer by Elastic. Index and search code with citations.",
-      "source": {
-        "source": "url",
-        "url": "https://github.com/elastic/sourcerer"
-      },
+      "description": "Search indexed git repositories and generate responses with citations",
+      "source": "./",
       "skills": "./src/sourcerer/skills"
     }
   ]

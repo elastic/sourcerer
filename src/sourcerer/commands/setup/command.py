@@ -98,21 +98,31 @@ _load_yaml_dir = load_yaml_dir
 
 def load_skills(skills_dir: pathlib.Path = AGENT_BUILDER_SKILLS_DIR) -> list[dict]:
     """Load Agent Builder skill templates from `skills_dir`, injecting id, name, description,
-    and content from the corresponding SKILL.md in SKILLS_DIR. Returns fully-populated dicts."""
+    and content from the corresponding SKILL.md in SKILLS_DIR. Returns fully-populated dicts.
+
+    The AB YAML filename (e.g. ``sourcerer-code-search.yml``) is the Agent Builder id. The
+    canonical skill directory is unprefixed (``code-search/``); each YAML carries a
+    ``skill_dir:`` field pointing at it. The SKILL.md ``name:`` is also unprefixed; Agent
+    Builder gets the ``sourcerer-`` prefixed form via the YAML stem so its global namespace
+    stays unambiguous."""
     skill_files = sorted(skills_dir.glob("*.yml")) + sorted(skills_dir.glob("*.yaml"))
     if not skill_files:
         raise FileNotFoundError(f"No skill definitions found in {skills_dir}")
     skills = []
     for path in skill_files:
         template = yaml.safe_load(path.read_text()) or {}
-        skill_id = path.stem
-        fm, body = _read_skillmd(skill_id)
+        ab_id = path.stem  # e.g. sourcerer-code-search — the Agent Builder API id
+        skill_dir = template.pop("skill_dir", ab_id)  # e.g. code-search; pop so it's not pushed to AB
+        fm, body = _read_skillmd(skill_dir)
         skills.append({
             **template,
-            "id": fm.get("id", skill_id),
-            "name": fm.get("name", skill_id),
+            "id": ab_id,
+            "name": ab_id,
             "description": fm.get("description", ""),
             "content": body,
+            # skill_dir is the canonical unprefixed directory name (e.g. "code-search").
+            # Kept for non-AB consumers (export); stripped by _skill_put_body before API calls.
+            "skill_dir": skill_dir,
         })
     return skills
 
@@ -126,7 +136,7 @@ def _agent_put_body(agent: dict) -> dict:
 
 
 def _skill_put_body(skill: dict) -> dict:
-    return {k: v for k, v in skill.items() if k != "id"}
+    return {k: v for k, v in skill.items() if k not in ("id", "skill_dir")}
 
 
 def load_index_templates(es, templates_dir: pathlib.Path = ELASTICSEARCH_INDEX_TEMPLATES_DIR) -> list[str]:

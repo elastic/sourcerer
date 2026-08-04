@@ -1,10 +1,13 @@
 # Agent Builder skill template.
-# 
+#
 # The fields below marked "# auto-generated" are populated at runtime from
-# skills/sourcerer-code-citations/SKILL.md (see src/sourcerer/skills/).
+# skills/ref-resolution/SKILL.md (see src/sourcerer/skills/).
 # Only the Agent-Builder-specific fields below need to be authored here.
 
-# auto-generated from SKILL.md frontmatter:
+# The canonical skill directory (unprefixed); load_skills() uses this to find the SKILL.md.
+skill_dir: ref-resolution
+
+# auto-generated from SKILL.md frontmatter (prefixed for Agent Builder's global namespace):
 # id: sourcerer-ref-resolution
 # name: sourcerer-ref-resolution
 # description: ...

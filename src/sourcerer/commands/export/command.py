@@ -131,11 +131,16 @@ def _yaml_scalar(value: str) -> str:
 
 
 def translate_skill_to_skillmd(skill: dict, char_cap: int | None = None) -> str:
-    """One Agent Builder skill dict -> a Claude SKILL.md document (YAML frontmatter + Markdown
-    body). `char_cap`, when set, trims the frontmatter `description` to that many characters
+    """One skill dict -> a Claude SKILL.md document (YAML frontmatter + Markdown body).
+    `char_cap`, when set, trims the frontmatter `description` to that many characters
     (Desktop caps it at 200; Code's budget is generous enough to pass None). The body is the
-    skill's `content` verbatim, with tool ids rewritten to their MCP names."""
-    name = skill["name"]
+    skill's `content` verbatim, with tool ids rewritten to their MCP names.
+
+    The ``name:`` field is taken from ``skill["skill_dir"]``, the canonical unprefixed form
+    (e.g. ``code-search``). Skills are stored without the ``sourcerer-`` prefix so they work
+    correctly in any harness without translation. ``skill["name"]`` carries the Agent Builder
+    id (``sourcerer-code-search``) which is only meaningful to that one target."""
+    name = skill.get("skill_dir", skill["name"])
     description = " ".join(skill.get("description", "").split())
     if char_cap is not None and len(description) > char_cap:
         description = description[: char_cap - 1].rstrip() + "…"
@@ -193,11 +198,6 @@ def _merge_claude_md(path: pathlib.Path, section_body: str) -> None:
         merged = block + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(merged)
-
-
-def _skill_dir_name(skill: dict) -> str:
-    """Filesystem-safe skill folder name derived from the skill id (already kebab-case)."""
-    return skill["id"]
 
 
 def _resolve_endpoint(kb_url: str) -> str:
@@ -263,7 +263,7 @@ def run_claude_code(
 
     written_skills = []
     for skill in skills:
-        skill_dir = skills_root / _skill_dir_name(skill)
+        skill_dir = skills_root / skill["skill_dir"]
         skill_dir.mkdir(parents=True, exist_ok=True)
         # Claude Code shares a 1,536-char budget across description + when-to-use; these skills'
         # descriptions fit comfortably, so no per-target cap is applied.
@@ -373,7 +373,7 @@ def run_claude_desktop(
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for skill in skills:
             # Desktop's name cap is tighter than any of our skill ids, but trim defensively.
-            folder = _skill_dir_name(skill)[:DESKTOP_SKILL_NAME_CAP]
+            folder = skill["skill_dir"][:DESKTOP_SKILL_NAME_CAP]
             skillmd = translate_skill_to_skillmd(skill, char_cap=DESKTOP_SKILL_DESC_CAP)
             zf.writestr(f"{folder}/SKILL.md", skillmd)
 

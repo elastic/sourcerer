@@ -1,9 +1,7 @@
 ---
-name: "sourcerer-ref-resolution"
+name: "ref-resolution"
 description: "Use any time a branch, tag, or version in the user's question is ambiguous or unspecified - whether at the start of a question or mid-conversation (e.g. when comparing behavior across versions)."
 ---
-
-# sourcerer-ref-resolution
 
 ## When this applies
 Apply whenever a ref is ambiguous or unspecified. This includes:
@@ -28,7 +26,7 @@ ad-hoc commit not on a tracked branch/tag tip) to narrow further.
 1. Call `refs.list` with `git_ref_type: tag` for the repo.
 2. Exclude pre-release tags (suffixes like `-rc`, `-beta`, `-alpha`, `-SNAPSHOT`, `-M1`). A pre-release sorts *below* its final release (`v9.0.0 > v9.0.0-rc1`).
 3. Pick the highest semver tag, comparing numerically (major → minor → patch). Do not sort lexically, and do not assume `indexed_at DESC` order equals semver order (`v9.0.0 > v8.14.3 > v8.2.0`).
-4. Prefer the highest tag whose `status` is `ready` (the `status` field surfaced by `sourcerer-repo-discovery`). If the very latest tag is still indexing (status not `ready`), drop to the next-highest ready tag, or proceed but tell the user that release is only partially indexed.
+4. Prefer the highest tag whose `status` is `ready` (the `status` field surfaced by `repo-discovery`). If the very latest tag is still indexing (status not `ready`), drop to the next-highest ready tag, or proceed but tell the user that release is only partially indexed.
 5. If no stable tags exist, fall back to the default branch (`main`, `master`, `trunk`). If only pre-release tags exist, resolve to the highest pre-release and say so explicitly.
 6. State the resolved tag or branch at the start of your answer.
 

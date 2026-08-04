@@ -1,9 +1,7 @@
 ---
-name: "sourcerer-repo-discovery"
+name: "repo-discovery"
 description: "Use at the start of most questions to identify which repos are indexed before querying content. Also use mid-conversation when an answer may require expanding into a related or upstream repo (e.g. tracing from an application repo into a lower-level dependency)."
 ---
-
-# sourcerer-repo-discovery
 
 ## When this applies
 - **At the start of a question**: confirm which repos are indexed and plan where to look before issuing any content queries.
@@ -30,7 +28,7 @@ Avoid `git_repo: *` without an org filter unless you genuinely need all orgs - i
 ## Interpreting results
 From the result rows:
 - **Distinct `git.repo` values** - the repos available to query.
-- **`git.ref_type`** - whether each repo has branches, tags, or both. Useful for knowing whether `sourcerer-ref-resolution` will find tags or needs to fall back to a branch.
+- **`git.ref_type`** - whether each repo has branches, tags, or both. Useful for knowing whether `ref-resolution` will find tags or needs to fall back to a branch.
 - **`status`** - a ref with status other than `ready` may have incomplete content.
 
 ## Example: expanding scope mid-conversation
@@ -38,6 +36,6 @@ A question about Elasticsearch's query parsing leads into how Lucene's `QueryPar
 1. Initial discovery: `refs.list(git_org: elastic, git_repo: elasticsearch)` - confirm the repo and plan the search.
 2. Answer the Elasticsearch side. When the trail leads to Lucene, expand:
 3. `refs.list(git_org: apache, git_repo: lucene*)` - discover which Lucene repos are indexed.
-4. Use `sourcerer-ref-resolution` on the relevant Lucene repo to pin a commit, then query content.
+4. Use `ref-resolution` on the relevant Lucene repo to pin a commit, then query content.
 
 Each discovery call should be targeted - retrieve only what you need to plan the next step.

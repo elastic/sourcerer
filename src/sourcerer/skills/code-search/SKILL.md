@@ -1,9 +1,7 @@
 ---
-name: "sourcerer-code-search"
+name: "code-search"
 description: "Use when you need to find where something is defined, understand how a feature is implemented, or explore an unfamiliar repo. Guides which tools to use and in what order."
 ---
-
-# sourcerer-code-search
 
 ## Choosing the right tool
 
@@ -79,7 +77,7 @@ All content tools accept a `file_path` glob. Narrowing it cuts noise and speeds 
 A bare `*` matches a single path segment, so it lists only top-level files (no `/` in the path). Use `**` to recurse.
 
 ## Reading for citation
-When you read to cite a specific line or range, follow each tool's own citation guidance in its description, and see the `sourcerer-code-citations` skill for the full rules:
+When you read to cite a specific line or range, follow each tool's own citation guidance in its description, and see the `code-citations` skill for the full rules:
 - `code.grep` / `code.search` return one row per line, each with an authoritative `line.number` - cite single lines and never merge separate rows into a range.
 - `files.cat` / `files.head` / `files.tail` / `files.read_lines` prefix each returned line with its 1-indexed number by default (grep -n style, `<line>:<content>`) - read the number off the first and last lines to cite a range. Pass `show_line_numbers=false` when you want raw, unprefixed text.
 - Never derive a line position by counting lines inside returned content - read it from the per-line prefix.

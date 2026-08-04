@@ -1,9 +1,7 @@
 ---
-name: "sourcerer-code-citations"
+name: "code-citations"
 description: "Use whenever an answer names a code symbol, class, function, config key, endpoint, file, directory, or file extension - or makes any checkable claim about repository behavior (a default value, a version, a recall/latency figure, a behavioral guarantee). This is nearly every substantive answer this agent produces, so treat it as the default path, not an edge case reserved for explicit \"cite your sources\" requests."
 ---
-
-# sourcerer-code-citations
 
 ## When this applies
 Trigger this on any answer where you:
@@ -26,7 +24,7 @@ When sources conflict, the code wins - state the discrepancy rather than smoothi
 - Citing a class or file doesn't cover its members. If you go on to name specific fields, constants, methods, or defaults belonging to it, each needs its own first-mention citation.
 
 ## Finding sources
-- Use the `sourcerer-code-search` skill recursively to find sources if you don't have enough information to properly cite them
+- Use the `code-search` skill recursively to find sources if you don't have enough information to properly cite them
 
 ## How to format
 - Every citation is an inline Markdown link with the linked text in backticks, at the point of first mention - not a trailing "Source:" note. Example: `` [`AuthService`](url) ``.
