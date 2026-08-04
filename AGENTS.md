@@ -11,6 +11,8 @@ Commands:
 - `sourcerer index --config <file> [--prune] [--dry-run]`
 - `sourcerer prune [--config <file>] [--dry-run]` (config-driven retention prune is skipped
   without `--config`; the orphan sweep always runs)
+- `sourcerer export claude-code|claude-desktop [--config <file>] [--kb-url <url>] [-o <dir>]`
+  (package the agent's system prompt + skills for a local harness; see below)
 - `sourcerer help`
 
 The `--config` file is `sourcerer.yml` (see `specs/sourcerer-yml.md` and `sourcerer.example.yml`
@@ -208,6 +210,38 @@ even fetched) and immutable-tag dedup, repeated runs stay fast.
 - **Garbage collection**: after each fetch, a best-effort `git gc` expires reflogs and prunes
   objects that are no longer reachable - chiefly blobs faulted in for commits that fell out of a
   branch's retained window since the last run. A gc failure never fails the index run.
+
+## Export to a local agent harness (`sourcerer export`)
+
+`setup` pushes the system prompt, skills, and ES|QL tools into Kibana for Kibana's own Agent
+Builder chat UI. `export` gives a *second* consumer the same agent locally: it translates the
+static system prompt + skill content on disk into a target harness's format and points that
+harness's MCP client at Kibana's existing Agent Builder MCP endpoint
+(`{KIBANA_URL}/api/agent_builder/mcp`, streamable HTTP, `Authorization: ApiKey …`). `export`
+makes **no HTTP calls** — it is pure local file generation. Targets: `claude-code`,
+`claude-desktop`.
+
+- **Inputs** (same three `setup` reads): the agent's `configuration.instructions`, the base
+  skills, and the resolved host registry (`resolve_hosts(None)` or `load_config(path).hosts`).
+  Per-host citation skills are generated exactly as `setup` does (auto_skill hosts only).
+- **Tool-name translation**: the MCP endpoint renames every tool by replacing dots with
+  underscores (`sourcerer.code.grep` → `sourcerer_code_grep`, `platform.core.search` →
+  `platform_core_search`). `translate_instructions` rewrites every dotted tool id in the prompt
+  and skills to that form; field names like `git.host`/`git.repo` are left untouched. This
+  contract is verified against a live cluster's `tools/list` and pinned by `tests/test_export.py`.
+- **Auth**: the endpoint accepts an API key (or OAuth 2.1 on Serverless), **not** basic auth.
+  `export` references `ELASTICSEARCH_API_KEY` by name in the generated config and never writes a
+  literal secret; a username/password-only environment is rejected with a clear error.
+- **`claude-code`** writes into the working dir (default; `-o` overrides): `.claude/skills/*/
+  SKILL.md`, a merged `.mcp.json` (only the `sourcerer` server key is set/replaced; other servers
+  and top-level keys are preserved), and a delimited `<!-- sourcerer:export:start/end -->` block
+  in `CLAUDE.md`. All three are auto-discovered by Claude Code, so there is no install step, and
+  re-running is idempotent.
+- **`claude-desktop`** writes `sourcerer-skills.zip` (one skill folder each, name/description
+  trimmed to Desktop's 64/200-char caps), `sourcerer-claude-desktop-instructions.md`, and a
+  merge-ready `claude_desktop_config.json` using `npx mcp-remote` (Node ≥18). Uploading skills
+  and pasting the instructions into a Project are unavoidably manual on Desktop; the command's
+  output spells out each step and the per-OS config path.
 
 ## Index fields
 

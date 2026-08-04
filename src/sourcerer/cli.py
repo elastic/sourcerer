@@ -4,6 +4,7 @@ from dotenv import find_dotenv, load_dotenv
 
 # App packages
 from .commands.benchmark import command as benchmark_cmd
+from .commands.export import command as export_cmd
 from .commands.index import command as index_cmd
 from .commands.prune import command as prune_cmd
 from .commands.setup import command as setup_cmd
@@ -182,6 +183,66 @@ def prune(config_path, dry_run, quiet, url, api_key, username, password):
     markers whose content is entirely gone. Use --dry-run to preview both passes first.
     """
     prune_cmd.run(config_path, url, api_key, username, password, dry_run, quiet)
+
+
+def _export_options(f):
+    """Options shared by every `export` target. Unlike setup/index, export never calls
+    Elasticsearch or Kibana, so it needs no `--url`; --kb-url is the MCP endpoint the generated
+    config points at, and the credential options only tell export which env-var name the config
+    should reference (and let it reject basic-auth-only setups)."""
+    f = click.option(
+        "--kb-url",
+        envvar="KIBANA_URL",
+        default=None,
+        help="Kibana URL. The generated config points at {kb-url}/api/agent_builder/mcp. Required.",
+    )(f)
+    f = click.option(
+        "--config",
+        "config_path",
+        type=click.Path(exists=True, dir_okay=False),
+        default=None,
+        help="sourcerer.yml whose 'hosts:' section customizes/extends the built-in git-host "
+        "defaults used to generate per-host citation skills. Omit to use only built-in defaults.",
+    )(f)
+    f = click.option("--api-key", envvar="ELASTICSEARCH_API_KEY", default=None, help="Elasticsearch API key (referenced by name in generated config).")(f)
+    f = click.option("--username", envvar="ELASTICSEARCH_USERNAME", default=None, help="Elasticsearch username (basic auth is not supported by the MCP endpoint).")(f)
+    f = click.option("--password", envvar="ELASTICSEARCH_PASSWORD", default=None, help="Elasticsearch password (basic auth is not supported by the MCP endpoint).")(f)
+    f = click.option("-o", "--out", "dest", type=click.Path(file_okay=False), default=None, help="Directory to write assets into (default: current directory).")(f)
+    return f
+
+
+@cli.group()
+def export():
+    """Package sourcerer's agent (system prompt + skills + MCP config) for a local harness.
+
+    Translates the same system prompt and skills `setup` pushes to Kibana into a target harness's
+    format, and generates connection config pointing at Kibana's Agent Builder MCP endpoint. Makes
+    no HTTP calls - pure local file generation. Targets: claude-code, claude-desktop.
+    """
+
+
+@export.command(name="claude-code")
+@env_option
+@_export_options
+def export_claude_code(kb_url, config_path, api_key, username, password, dest):
+    """Write .claude/skills/*/SKILL.md, .mcp.json, and a CLAUDE.md block for Claude Code.
+
+    Claude Code auto-discovers all three by filesystem convention, so there is no install step.
+    Existing .mcp.json / CLAUDE.md are merged, not overwritten.
+    """
+    export_cmd.run_claude_code(kb_url, config_path, api_key, username, password, dest)
+
+
+@export.command(name="claude-desktop")
+@env_option
+@_export_options
+def export_claude_desktop(kb_url, config_path, api_key, username, password, dest):
+    """Write a skills ZIP, an instructions file, and a merge-ready claude_desktop_config.json.
+
+    Skill upload and pasting the instructions into a Project are unavoidably manual on Desktop;
+    the command's output spells out each step.
+    """
+    export_cmd.run_claude_desktop(kb_url, config_path, api_key, username, password, dest)
 
 
 @cli.group()

@@ -90,6 +90,20 @@ readonly PROJECT_VERSION
 [[ "$PROJECT_VERSION" == "$VERSION" ]] ||
   die "tag $TAG does not match pyproject.toml version $PROJECT_VERSION"
 
+MARKETPLACE_JSON="$ROOT_DIR/.claude-plugin/marketplace.json"
+[[ -f "$MARKETPLACE_JSON" ]] || die ".claude-plugin/marketplace.json not found"
+MARKETPLACE_VERSION="$(python3 -c "
+import json, sys
+data = json.load(open('$MARKETPLACE_JSON'))
+plugins = data.get('plugins', [])
+if not plugins:
+    sys.exit('no plugins in marketplace.json')
+print(plugins[0].get('version', ''))
+")"
+readonly MARKETPLACE_VERSION
+[[ "$MARKETPLACE_VERSION" == "$VERSION" ]] ||
+  die "tag $TAG does not match .claude-plugin/marketplace.json plugin version $MARKETPLACE_VERSION (update plugins[0].version to $VERSION)"
+
 LATEST_TAG="$(latest_release_tag)"
 readonly LATEST_TAG
 if [[ -n "$LATEST_TAG" ]] && ! version_gt "$TAG" "$LATEST_TAG"; then

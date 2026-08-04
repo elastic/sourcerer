@@ -21,43 +21,51 @@ AGENT_BUILDER_TOOLS_DIR = _ELASTIC / "agent_builder_tools"
 AGENT_BUILDER_AGENTS_DIR = _ELASTIC / "agent_builder_agents"
 AGENT_BUILDER_SKILLS_DIR = _ELASTIC / "agent_builder_skills"
 KIBANA_SAVED_OBJECTS_DIR = _ELASTIC / "kibana_saved_objects"
+SKILLS_DIR = resources.files("sourcerer") / "skills"
 
-# The id/name of the generated per-host citation skills. The base citations skill tells the
-# agent to load `sourcerer-code-citations-<git.host>` for a result's host-specific URL scheme.
-HOST_CITATION_SKILL_PREFIX = "sourcerer-code-citations-"
+def _parse_skillmd(text: str) -> tuple[dict, str]:
+    """Parse a SKILL.md into (frontmatter_dict, body). Returns ({}, text) if no frontmatter."""
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---\n", 3)
+    if end == -1:
+        return {}, text
+    frontmatter = yaml.safe_load(text[3:end]) or {}
+    body = text[end + 5:]
+    return frontmatter, body
 
 
-def host_citation_skill_id(host_id: str) -> str:
-    return f"{HOST_CITATION_SKILL_PREFIX}{host_id}"
+def _read_skillmd(skill_id: str) -> tuple[dict, str]:
+    """Read skills/<skill_id>/SKILL.md and return (frontmatter_dict, body)."""
+    path = SKILLS_DIR / skill_id / "SKILL.md"
+    return _parse_skillmd(path.read_text(encoding="utf-8"))
 
 
-def build_host_citation_skill(host: Host) -> dict:
-    """One in-memory citation skill for a single git host: its URL templates rendered as a
-    small, self-contained URL-templates reference. Generated at setup time from the resolved host
-    registry (built-in defaults merged with the config's `hosts:` overrides) and pushed to
-    Kibana; not written to disk, so it never goes stale against the registry."""
+def _read_skill_content(skill_id: str) -> str:
+    """Read and return the Markdown body of skills/<skill_id>/SKILL.md, frontmatter stripped."""
+    _, body = _read_skillmd(skill_id)
+    return body
+
+
+def build_host_citation_referenced_content(host: Host) -> dict:
+    """One referenced_content item for a single git host: its URL templates as a Markdown block.
+    Generated at setup time from the resolved host registry and attached to the
+    sourcerer-code-citations skill; not a standalone skill and not written to disk."""
     content = (
         f"# sourcerer-code-citations-{host.id}\n\n"
-        f"URL templates for citing code hosted on {host.name} (`git.host = \"{host.id}\"`). Fill the "
-        "tokens from the `sourcerer.code.*` / `sourcerer.files.*` tool output for the row you are "
-        "citing.\n\n"
+        f"URL templates for citing code hosted on {host.name} (`git.host = \"{host.id}\"`). "
+        "Fill the tokens from the `sourcerer.code.*` / `sourcerer.files.*` tool output.\n\n"
         f"- Directory: `{host.urls['directory']}`\n"
         f"- File: `{host.urls['file']}`\n"
         f"- Single line: `{host.urls['line']}`\n"
         f"- Line range: `{host.urls['line_range']}`\n\n"
         "Use the single-line template for a one-line claim and the line-range template for a "
-        "multi-line span (its anchor must carry both endpoints). Never invent a different URL "
-        "scheme for this host."
+        "multi-line span. Never invent a different URL scheme for this host."
     )
     return {
-        "id": host_citation_skill_id(host.id),
         "name": f"sourcerer-code-citations-{host.id}",
-        "description": (
-            f"Host-specific citation URL templates for {host.name} (`git.host = \"{host.id}\"`)"
-        ),
+        "relativePath": f"./sourcerer-code-citations-{host.id}",
         "content": content,
-        "tool_ids": [],
-        "referenced_content": [],
     }
 
 
@@ -78,9 +86,35 @@ def make_kb_session(
     return session
 
 
-def _load_yaml_dir(directory: pathlib.Path) -> list[dict]:
+def load_yaml_dir(directory: pathlib.Path) -> list[dict]:
     files = sorted(directory.glob("*.yml")) + sorted(directory.glob("*.yaml"))
     return [yaml.safe_load(f.read_text()) for f in files]
+
+
+# Backwards-compatible alias: this loader used to be setup-private (`_load_yaml_dir`). The
+# `export` command reuses it, so it now has a public name; keep the old one referenced below.
+_load_yaml_dir = load_yaml_dir
+
+
+def load_skills(skills_dir: pathlib.Path = AGENT_BUILDER_SKILLS_DIR) -> list[dict]:
+    """Load Agent Builder skill templates from `skills_dir`, injecting id, name, description,
+    and content from the corresponding SKILL.md in SKILLS_DIR. Returns fully-populated dicts."""
+    skill_files = sorted(skills_dir.glob("*.yml")) + sorted(skills_dir.glob("*.yaml"))
+    if not skill_files:
+        raise FileNotFoundError(f"No skill definitions found in {skills_dir}")
+    skills = []
+    for path in skill_files:
+        template = yaml.safe_load(path.read_text()) or {}
+        skill_id = path.stem
+        fm, body = _read_skillmd(skill_id)
+        skills.append({
+            **template,
+            "id": fm.get("id", skill_id),
+            "name": fm.get("name", skill_id),
+            "description": fm.get("description", ""),
+            "content": body,
+        })
+    return skills
 
 
 def _tool_put_body(tool: dict) -> dict:
@@ -147,26 +181,18 @@ def load_agent_builder_tools(
 
 
 def load_agent_builder_agents(
-    session: requests.Session, kb_url: str, host_skill_ids: list[str] | None = None,
+    session: requests.Session, kb_url: str,
     agents_dir: pathlib.Path = AGENT_BUILDER_AGENTS_DIR,
 ) -> list[str]:
-    """Upsert each agent, patching its `skill_ids` to also reference the generated per-host
-    citation skills (their ids are dynamic, so they can't be listed statically in the YAML).
-    Existing skill ids are preserved; host skill ids are appended without duplicates."""
+    """Upsert each agent. The agent's skill_ids are defined statically in the YAML and upserted
+    as-is; per-host citation data is now embedded as referenced_content on the citations skill
+    rather than as separate skills, so no dynamic patching is needed."""
     agents = _load_yaml_dir(agents_dir)
     if not agents:
         raise FileNotFoundError(f"No agent definitions found in {agents_dir}")
     base = kb_url.rstrip("/")
-    extra = list(host_skill_ids or [])
     loaded = []
     for agent in agents:
-        if extra:
-            cfg = agent.setdefault("configuration", {})
-            existing = list(cfg.get("skill_ids", []))
-            for sid in extra:
-                if sid not in existing:
-                    existing.append(sid)
-            cfg["skill_ids"] = existing
         agent_id = agent["id"]
         item_url = f"{base}/api/agent_builder/agents/{agent_id}"
         get_resp = session.get(item_url)
@@ -196,24 +222,21 @@ def load_agent_builder_skills(
     session: requests.Session, kb_url: str, hosts: dict[str, Host],
     skills_dir: pathlib.Path = AGENT_BUILDER_SKILLS_DIR,
 ) -> list[str]:
-    """Upsert the on-disk base skills plus one generated citation skill per resolved git host
-    whose auto_skill flag is True. Hosts with auto_skill=False are built-in placeholders that
-    require a user-supplied hosts: override before their URLs are usable; their citation skills
-    are not pushed until the user defines a concrete per-deployment hosts entry.
-    Returns every upserted skill id (the host skill ids are needed to patch the agent)."""
-    skills = _load_yaml_dir(skills_dir)
-    if not skills:
-        raise FileNotFoundError(f"No skill definitions found in {skills_dir}")
+    """Upsert the on-disk base skills. For the sourcerer-code-citations skill, attach
+    per-host URL templates as referenced_content items (one per auto_skill=True host) so
+    the agent can look up the right URL scheme from the skill's embedded reference data.
+    Returns the upserted skill ids."""
+    skills = load_skills(skills_dir)
+    rc_items = [
+        build_host_citation_referenced_content(hosts[h])
+        for h in sorted(hosts) if hosts[h].auto_skill
+    ]
     base = kb_url.rstrip("/")
     loaded = []
     for skill in skills:
+        if skill["id"] == "sourcerer-code-citations":
+            skill["referenced_content"] = rc_items
         loaded.append(_upsert_skill(session, base, skill))
-    # Generated per-host citation skills (in-memory, not on disk). Only for hosts with
-    # auto_skill=True. Deterministic order by host id so setup output and the agent's skill
-    # list are stable.
-    for host_id in sorted(hosts):
-        if hosts[host_id].auto_skill:
-            loaded.append(_upsert_skill(session, base, build_host_citation_skill(hosts[host_id])))
     return loaded
 
 
@@ -339,8 +362,7 @@ def run(url: str, api_key: str | None, username: str | None, password: str | Non
         failed = True
 
     try:
-        host_skill_ids = [host_citation_skill_id(h) for h in sorted(hosts) if hosts[h].auto_skill]
-        agent_ids = load_agent_builder_agents(session, kb_url, host_skill_ids)
+        agent_ids = load_agent_builder_agents(session, kb_url)
         for aid in agent_ids:
             click.echo(f"Upserted agent: {aid}")
     except FileNotFoundError as e:

@@ -1,0 +1,83 @@
+---
+name: "sourcerer-code-citations"
+description: "Use whenever an answer names a code symbol, class, function, config key, endpoint, file, directory, or file extension - or makes any checkable claim about repository behavior (a default value, a version, a recall/latency figure, a behavioral guarantee). This is nearly every substantive answer this agent produces, so treat it as the default path, not an edge case reserved for explicit \"cite your sources\" requests."
+---
+
+# sourcerer-code-citations
+
+## When this applies
+Trigger this on any answer where you:
+- name a class, function, method, variable, constant, config key, endpoint, file path, directory, or file extension, or
+- state a default, version, guarantee, or other checkable fact about repository behavior.
+
+In practice that's almost every response from this agent - assume it applies unless you're doing pure chit-chat with no claims about the codebase.
+
+## Source hierarchy
+Prefer sources in this order when a claim could be supported by more than one:
+1. **Source code** - the primary source of truth for behavior. Any claim about actual behavior ultimately resolves here.
+2. **Repository documentation** - secondary. Good for intent, rationale, and cross-cutting architecture that no single line of code expresses, but subordinate to code on behavior questions, and it can lag the code.
+3. **Your own general knowledge** - weakest, and not citable. Use only to frame or explain; never as the basis for a factual claim about this specific software.
+
+When sources conflict, the code wins - state the discrepancy rather than smoothing it over.
+
+## What to cite
+- Cite the first mention of each notable symbol, file, or directory: classes, functions, methods, variables, constants, config keys, endpoints, file paths, directories, file extensions. No need to repeat the citation on later mentions of the same one.
+- Cite claims, not only symbols. Any concrete, checkable assertion - a default value, a recall/latency figure, a version or license-availability statement, a behavioral guarantee - needs a citation to the line(s) that establish it, even with no backticked identifier in the sentence.
+- Citing a class or file doesn't cover its members. If you go on to name specific fields, constants, methods, or defaults belonging to it, each needs its own first-mention citation.
+
+## Finding sources
+- Use the `sourcerer-code-search` skill recursively to find sources if you don't have enough information to properly cite them
+
+## How to format
+- Every citation is an inline Markdown link with the linked text in backticks, at the point of first mention - not a trailing "Source:" note. Example: `` [`AuthService`](url) ``.
+- If you put a term in backticks - including inside tables, bullet lists, or parameter/default-value listings - it needs a citation, unless it's a generic language keyword, built-in type, or standard-library term not defined in the source under discussion.
+- The URL anchor must encode the full span you're citing: a single line is `#L{n}`, a multi-line span is `#L{start}-L{end}` (note the hyphen and the second line number). If your sentence or link text refers to more than one line, the href MUST be the range form - a bare `#L{start}` for a multi-line claim is wrong. See "Choosing the citation extent" for picking the span.
+
+## Where to point
+- Prefer the most precise URL you can construct: a specific line or line range where a symbol is declared or a claim is established, rather than the containing file.
+- Cite where a symbol is *defined*, not merely referenced, imported, or instantiated - unless your point is specifically about that usage site.
+- If a symbol's definition lives outside the indexed repos (e.g. a third-party dependency), cite the nearest resolvable reference (its import or declaration) and note that the definition is external.
+- Line and range citations are only as reliable as the tool output they came from. Follow each sourcerer tool's own description for how to turn its output into an accurate citation:
+  - `code.grep` / `code.search` return one row per line, each with an authoritative `line.number` - cite single lines and don't merge separate rows into a range.
+  - The content tools (`files.cat` / `files.head` / `files.tail` / `files.read_lines`) prefix every returned line with its authoritative 1-indexed line number (grep -n style, `<line>:<content>`) unless called with `show_line_numbers=false` - read the number directly off the line you're citing, and off the first and last lines of a block to cite a range.
+  - Never derive a line position by counting lines inside returned file content - read it from the per-line prefix (or a per-row `line.number`) (see Integrity below).
+
+## Choosing the citation extent
+Match the cited span to the scope of the claim - no broader, no narrower. A range and a single line are each precise when they fit the claim; the failure mode is a mismatch, not a wrong choice of shape.
+- **Defining a symbol** (function, class, method) → cite from the first line of its leading doc/comment block (and any decorators or annotations) through its closing line, so the citation captures both intent and implementation.
+- **A specific value, default, config key, or single statement** → cite the one line that establishes it. Don't widen to the enclosing function - a reader verifying "the default is 3" should land on that line, not hunt through a block.
+- **A behavioral claim about a block** (a loop, a guard clause, a sequence of steps) → cite exactly the lines of that block.
+- **A large definition** → for "where it's defined," cite the signature (plus any docstring); for a claim about one part of the body, cite that tighter sub-range. Never cite a whole multi-page body to support a narrow point.
+- **Verify both endpoints.** A range asserts its start *and* its end, and the closing line is far easier to guess wrong than the declaration. Read both boundaries from tool output - the numbered content tools, or `code.grep` for a closing pattern - never estimate them. A range is legitimate only when you've read the contiguous block and confirmed its endpoints; stitching a range out of separate `code.grep`/`code.search` match rows is not (see the anti-pattern under Examples).
+- **Put the chosen extent in the URL.** The link's anchor must match the span you're citing - a range uses the `#L{start}-L{end}` fragment, a single line uses `#L{line}`. Never state or link a range in the visible text (e.g. `lines 939-977`) while pointing the href at only its first line: a bare `#L{start}` silently narrows the citation to one line and contradicts what you wrote.
+
+## URL templates (host-specific)
+- The URL scheme for a citation depends on the git host the code lives on. Every `sourcerer.code.*` and `sourcerer.files.*` tool returns a `git.host` field on each row alongside `git.org`, `git.repo`, and `git.commit`.
+- Read `git.host` from the tool output, then look up the matching host section in this skill's referenced content (named `sourcerer-code-citations-<git.host>`, for example `sourcerer-code-citations-github` for `git.host = "github"`). That section holds the exact directory / file / single-line / line-range URL templates for that host.
+- Fill the template's tokens (`{git.org}`, `{git.repo}`, `{git.commit}`, `{file.path}`, `{file.directory}`, `{line.number}`, `{line.number_start}`, `{line.number_end}`) from the tool output. `git.org` already includes any provider-specific extra segment (e.g. a project or region) as an `org+extra` value, so substitute it verbatim.
+- If you have not yet loaded the referenced content for a result's `git.host`, load it before formatting that citation. Do not guess a host's URL scheme.
+
+## Integrity
+- Cite only locations you've verified with a tool call and can construct from the host-specific URL template for that result's `git.host` (see "URL templates" above). Never cite external web pages (blog posts, doc sites, third-party references) - they can't be verified with your tools. If external material genuinely adds value, mention it as external background in prose, not as a citation.
+- If you can't confirm where something is defined, say so rather than guessing. Reading a line number off a tool's per-line prefix or per-row `line.number` is verification; counting or estimating a position from unnumbered text is not.
+- Before finalizing, re-scan every citation: any whose claim or link text covers more than one line must have a `#L{start}-L{end}` href (it contains `-L`). A multi-line claim pointing at a bare `#L{start}` is the single most common citation error here - fix it before answering.
+
+## Examples
+
+**Correct (range for a definition - the common case):**
+Scores are combined by conflation of probability distributions ([`calculateCompositeScore`](https://github.com/acme/search-svc/blob/v2.4.1/src/resolution/Job.java#L622-L650)) - the claim is about the whole method, so the href carries the full range `#L622-L650`, not just `#L622`. Both endpoints were read off numbered tool output, not stitched together from separate `code.grep` match rows.
+
+**Correct (single line for a specific value):**
+The retry limit defaults to 3 ([`MAX_RETRIES`](https://github.com/acme/search-svc/blob/v2.4.1/src/config.py#L42)) - a one-line fact, so a single-line `#L42` anchor is exactly right.
+
+**Incorrect (missing citation on a checkable claim):**
+The retry limit defaults to 3.
+
+**Incorrect (merging separate per-line rows into a range):**
+Citing lines 10-14 as one block when the tool returned five independent single-line rows for 10, 11, 12, 13, 14.
+
+**Incorrect (range in the text, single line in the URL):**
+Link text of `lines 939-977` whose href is `…/Job.java#L939` - the anchor drops the end of the range and highlights only line 939. It must be `…/Job.java#L939-L977`.
+
+**Correct (documentation-only claim, no code citation manufactured):**
+The project favors per-ref index isolation for operational simplicity, per the architecture notes in [`docs/design.md`](https://github.com/acme/search-svc/blob/v2.4.1/docs/design.md) - this is a design-intent claim, not a line-level behavior, so the doc stands alone as the citation.

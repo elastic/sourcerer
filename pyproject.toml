@@ -42,4 +42,5 @@ sourcerer = [
     "elastic/agent_builder_skills/*.yml",
     "elastic/agent_builder_skills/*.yaml",
     "benchmarks/*/repos.yml",
+    "skills/*/SKILL.md",
 ]

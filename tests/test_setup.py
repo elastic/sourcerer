@@ -4,8 +4,7 @@ from unittest.mock import MagicMock, call
 from elasticsearch import NotFoundError
 
 from sourcerer.commands.setup.command import (
-    build_host_citation_skill,
-    host_citation_skill_id,
+    build_host_citation_referenced_content,
     load_index_templates,
 )
 from sourcerer.hosts import resolve_hosts
@@ -64,27 +63,28 @@ class TestLoadIndexTemplates:
         ]
 
 
-class TestBuildHostCitationSkill:
-    def test_id_and_name_and_templates(self):
+class TestBuildHostCitationReferencedContent:
+    def test_required_fields_and_url_templates(self):
         gh = resolve_hosts(None)["github"]
-        skill = build_host_citation_skill(gh)
-        assert skill["id"] == "sourcerer-code-citations-github"
-        assert skill["name"] == "sourcerer-code-citations-github"
+        item = build_host_citation_referenced_content(gh)
+        assert item["name"] == "sourcerer-code-citations-github"
+        assert item["relativePath"] == "./sourcerer-code-citations-github"
         # the four link templates appear in the content
         for kind in ("directory", "file", "line", "line_range"):
-            assert gh.urls[kind] in skill["content"]
-        assert skill["tool_ids"] == []
+            assert gh.urls[kind] in item["content"]
 
-    def test_one_skill_per_auto_skill_host_and_deterministic_id(self):
+    def test_one_item_per_auto_skill_host_and_deterministic_names(self):
         hosts = resolve_hosts(None)
-        skills = [build_host_citation_skill(hosts[h]) for h in sorted(hosts) if hosts[h].auto_skill]
-        ids = [s["id"] for s in skills]
-        assert len(ids) == len(set(ids))  # unique
-        assert host_citation_skill_id("gitlab") == "sourcerer-code-citations-gitlab"
-        assert "sourcerer-code-citations-gitlab" in ids
-        # placeholder hosts are excluded
+        items = [
+            build_host_citation_referenced_content(hosts[h])
+            for h in sorted(hosts) if hosts[h].auto_skill
+        ]
+        names = [i["name"] for i in items]
+        assert len(names) == len(set(names))  # unique
+        assert "sourcerer-code-citations-gitlab" in names
+        # placeholder hosts are excluded from auto_skill
         for excluded in ("aws-codecommit", "azure-devops", "gcp-ssm"):
-            assert host_citation_skill_id(excluded) not in ids
+            assert f"sourcerer-code-citations-{excluded}" not in names
 
     def test_placeholder_hosts_excluded_no_auto_skill(self):
         hosts = resolve_hosts(None)
@@ -92,8 +92,6 @@ class TestBuildHostCitationSkill:
             assert not hosts[host_id].auto_skill
 
     def test_per_deployment_custom_host_gets_auto_skill(self):
-        # A user-defined per-deployment entry (e.g. aws-codecommit-us-east-1) has auto_skill=True
-        # and therefore gets a citation skill generated for it.
         hosts = resolve_hosts([{
             "id": "aws-codecommit-us-east-1",
             "name": "AWS CodeCommit (us-east-1)",
@@ -106,8 +104,9 @@ class TestBuildHostCitationSkill:
             },
         }])
         assert hosts["aws-codecommit-us-east-1"].auto_skill is True
-        skill = build_host_citation_skill(hosts["aws-codecommit-us-east-1"])
-        assert skill["id"] == "sourcerer-code-citations-aws-codecommit-us-east-1"
+        item = build_host_citation_referenced_content(hosts["aws-codecommit-us-east-1"])
+        assert item["name"] == "sourcerer-code-citations-aws-codecommit-us-east-1"
+        assert item["relativePath"] == "./sourcerer-code-citations-aws-codecommit-us-east-1"
 
     def test_custom_host_uses_its_id(self):
         hosts = resolve_hosts([{
@@ -121,6 +120,6 @@ class TestBuildHostCitationSkill:
                 "line_range": "https://g/{git.org}/{git.repo}/{file.path}#L{line.number_start}",
             },
         }])
-        skill = build_host_citation_skill(hosts["my_gitea"])
-        assert skill["id"] == "sourcerer-code-citations-my_gitea"
-        assert skill["name"] == "sourcerer-code-citations-my_gitea"
+        item = build_host_citation_referenced_content(hosts["my_gitea"])
+        assert item["name"] == "sourcerer-code-citations-my_gitea"
+        assert item["relativePath"] == "./sourcerer-code-citations-my_gitea"
