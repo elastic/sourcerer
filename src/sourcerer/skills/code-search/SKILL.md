@@ -3,6 +3,10 @@ name: "code-search"
 description: "Use when you need to find where something is defined, understand how a feature is implemented, or explore an unfamiliar repo. Guides which tools to use and in what order."
 ---
 
+## Repo discovery and ref resolution
+
+If you don't know which repo or ref (branch, tag, or version) to search, use your `repo-discovery` or `ref-resolution` skills first.
+
 ## Choosing the right tool
 
 ### `code.search` - BM25 keyword/concept search
