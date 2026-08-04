@@ -11,7 +11,32 @@
       "version": "2.0.1",
       "description": "Search indexed git repositories and generate responses with citations",
       "source": "./",
-      "skills": "./src/sourcerer/skills"
+      "strict": false,
+      "skills": "./src/sourcerer/skills",
+      "userConfig": {
+        "kibana_url": {
+          "type": "string",
+          "title": "Kibana URL",
+          "description": "Kibana URL (no trailing slash), e.g. https://sourcerer-abcd123.kb.us-east4.gcp.elastic.cloud",
+          "required": true
+        },
+        "api_key": {
+          "type": "string",
+          "title": "Elasticsearch API Key",
+          "description": "Base64-encoded Elasticsearch API key with Agent Builder permissions (get a key at Kibana > Stack Management > API Keys)",
+          "sensitive": true,
+          "required": true
+        }
+      },
+      "mcpServers": {
+        "sourcerer": {
+          "type": "streamable-http",
+          "url": "${user_config.kibana_url}/api/agent_builder/mcp",
+          "headers": {
+            "Authorization": "ApiKey ${user_config.api_key}"
+          }
+        }
+      }
     }
   ]
 }
