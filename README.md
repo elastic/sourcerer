@@ -15,14 +15,19 @@ understand it from first principles.
 
 ### Why Sourcerer
 
-Sourcerer indexes snapshots of git repos so that AI agents can search the code,
-generate authoritative answers, and provide inline citations for verification.
-It ships with configurations for [Elastic Agent Builder](https://www.elastic.co/docs/explore-analyze/ai-features/elastic-agent-builder), which searches your code
-in Elasticsearch the way a coding agent would search it on a filesystem.
-Its value shines for questions that span multiple repos or versions: Sourcerer
-will find the right snapshot and **grep a billion lines of code in <3 seconds.**
+**Get trusted answers from the source.** Sourcerer indexes snapshots of git repos
+so that AI agents can search the code, generate authoritative answers, and provide
+inline citations for verification. It ships with configurations for [Elastic Agent Builder](https://www.elastic.co/docs/explore-analyze/ai-features/elastic-agent-builder),
+which searches your code in Elasticsearch the way a coding agent would search it
+on a filesystem. Its value shines for questions that span multiple repos or
+versions: Sourcerer will find the right snapshot and grep a billion lines of
+code in seconds.
 
-**Code is the primary source of truth for its own behavior.** Always authoriative,
+**Search like a coding agent at scale.** Sourcerer is statistically tied with frontier coding agents for code retrieval based on its results from [SWE-Explore-Bench](https://github.com/Qiushao-E/SWE-Explore-Bench) (see chart below). You can expect Sourcerer to search your code as well as any coding agent, while scaling across many historical repository snapshots as if it was a single repo.
+
+![Sourcerer: SWE-Explore-Bench Results](https://storage.googleapis.com/sourcerer-public/sourcerer-swe-explore-bench-results.png)
+
+**Code is the source of truth for its own behavior.** Always authoriative,
 never outdated. While documentation and tribal knowledge offers context, they
 can never be the primary source of truth for its implementation.
 
@@ -32,17 +37,13 @@ Sourcerer searches code with the same semantics (e.g. grep, ls, cat, head, tail)
 over multiple code repositories indexed in Elasticsearch for greater speed,
 scale, relevance, security, collaboration, and customization.
 
-**Search like a coding agent at scale.** Sourcerer is statistically tied with frontier coding agents for code retrieval based on its results from [SWE-Explore-Bench](https://github.com/Qiushao-E/SWE-Explore-Bench) (see chart below). You can expect Sourcerer to search your code as well as any coding agent, while scaling across many historical repository snapshots as if it was a single repo.
-
-![Sourcerer: SWE-Explore-Bench Results](https://storage.googleapis.com/sourcerer-public/sourcerer-swe-explore-bench-results.png)
-
 ## Quickstart
 
 Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.com/downloads/) on your machine, and [Elasticsearch and Kibana](https://www.elastic.co/cloud/serverless) running somewhere.
 
 1. Install the `sourcerer` CLI:
    ```sh
-   uv tool install "git+https://github.com/elastic/sourcerer.git@v2.0.0"
+   uv tool install "git+https://github.com/elastic/sourcerer.git@v2.0.1"
    ```
 2. Add connection details. Create a `.env` in your working directory, then fill it in:
    ```sh
@@ -219,10 +220,10 @@ Use these values for `urls.clone` if you prefer to use SSH for clones:
 
 ## Upgrades
 
-To upgrade, reinstall from the desired release tag, replacing `v2.0.0` with the release you want:
+To upgrade, reinstall from the desired release tag, replacing `v2.0.1` with the release you want:
 
 ```sh
-uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@v2.0.0"
+uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@v2.0.1"
 ```
 
 Git tag installations remain pinned to that release. `uv tool upgrade sourcerer` does not automatically discover a newer GitHub tag.
@@ -316,7 +317,7 @@ a normal pull request:
 From an up-to-date `main` with no tracked changes, publish the corresponding tag:
 
 ```sh
-./scripts/release.sh v2.0.0
+./scripts/release.sh v2.0.1
 ```
 
 The script requires a strict `vMAJOR.MINOR.PATCH` tag, verifies that it matches
