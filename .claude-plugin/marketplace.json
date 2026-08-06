@@ -29,7 +29,7 @@
         }
       },
       "mcpServers": {
-        "sourcerer-claude-code": {
+        "sourcerer": {
           "type": "http",
           "url": "${user_config.kibana_url}/api/agent_builder/mcp",
           "headers": {

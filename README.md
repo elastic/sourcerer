@@ -6,10 +6,11 @@ understand it from first principles.
 ---
 
 1. [Quickstart](#quickstart)
-3. [Configuration](#configuration)
-3. [Upgrades](#upgrades)
-4. [Benchmarks](#benchmarks)
-5. [Development](#development)
+2. [Configuration](#configuration)
+3. [Integrations](#integrations)
+4. [Upgrades](#upgrades)
+5. [Benchmarks](#benchmarks)
+6. [Development](#development)
 
 ---
 
@@ -211,6 +212,105 @@ Use these values for `urls.clone` if you prefer to use SSH for clones:
 |Forgejo|[ssh](https://docs.codeberg.org/security/ssh-key/), [https](https://docs.codeberg.org/advanced/access-token/)|
 |Launchpad|[ssh](https://documentation.ubuntu.com/launchpad/user/how-to/import-ssh-keys/), [https](https://documentation.ubuntu.com/launchpad/user/explanation/working-with-code/git-hosting/)|
 |SourceHut|[ssh](https://man.sr.ht/tutorials/set-up-account-and-git.md)|
+
+## Integrations
+
+After running `sourcerer setup`, you can use Sourcerer's skills and tools from [Claude Desktop](https://claude.com/download) or [Claude Code](https://claude.com/product/claude-code). Both connect to the same Agent Builder MCP endpoint at `{KIBANA_URL}/api/agent_builder/mcp`.
+
+### Claude Desktop
+
+#### Install the plugin
+
+1. Open Claude Desktop
+2. Go to Customize > Plugins
+3. Select Add > Add marketplace
+4. Click "Add from a repository"
+5. Type `elastic/sourcerer` and press "enter"
+6. Leave "Sync automatically" enabled
+7. Click "Sync"
+
+#### Configure the connector
+
+1. Open `claude_desktop_config.json` under Customize > Developer > Edit Config, or you can open the file directly:
+    * macOS: `~/Library/Application\ Support/Claude/claude_desktop_config.json`
+    * Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+    * Linux: `~/.config/Claude/claude_desktop_config.json`
+
+2. Copy the contents of `"sourcerer"` below and paste it under the `"mcpServers"` section of `claude_desktop_config.json`:
+    ```json
+    {
+      "mcpServers": {
+        "sourcerer": {
+          "command": "sourcerer",
+          "args": [ "mcp-proxy" ],
+          "env": {
+            "KIBANA_URL": "<your-kibana-url>",
+            "ELASTICSEARCH_API_KEY": "<your-api-key>"
+          }
+        }
+      }
+    }
+    ```
+    You can use an `.env` file instead of hard-coding `"env"`:
+    ```json
+    {
+      "mcpServers": {
+        "sourcerer": {
+          "command": "sourcerer",
+          "args": [ "mcp-proxy", "-e", "/absolute/path/to/.env" ],
+        }
+      }
+    }
+    ```
+3. Save `claude_desktop_config.json`
+4. Restart Claude Desktop
+5. Test the installation with this prompt:
+    ```
+    /repo-discovery How many repos do I have indexed?
+    ```
+
+#### Uninstall the connector and plugin
+
+1. Remove the `"sourcerer"` entry from `"mcpServers"` in `claude_desktop_config.json`
+2. Open Claude Desktop
+3. Go to Customize > Plugins
+4. Click "Sourcerer"
+5. Click the triple dot menu button, then click "Uninstall"
+6. Restart Claude Desktop for both to take effect
+
+### Claude Code
+
+#### Install the plugin
+
+1. Add the Sourcerer marketplace (one-time):
+   ```sh
+   claude plugin marketplace add elastic/sourcerer
+   ```
+2. Install the plugin:
+   ```sh
+   claude plugin install sourcerer
+   ```
+3. Configure the endpoint and credentials by running `/plugin configure sourcerer@elastic-sourcerer` inside Claude Code, or pass them directly from the terminal:
+   ```sh
+   claude plugin install sourcerer \
+     --config kibana_url=https://<your-kibana-url> \
+     --config api_key=<your-api-key>
+   ```
+4. Run claude code:
+    ```sh
+    claude
+    ```
+5. Test the installation with this prompt:
+    ```
+    /repo-discovery How many repos do I have indexed?
+    ```
+
+#### Uninstall the plugin
+
+```sh
+claude plugin uninstall sourcerer
+claude plugin marketplace remove elastic-sourcerer
+```
 
 ## Upgrades
 
