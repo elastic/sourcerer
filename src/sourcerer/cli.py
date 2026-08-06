@@ -217,20 +217,10 @@ def export():
 
     Translates the same system prompt and skills `setup` pushes to Kibana into a target harness's
     format, and generates connection config pointing at Kibana's Agent Builder MCP endpoint. Makes
-    no HTTP calls - pure local file generation. Targets: claude-code, claude-desktop.
+    no HTTP calls - pure local file generation. Targets: claude-desktop.
+
+    For Claude Code, install the sourcerer Claude Code marketplace plugin instead.
     """
-
-
-@export.command(name="claude-code")
-@env_option
-@_export_options
-def export_claude_code(kb_url, config_path, api_key, username, password, dest):
-    """Write .claude/skills/*/SKILL.md, .mcp.json, and a CLAUDE.md block for Claude Code.
-
-    Claude Code auto-discovers all three by filesystem convention, so there is no install step.
-    Existing .mcp.json / CLAUDE.md are merged, not overwritten.
-    """
-    export_cmd.run_claude_code(kb_url, config_path, api_key, username, password, dest)
 
 
 @export.command(name="claude-desktop")

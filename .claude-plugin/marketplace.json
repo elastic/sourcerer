@@ -30,7 +30,7 @@
       },
       "mcpServers": {
         "sourcerer": {
-          "type": "streamable-http",
+          "type": "http",
           "url": "${user_config.kibana_url}/api/agent_builder/mcp",
           "headers": {
             "Authorization": "ApiKey ${user_config.api_key}"

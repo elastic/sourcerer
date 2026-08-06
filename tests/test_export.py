@@ -1,6 +1,6 @@
 """Unit tests for `sourcerer export`: the tool-id translation from Agent Builder's dotted names
 to the MCP endpoint's underscored names, the SKILL.md rendering, and the idempotent file merges
-for .mcp.json / claude_desktop_config.json / CLAUDE.md.
+for .mcp.json / claude_desktop_config.json.
 
 The dotted -> underscored translation was verified empirically against a live cluster's MCP
 `tools/list` (dots become underscores: `sourcerer.code.grep` -> `sourcerer_code_grep`); these
@@ -166,6 +166,28 @@ class TestTranslateSkillToSkillmd:
         # the SKILL.md frontmatter must remain parseable: the inner quote is escaped
         assert '\\"quote\\"' in out
 
+    def test_referenced_content_appended_to_body(self):
+        skill = self._skill()
+        skill["referenced_content"] = [
+            {"name": "host-github", "relativePath": "./host-github", "content": "# github-urls\n\nTemplate here."},
+            {"name": "host-gitlab", "relativePath": "./host-gitlab", "content": "# gitlab-urls\n\nOther template."},
+        ]
+        out = export.translate_skill_to_skillmd(skill)
+        assert "# github-urls" in out
+        assert "Template here." in out
+        assert "# gitlab-urls" in out
+        assert "Other template." in out
+        # body content still present
+        assert "sourcerer_code_grep" in out
+
+    def test_no_referenced_content_unchanged(self):
+        # Skills without referenced_content produce identical output to before.
+        skill = self._skill()
+        out_without = export.translate_skill_to_skillmd(skill)
+        skill["referenced_content"] = []
+        out_empty = export.translate_skill_to_skillmd(skill)
+        assert out_without == out_empty
+
 
 class TestMergeMcpServers:
     def test_creates_file_with_server(self, tmp_path):
@@ -202,35 +224,6 @@ class TestMergeMcpServers:
         assert data["mcpServers"]["sourcerer"]["url"] == "u"
 
 
-class TestMergeClaudeMd:
-    def test_appends_marked_block_preserving_existing(self, tmp_path):
-        p = tmp_path / "CLAUDE.md"
-        p.write_text("# Existing\n\nnotes\n")
-        export._merge_claude_md(p, "hello body")
-        out = p.read_text()
-        assert "# Existing" in out
-        assert "notes" in out
-        assert export.CLAUDE_MD_START in out
-        assert export.CLAUDE_MD_END in out
-        assert "hello body" in out
-
-    def test_idempotent_single_block(self, tmp_path):
-        p = tmp_path / "CLAUDE.md"
-        export._merge_claude_md(p, "v1")
-        export._merge_claude_md(p, "v2")
-        out = p.read_text()
-        assert out.count(export.CLAUDE_MD_START) == 1
-        assert out.count(export.CLAUDE_MD_END) == 1
-        assert "v2" in out
-        assert "v1" not in out
-
-    def test_creates_file_when_missing(self, tmp_path):
-        p = tmp_path / "CLAUDE.md"
-        export._merge_claude_md(p, "body")
-        assert p.exists()
-        assert "body" in p.read_text()
-
-
 class TestAuthVarName:
     def test_api_key_referenced(self):
         assert export._auth_var_name("key", None, None) == "ELASTICSEARCH_API_KEY"
@@ -250,42 +243,6 @@ class TestResolveEndpoint:
     ])
     def test_trailing_slash_tolerated(self, base):
         assert export._resolve_endpoint(base) == "https://kb.example.com/api/agent_builder/mcp"
-
-
-class TestRunClaudeCode:
-    def test_writes_all_assets_with_builtin_hosts(self, tmp_path):
-        export.run_claude_code(
-            kb_url="https://kb.example.com",
-            config_path=None,
-            api_key="s3cr3t-value",
-            dest=str(tmp_path),
-        )
-        mcp = json.loads((tmp_path / ".mcp.json").read_text())
-        s = mcp["mcpServers"]["sourcerer"]
-        assert s["url"] == "https://kb.example.com/api/agent_builder/mcp"
-        assert s["headers"]["Authorization"] == "ApiKey ${ELASTICSEARCH_API_KEY}"
-        # no literal secret leaked
-        assert "s3cr3t-value" not in (tmp_path / ".mcp.json").read_text()
-        # skills use canonical unprefixed names as both folder and SKILL.md name
-        skill_dirs = list((tmp_path / ".claude" / "skills").iterdir())
-        names = {d.name for d in skill_dirs}
-        assert names == {"code-citations", "code-search", "ref-resolution", "repo-discovery"}
-        skillmd = (tmp_path / ".claude" / "skills" / "code-search" / "SKILL.md").read_text()
-        assert 'name: "code-search"' in skillmd
-        # CLAUDE.md has the marked block and translated tool names
-        cmd = (tmp_path / "CLAUDE.md").read_text()
-        assert export.CLAUDE_MD_START in cmd
-
-    def test_basic_auth_only_exits(self, tmp_path):
-        with pytest.raises(SystemExit):
-            export.run_claude_code(
-                kb_url="https://kb.example.com", config_path=None,
-                username="u", password="p", dest=str(tmp_path),
-            )
-
-    def test_missing_kb_url_exits(self, tmp_path):
-        with pytest.raises(SystemExit):
-            export.run_claude_code(kb_url=None, config_path=None, api_key="K", dest=str(tmp_path))
 
 
 class TestRunClaudeDesktop:
@@ -308,6 +265,13 @@ class TestRunClaudeDesktop:
                 "ref-resolution/SKILL.md",
                 "repo-discovery/SKILL.md",
             }
+            # code-citations skill body must contain per-host URL templates embedded inline
+            # (the default host registry includes github, so github.com must appear)
+            citations_md = zf.read("code-citations/SKILL.md").decode()
+            assert "github.com" in citations_md, (
+                "code-citations/SKILL.md is missing per-host URL templates; "
+                "build_host_citation_referenced_content() blocks should be embedded in the body"
+            )
         assert (tmp_path / "sourcerer-claude-desktop-instructions.md").exists()
         cfg = json.loads((tmp_path / "claude_desktop_config.json").read_text())
         s = cfg["mcpServers"]["sourcerer"]

@@ -1,5 +1,5 @@
 """`sourcerer export` - package sourcerer's Agent Builder system prompt + skills for local
-agent harnesses (Claude Code, Claude Desktop).
+agent harnesses (Claude Desktop).
 
 `sourcerer setup` pushes the system prompt, skills, and ES|QL tools into Kibana as Agent Builder
 objects. Elastic 9.2+/Serverless then re-exposes those same tools through a native MCP endpoint
@@ -9,6 +9,8 @@ content already on disk into each target's format, and (b) writes the connection
 points the target's MCP client at Kibana's existing endpoint. This mirrors `setup`'s shape (read
 ``elastic/agent_builder_*`` YAML, resolve ``hosts:``) but writes to the local filesystem instead
 of pushing to a remote API - export makes no HTTP calls at all.
+
+Claude Code is served by the sourcerer Claude Code marketplace plugin instead of this command.
 """
 
 # Standard packages
@@ -22,8 +24,11 @@ import zipfile
 import click
 
 # App packages
+from ...config import load_config
+from ...hosts import resolve_hosts
 from ..setup.command import (
     AGENT_BUILDER_AGENTS_DIR,
+    build_host_citation_referenced_content,
     load_skills,
     load_yaml_dir,
 )
@@ -106,11 +111,11 @@ def translate_instructions(text: str) -> str:
     return text
 
 
-def load_agent_and_skills() -> tuple[str, list[dict]]:
-    """Load the inputs both targets translate from: the agent's system-prompt instructions
-    and the base skills. Per-host citation URL templates are referenced_content on the
-    citations skill in Agent Builder (setup's job); local plugin targets will add them
-    when that target is implemented. Returns (instructions, skills)."""
+def load_agent_and_skills(hosts: dict) -> tuple[str, list[dict]]:
+    """Load the agent's system-prompt instructions and base skills, with per-host citation
+    URL templates injected into the sourcerer-code-citations skill's referenced_content.
+    Mirrors what load_agent_builder_skills() does for the Agent Builder path. Returns
+    (instructions, skills)."""
     agents = load_yaml_dir(AGENT_BUILDER_AGENTS_DIR)
     if not agents:
         raise FileNotFoundError(f"No agent definitions found in {AGENT_BUILDER_AGENTS_DIR}")
@@ -119,6 +124,13 @@ def load_agent_and_skills() -> tuple[str, list[dict]]:
         raise ValueError("agent definition has no configuration.instructions")
 
     skills = load_skills()
+    rc_items = [
+        build_host_citation_referenced_content(hosts[h])
+        for h in sorted(hosts) if hosts[h].auto_skill
+    ]
+    for skill in skills:
+        if skill["id"] == "sourcerer-code-citations":
+            skill["referenced_content"] = rc_items
     return instructions, skills
 
 
@@ -145,6 +157,12 @@ def translate_skill_to_skillmd(skill: dict, char_cap: int | None = None) -> str:
     if char_cap is not None and len(description) > char_cap:
         description = description[: char_cap - 1].rstrip() + "…"
     body = translate_instructions(skill.get("content", ""))
+    # Append any referenced_content blocks (e.g. per-host URL templates for code-citations).
+    # In Agent Builder these are separate named items attached to the skill; for local harnesses
+    # (Desktop, etc.) we embed them directly in the skill body so the agent can read them inline
+    # without a separate referenced_content lookup mechanism.
+    for item in skill.get("referenced_content") or []:
+        body = body.rstrip() + "\n\n" + item["content"].rstrip() + "\n"
     frontmatter = (
         "---\n"
         f"name: {_yaml_scalar(name)}\n"
@@ -155,11 +173,8 @@ def translate_skill_to_skillmd(skill: dict, char_cap: int | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# JSON / CLAUDE.md merge helpers (idempotent, re-run-safe)
+# JSON merge helpers (idempotent, re-run-safe)
 # ---------------------------------------------------------------------------
-
-CLAUDE_MD_START = "<!-- sourcerer:export:start -->"
-CLAUDE_MD_END = "<!-- sourcerer:export:end -->"
 
 
 def _merge_mcp_servers(path: pathlib.Path, server_name: str, server_entry: dict) -> None:
@@ -181,25 +196,6 @@ def _merge_mcp_servers(path: pathlib.Path, server_name: str, server_entry: dict)
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def _merge_claude_md(path: pathlib.Path, section_body: str) -> None:
-    """Replace the delimited sourcerer block in `path` (or append one) with `section_body`,
-    leaving all content outside the markers untouched. Creates the file if missing."""
-    block = f"{CLAUDE_MD_START}\n{section_body.rstrip()}\n{CLAUDE_MD_END}"
-    existing = path.read_text() if path.exists() else ""
-    if CLAUDE_MD_START in existing and CLAUDE_MD_END in existing:
-        pattern = re.compile(
-            re.escape(CLAUDE_MD_START) + r".*?" + re.escape(CLAUDE_MD_END),
-            re.DOTALL,
-        )
-        merged = pattern.sub(lambda _m: block, existing, count=1)
-    elif existing.strip():
-        merged = existing.rstrip() + "\n\n" + block + "\n"
-    else:
-        merged = block + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(merged)
-
-
 def _resolve_endpoint(kb_url: str) -> str:
     """`{KIBANA_URL}/api/agent_builder/mcp`, tolerant of a trailing slash on the base url. The
     literal `${KIBANA_URL}` placeholder is preserved for targets that expand env vars."""
@@ -216,102 +212,6 @@ def _auth_var_name(api_key: str | None, username: str | None, password: str | No
         return None
     # Nothing loaded: still reference ELASTICSEARCH_API_KEY by name; the user fills it in later.
     return "ELASTICSEARCH_API_KEY"
-
-
-# ---------------------------------------------------------------------------
-# Claude Code
-# ---------------------------------------------------------------------------
-
-
-def run_claude_code(
-    kb_url: str | None,
-    config_path: str | None,
-    api_key: str | None = None,
-    username: str | None = None,
-    password: str | None = None,
-    dest: str | None = None,
-) -> None:
-    """Write `.claude/skills/*/SKILL.md`, `.mcp.json`, and a delimited `CLAUDE.md` block into
-    `dest` (default: cwd). Claude Code auto-discovers all three by filesystem convention, so
-    there is no install step."""
-    if not kb_url:
-        click.echo(
-            "[ERROR] export requires a Kibana URL (--kb-url or KIBANA_URL): it is the MCP "
-            "endpoint the generated config points at.",
-            err=True,
-        )
-        sys.exit(1)
-
-    auth_var = _auth_var_name(api_key, username, password)
-    if auth_var is None:
-        click.echo(
-            "[ERROR] The Agent Builder MCP endpoint accepts an API key (or, on Serverless, "
-            "OAuth 2.1) - not basic auth. Set ELASTICSEARCH_API_KEY instead of "
-            "ELASTICSEARCH_USERNAME / ELASTICSEARCH_PASSWORD.",
-            err=True,
-        )
-        sys.exit(1)
-
-    try:
-        instructions, skills = load_agent_and_skills()
-    except (OSError, ValueError) as e:
-        click.echo(f"[ERROR] {e}", err=True)
-        sys.exit(1)
-
-    root = pathlib.Path(dest) if dest else pathlib.Path.cwd()
-    skills_root = root / ".claude" / "skills"
-
-    written_skills = []
-    for skill in skills:
-        skill_dir = skills_root / skill["skill_dir"]
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        # Claude Code shares a 1,536-char budget across description + when-to-use; these skills'
-        # descriptions fit comfortably, so no per-target cap is applied.
-        (skill_dir / "SKILL.md").write_text(translate_skill_to_skillmd(skill, char_cap=None))
-        written_skills.append(skill_dir)
-
-    endpoint = _resolve_endpoint(kb_url)
-    server_entry = {
-        "type": "http",
-        "url": endpoint,
-        # Claude Code expands ${VAR} in url/headers at connect time, so no literal secret is ever
-        # written - the file is safe to commit.
-        "headers": {"Authorization": f"ApiKey ${{{auth_var}}}"},
-    }
-    mcp_path = root / ".mcp.json"
-    _merge_mcp_servers(mcp_path, MCP_SERVER_NAME, server_entry)
-
-    section_body = (
-        "## Sourcerer\n\n"
-        f"The `{MCP_SERVER_NAME}` MCP server exposes Elastic Agent Builder tools for answering "
-        "sourced, cited questions about indexed source code. Treat its tools "
-        "(`sourcerer_code_search`, `sourcerer_code_grep`, `sourcerer_files_cat`, "
-        "`sourcerer_refs_list`, ...) as authoritative for any question about the indexed repos, "
-        "and follow the skills under `.claude/skills/` for how to search, resolve refs, and "
-        "cite. The instructions below are the sourcerer agent's operating guide.\n\n"
-        + translate_instructions(instructions)
-    )
-    claude_md_path = root / "CLAUDE.md"
-    _merge_claude_md(claude_md_path, section_body)
-
-    # ---- report ----
-    click.echo(f"Wrote {len(written_skills)} skill(s) under {skills_root}")
-    for d in written_skills:
-        click.echo(f"  {d.relative_to(root)}/SKILL.md")
-    click.echo(f"Merged MCP server '{MCP_SERVER_NAME}' into {mcp_path}")
-    click.echo(f"Merged sourcerer section into {claude_md_path}")
-    click.echo("")
-    click.echo("Next steps:")
-    click.echo(
-        f"  1. Export KIBANA_URL and {auth_var} in the shell Claude Code runs in (or a .env it "
-        "inherits) - .mcp.json references them by name, it never stores the values."
-    )
-    click.echo(f"       export KIBANA_URL={kb_url.rstrip('/')!r}")
-    click.echo(f"       export {auth_var}=<your Elasticsearch API key>")
-    click.echo(
-        "  2. Open this directory in Claude Code and run `/mcp` (or `claude mcp list`) to "
-        f"confirm the '{MCP_SERVER_NAME}' server connected and lists its tools."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +260,16 @@ def run_claude_desktop(
         sys.exit(1)
 
     try:
-        instructions, skills = load_agent_and_skills()
+        if config_path:
+            hosts = load_config(config_path).hosts
+        else:
+            hosts = resolve_hosts(None)
+    except (OSError, ValueError) as e:
+        click.echo(f"[ERROR] Invalid config: {e}", err=True)
+        sys.exit(1)
+
+    try:
+        instructions, skills = load_agent_and_skills(hosts)
     except (OSError, ValueError) as e:
         click.echo(f"[ERROR] {e}", err=True)
         sys.exit(1)
