@@ -1,11 +1,14 @@
+# Standard packages
+import os
+
 # Third-party packages
 import click
 from dotenv import find_dotenv, load_dotenv
 
 # App packages
 from .commands.benchmark import command as benchmark_cmd
-from .commands.export import command as export_cmd
 from .commands.index import command as index_cmd
+from .commands.mcp_proxy import command as mcp_proxy_cmd
 from .commands.prune import command as prune_cmd
 from .commands.setup import command as setup_cmd
 
@@ -21,7 +24,10 @@ def _load_env(ctx, param, value):
     envvars are populated before the auth options below read them.
     """
     if value:
-        load_dotenv(value)
+        path = os.path.expanduser(value)
+        if not os.path.isfile(path):
+            raise click.BadParameter(f"Path '{path}' does not exist or is not a file.", param=param)
+        load_dotenv(path)
     else:
         load_dotenv(find_dotenv(usecwd=True))
     return value
@@ -32,7 +38,7 @@ def env_option(f):
         "-e",
         "--env",
         "env_file",
-        type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+        type=click.Path(exists=False, dir_okay=False, resolve_path=False),
         default=None,
         is_eager=True,
         expose_value=False,
@@ -185,54 +191,23 @@ def prune(config_path, dry_run, quiet, url, api_key, username, password):
     prune_cmd.run(config_path, url, api_key, username, password, dry_run, quiet)
 
 
-def _export_options(f):
-    """Options shared by every `export` target. Unlike setup/index, export never calls
-    Elasticsearch or Kibana, so it needs no `--url`; --kb-url is the MCP endpoint the generated
-    config points at, and the credential options only tell export which env-var name the config
-    should reference (and let it reject basic-auth-only setups)."""
-    f = click.option(
-        "--kb-url",
-        envvar="KIBANA_URL",
-        default=None,
-        help="Kibana URL. The generated config points at {kb-url}/api/agent_builder/mcp. Required.",
-    )(f)
-    f = click.option(
-        "--config",
-        "config_path",
-        type=click.Path(exists=True, dir_okay=False),
-        default=None,
-        help="sourcerer.yml whose 'hosts:' section customizes/extends the built-in git-host "
-        "defaults used to generate per-host citation skills. Omit to use only built-in defaults.",
-    )(f)
-    f = click.option("--api-key", envvar="ELASTICSEARCH_API_KEY", default=None, help="Elasticsearch API key (referenced by name in generated config).")(f)
-    f = click.option("--username", envvar="ELASTICSEARCH_USERNAME", default=None, help="Elasticsearch username (basic auth is not supported by the MCP endpoint).")(f)
-    f = click.option("--password", envvar="ELASTICSEARCH_PASSWORD", default=None, help="Elasticsearch password (basic auth is not supported by the MCP endpoint).")(f)
-    f = click.option("-o", "--out", "dest", type=click.Path(file_okay=False), default=None, help="Directory to write assets into (default: current directory).")(f)
-    return f
 
-
-@cli.group()
-def export():
-    """Package sourcerer's agent (system prompt + skills + MCP config) for a local harness.
-
-    Translates the same system prompt and skills `setup` pushes to Kibana into a target harness's
-    format, and generates connection config pointing at Kibana's Agent Builder MCP endpoint. Makes
-    no HTTP calls - pure local file generation. Targets: claude-desktop.
-
-    For Claude Code, install the sourcerer Claude Code marketplace plugin instead.
-    """
-
-
-@export.command(name="claude-desktop")
+@cli.command(name="mcp-proxy")
 @env_option
-@_export_options
-def export_claude_desktop(kb_url, config_path, api_key, username, password, dest):
-    """Write a skills ZIP, an instructions file, and a merge-ready claude_desktop_config.json.
+@click.option("--kb-url", envvar="KIBANA_URL", default=None, help="Kibana URL. The proxy forwards to {kb-url}/api/agent_builder/mcp. Required.")
+@click.option("--api-key", envvar="ELASTICSEARCH_API_KEY", default=None, help="Elasticsearch API key (ApiKey auth).")
+@click.option("--username", envvar="ELASTICSEARCH_USERNAME", default=None, help="Elasticsearch username (Basic auth).")
+@click.option("--password", envvar="ELASTICSEARCH_PASSWORD", default=None, help="Elasticsearch password (Basic auth).")
+def mcp_proxy(kb_url, api_key, username, password):
+    """Run a stdio MCP proxy that forwards to the Kibana Agent Builder MCP endpoint.
 
-    Skill upload and pasting the instructions into a Project are unavoidably manual on Desktop;
-    the command's output spells out each step.
+    Intended to be launched by Claude Desktop via the mcpServers section of
+    claude_desktop_config.json, with KIBANA_URL and credentials supplied in that
+    file's env block. Accepts ApiKey auth (ELASTICSEARCH_API_KEY) or Basic auth
+    (ELASTICSEARCH_USERNAME + ELASTICSEARCH_PASSWORD). All diagnostic output goes
+    to stderr; stdout carries the JSON-RPC stream.
     """
-    export_cmd.run_claude_desktop(kb_url, config_path, api_key, username, password, dest)
+    mcp_proxy_cmd.run(kb_url, api_key, username, password)
 
 
 @cli.group()

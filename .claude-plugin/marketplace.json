@@ -29,7 +29,7 @@
         }
       },
       "mcpServers": {
-        "sourcerer": {
+        "sourcerer-claude-code": {
           "type": "http",
           "url": "${user_config.kibana_url}/api/agent_builder/mcp",
           "headers": {
@@ -37,14 +37,6 @@
           }
         }
       }
-    },
-    {
-      "name": "sourcerer-desktop",
-      "version": "2.0.1",
-      "description": "Search indexed git repositories and generate responses with citations. Optimized for Claude Desktop.",
-      "source": "./",
-      "strict": false,
-      "skills": "./src/sourcerer/skills"
     }
   ]
 }
