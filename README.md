@@ -401,22 +401,28 @@ uv run pytest tests/
 
 ### Releases
 
-The version in `pyproject.toml` is the source of truth. Prepare a release through
-a normal pull request:
-
-1. Run `uv version <major>.<minor>.<patch>` (without the `v` prefix).
-2. Review and commit the resulting `pyproject.toml` and `uv.lock` changes.
-3. Merge the pull request to `main` after its tests pass.
-
-From an up-to-date `main` with no tracked changes, publish the corresponding tag:
+#### Prepare a release
 
 ```sh
-./scripts/release.sh v2.0.1
+./scripts/release.sh prepare v2.0.1
 ```
 
-The script requires a strict `vMAJOR.MINOR.PATCH` tag, verifies that it matches
-`pyproject.toml`, confirms that `main` matches `origin/main` and that the tag is
-new, checks the lockfile, runs the tests, and builds the package. After
-confirmation, it creates and pushes an annotated tag. The tag-triggered GitHub
-Actions workflow repeats the checks and creates the GitHub release only if they
-pass.
+`prepare` bumps the version numbers in `pyproject.toml`, `uv.lock`,
+`.claude-plugin/marketplace.json`, and `README.md`. The version number must
+match the pattern `v{major}.{minor}.{patch}`.
+
+#### Publish the release
+
+Review the commit you prepared, then open a pull request and merge it to `main`.
+Then from an up-to-date `main` with no tracked changes, publish the tag to make
+an official release:
+
+```sh
+./scripts/release.sh publish v2.0.1
+```
+
+`publish` verifies that all version files are consistent, `main` matches
+`origin/main`, the tag is new, the lockfile is clean, tests pass, and the
+package builds. After confirmation it creates and pushes an annotated tag.
+The tag-triggered GitHub Actions workflow repeats the checks and creates the
+GitHub release only if they pass.

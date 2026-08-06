@@ -273,10 +273,11 @@ template's mappings and index sort. Backing indices are `sourcerer-v2-refs`,
 ## Releases
 
 `pyproject.toml` is the source of truth for the project version. Release version changes
-must be made with `uv version <major>.<minor>.<patch>`, committed with the resulting
-`uv.lock` update, reviewed, and merged to `main` before publishing.
+must be made with `./scripts/release.sh prepare vMAJOR.MINOR.PATCH`, which bumps
+`pyproject.toml`, `uv.lock`, `.claude-plugin/marketplace.json`, and `README.md` together
+and commits the result. Review and merge that commit to `main` before publishing.
 
-Publish releases only by running `./scripts/release.sh vMAJOR.MINOR.PATCH` from an
+Publish releases only by running `./scripts/release.sh publish vMAJOR.MINOR.PATCH` from an
 up-to-date `main`. Do not create or push release tags manually, modify an existing release
 tag, or bypass the script's lockfile, test, build, branch, version, or remote-tag checks.
 Pushing a valid tag triggers `.github/workflows/release.yml`, which repeats the quality
