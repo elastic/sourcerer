@@ -1,7 +1,9 @@
 # Sourcerer
 
-**Ask the source.** Sourcerer answers questions about your code so you can
-understand it from first principles.
+**Ask the source.** Sourcerer is a code intelligence agent for people who
+support complex software deployments. It indexes git repos over time, searches
+them, and grounds its answers in the source, scaling to hundreds of repos and
+billions of lines of code.
 
 ---
 
