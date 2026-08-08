@@ -158,6 +158,10 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
 
 
 @cli.command()
+@click.argument("repo_spec", required=False)
+@click.option("-b", "--branch", default=None, help="Branch to prune.")
+@click.option("-t", "--tag", default=None, help="Tag to prune.")
+@click.option("-c", "--commit", default=None, help="Commit hash to prune (full SHA or unambiguous prefix ≥7 chars).")
 @click.option(
     "--config",
     "config_path",
@@ -175,20 +179,37 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
 @click.option("-q", "--quiet", is_flag=True, default=False, help="Suppress output for repos with nothing to prune.")
 @env_option
 @auth_options
-def prune(config_path, dry_run, quiet, url, api_key, username, password):
+def prune(repo_spec, branch, tag, commit, config_path, dry_run, quiet, url, api_key, username, password):
     """Delete indexed refs that fall outside their sourcerer.yml retention policies, then sweep
     for orphans.
+
+    Provide a REPO_SPEC ('<host>/<org>/<repo>') with exactly one of -b/-t/-c to prune a single
+    specific ref without a config file.
 
     With --config, applies the same retain policies the `index` command uses to skip doomed
     refs, but retroactively: refs already indexed that a policy would now delete are removed,
     along with any content (lines/files) no surviving ref still references.
 
-    Afterwards -- or always, if --config is omitted -- also detects and removes orphans: whole
-    files/lines indices with no matching entry in sourcerer-refs (e.g. a repo removed
-    from the config), commit content left behind with no marker referencing it, and refs
-    markers whose content is entirely gone. Use --dry-run to preview both passes first.
+    Afterwards -- or always, if neither REPO_SPEC nor --config is given -- also detects and
+    removes orphans: whole files/lines indices with no matching entry in sourcerer-refs (e.g. a
+    repo removed from the config), commit content left behind with no marker referencing it, and
+    refs markers whose content is entirely gone. Use --dry-run to preview both passes first.
     """
-    prune_cmd.run(config_path, url, api_key, username, password, dry_run, quiet)
+    if config_path:
+        if repo_spec or branch or tag or commit:
+            raise click.UsageError("--config cannot be combined with REPO_SPEC or -b/-t/-c")
+        prune_cmd.run(config_path, url, api_key, username, password, dry_run, quiet)
+    elif repo_spec:
+        refs = {k: v for k, v in [("branch", branch), ("tag", tag), ("commit", commit)] if v}
+        if not refs:
+            raise click.UsageError("provide exactly one of -b/--branch, -t/--tag, -c/--commit with REPO_SPEC")
+        if len(refs) > 1:
+            raise click.UsageError("specify at most one of -b/--branch, -t/--tag, -c/--commit")
+        prune_cmd.run_ref(repo_spec, branch, tag, commit, url, api_key, username, password, dry_run, quiet)
+    else:
+        if branch or tag or commit:
+            raise click.UsageError("-b/-t/-c require a REPO_SPEC ('<host>/<org>/<repo>')")
+        prune_cmd.run(None, url, api_key, username, password, dry_run, quiet)
 
 
 

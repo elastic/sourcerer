@@ -44,6 +44,14 @@ class _Row:
     why: str
 
 
+def _ref_rows(host: str, org: str, repo: str, decisions: list) -> list[_Row]:
+    """Rows for a single-ref prune (run_ref path): same WHAT/WHY shape as _retention_rows
+    but the source is plain host/org/repo strings, not a RepoConfig. Only 'delete' decisions
+    are reported; every other marker is kept and produces nothing actionable."""
+    return [_Row(f"{host}/{org}/{repo}@{d.marker.ref} ({d.marker.commit})", "policy:explicit")
+            for d in decisions if d.action == "delete"]
+
+
 def _retention_rows(cfg, decisions: list) -> list[_Row]:
     """Rows for markers a repo's retain policy would prune (see _Row for the WHAT/WHY
     shapes). Only 'delete' decisions are reported -- kept and unmanaged markers aren't being
