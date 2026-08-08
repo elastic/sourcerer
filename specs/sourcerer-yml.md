@@ -1,6 +1,7 @@
 # Specification for sourcerer.yml
 
-sourcerer.yml is a configuration file that governs how the `sourcerer` CLI performs its `setup`, `index`, and `prune` commands.
+sourcerer.yml is a configuration file that governs how the `sourcerer` CLI
+performs its `setup`, `index`, and `prune` commands.
 
 ## Overview
 
@@ -54,15 +55,27 @@ Notes:
 
 ### `hosts`
 
-Holds information about git hosts. This is necessary when indexing code from self-managed git hosts, or when using a provider whose deployments are instance-scoped (AWS CodeCommit, Azure DevOps, GCP Secure Source Manager).
+Holds information about git hosts. This is necessary when indexing code from
+self-managed git hosts, or when using a provider whose deployments are
+instance-scoped (AWS CodeCommit, Azure DevOps, GCP Secure Source Manager).
 
-When omitted, Sourcerer defaults to a hardcoded list of known git hosts (e.g. GitHub, GitLab, BitBucket).
+When omitted, Sourcerer defaults to a hardcoded list of known git hosts
+(e.g. GitHub, GitLab, BitBucket).
 
 When given, entries are merged with the hardcoded list of known git hosts.
 
-For providers whose deployments are scoped by region, project, or instance hostname (i.e. AWS CodeCommit, Azure DevOps, GCP Secure Source Manager), you should define one entry per deployment, each with its own unique `id` suffixed with the region, project, instance, or any other values needed to properly namespace the repo (e.g. `aws-codecommit-us-east-1`). Put the region, project, or instance hostname directly into that entry's `clone.url` and `links.*` templates. `git.org` then holds only the plain org or project name, with no extra scoping embedded in it.
+For providers whose deployments are scoped by region, project, or instance
+hostname (i.e. AWS CodeCommit, Azure DevOps, GCP Secure Source Manager), you
+should define one entry per deployment, each with its own unique `id` suffixed
+with the region, project, instance, or any other values needed to properly
+namespace the repo (e.g. `aws-codecommit-us-east-1`). Put the region, project,
+or instance hostname directly into that entry's `clone.url` and `links.*`
+templates. `git.org` then holds only the plain org or project name, with no
+extra scoping embedded in it.
 
-If a given entry overwrites an entry from the hardcoded list of known git hosts, only the given fields overwrite their respective fields in the hardcoded entry, while other fields in the hardcoded entry keep their default values.
+If a given entry overwrites an entry from the hardcoded list of known git hosts,
+only the given fields overwrite their respective fields in the hardcoded entry,
+while other fields in the hardcoded entry keep their default values.
 
 - Required: No
 - Default: `null`
@@ -70,18 +83,21 @@ If a given entry overwrites an entry from the hardcoded list of known git hosts,
 
 ### `hosts[i].id`
 
-Value of `git.host` used in sourcerer.yml, documents, index names, and _id generation.
+Value of `git.host` used in sourcerer.yml, documents, index names, and
+_id generation.
 
 Example: `github`
 
-For AWS CodeCommit, Azure DevOps, or GCP Secure Source Manager, you should suffix this value with the additional namespace values that they require (e.g. region, project, instance hostname) to prevent collisions.
+For AWS CodeCommit, Azure DevOps, or GCP Secure Source Manager, you should
+suffix this value with the additional namespace values that they require
+(e.g. region, project, instance hostname) to prevent collisions.
 
 Example: `aws-codecommit-us-east-1`
 
 - Required: Yes (if `hosts` exists)
 - Type: String
 - Validation:
-  - Cannot contain these characters: `~`, `\`, `/`, `*`, `?`, `"`, `<`, `>`, `|`, `:`
+  - Cannot contain these characters: `~`, `^`, `\`, `/`, `*`, `?`, `"`, `<`, `>`, `|`, `:`
   - Cannot contain uppercase characters or whitespace characters
 
 ### `hosts[i].name`
@@ -96,7 +112,8 @@ Example: `GitHub`
 
 ### `hosts[i].urls`
 
-Holds URLs templates for cloning and citations used by the citation skills in Agent Builder.
+Holds URLs templates for cloning and citations used by the citation skills in
+Elastic Agent Builder.
 
 - Required: Yes (unless overwriting the field of a hardcoded host)
 - Type: Object
@@ -105,7 +122,8 @@ Holds URLs templates for cloning and citations used by the citation skills in Ag
 
 URL template for repositories when running `git clone` during indexing.
 
-The `git` fields from the `sourcerer-v2-refs` index can be referenced as variables with curly braces (e.g. `{git.org}`, `{git.repo}`).
+The `git` fields from the `sourcerer-v2-refs` index can be referenced as
+variables with curly braces (e.g. `{git.org}`, `{git.repo}`).
 
 Example: `https://github.com/{git.org}/{git.repo}.git`
 
@@ -114,9 +132,11 @@ Example: `https://github.com/{git.org}/{git.repo}.git`
 
 ### `hosts[i].urls.directory`
 
-URL template for citing links to a directory in a repo. Used by the citation skills in Agent Builder.
+URL template for citing links to a directory in a repo. Used by the citation
+skills in Agent Builder.
 
-Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be referenced as variables with curly braces (e.g. `{git.org}`, `{file.directory}`).
+Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be
+referenced as variables with curly braces (e.g. `{git.org}`, `{file.directory}`).
 
 Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.directory}`
 
@@ -125,9 +145,11 @@ Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.direct
 
 ### `hosts[i].urls.file`
 
-URL template for citing links to a file in a repo. Used by the citation skills in Agent Builder.
+URL template for citing links to a file in a repo. Used by the citation skills
+in Elastic Agent Builder.
 
-Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`).
+Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be
+referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`).
 
 Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}`
 
@@ -136,9 +158,11 @@ Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}`
 
 ### `hosts[i].urls.line`
 
-URL template for citing links to a line of code in a repo. Used by the citation skills in Agent Builder.
+URL template for citing links to a line of code in a repo. Used by the citation
+skills in Elastic Agent Builder.
 
-Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`, `{line.number}`).
+Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be
+referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`, `{line.number}`).
 
 Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number}`
 
@@ -147,9 +171,13 @@ Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#
 
 ### `hosts[i].urls.line_range`
 
-URL template for citing links to a range of lines of code in a repo. Used by the citation skills in Agent Builder.
+URL template for citing links to a range of lines of code in a repo. Used by the
+citation skills in Elastic Agent Builder.
 
-Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`) as well as fields returned by the `sourcerer.code.*` and `sourcerer.files.*` tools in Agent Builder (e.g. `{line.number_start}`, `{line.number_end}`).
+Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be
+referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`) as
+well as fields returned by the `sourcerer.code.*` and `sourcerer.files.*` tools
+in Elastic Agent Builder (e.g. `{line.number_start}`, `{line.number_end}`).
 
 Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number_start}-L{line.number_end}`
 
@@ -182,7 +210,8 @@ NOT IMPLEMENTED
 
 ### `sources`
 
-Holds information on which refs to index and how long to retain them until they qualify for pruning.
+Holds information on which refs to index and how long to retain them until they
+qualify for pruning.
 
 - Required: No
 - Type: Array[Object]
@@ -192,7 +221,10 @@ Holds information on which refs to index and how long to retain them until they 
 
 Scopes the selection of refs to match for indexing.
 
-Each source names exactly one `(host, org, repo, ref_type)` to index. Every `sources[i].git.*` field is a single, required, concrete string (no wildcards and no arrays). Sources that share the same `(host, org, repo)` are grouped together, so their retention policies combine (see `sources[i].retain`).
+Each source names exactly one `(host, org, repo, ref_type)` to index. Every
+`sources[i].git.*` field is a single, required, concrete string (no wildcards
+and no arrays). Sources that share the same `(host, org, repo)` are grouped
+together, so their retention policies combine (see `sources[i].retain`).
 
 - Required: Yes (if the source exists)
 - Type: Object
@@ -210,7 +242,8 @@ The `git.host` of the refs to index.
 
 ### `sources[i].git.org`
 
-The `git.org` of the refs to index. This should be the plain org or project name on the hosting provider.
+The `git.org` of the refs to index. This should be the plain org or project name
+on the hosting provider.
 
 - Required: Yes
 - Type: String
@@ -237,9 +270,11 @@ The `git.ref_type` of the refs to index.
 
 ### `sources[i].match`
 
-Pattern(s) to match against the ref names of branches, tags, or commits within the scope defined in `sources[i].git`.
+Pattern(s) to match against the ref names of branches, tags, or commits within
+the scope defined in `sources[i].git`.
 
-Can be a static string (e.g. `"main"`, `"master"`) or a string containing semantic version (SemVer) components expressed with curly braces.
+Can be a static string (e.g. `"main"`, `"master"`) or a string containing
+semantic version (SemVer) components expressed with curly braces.
 
 Supported SemVer variables:
 
@@ -249,11 +284,14 @@ Supported SemVer variables:
 - `{build}` (e.g. the `4` in `"v1.2.3.4-rc1"`)
 - `{prerelease}` (e.g. the `rc1` in `"v1.2.3.4-rc1"`)
 
-Example: `"v{major}.{minor}.{patch}"` will match `"v1.2.3"` but not  `"1.2.3"`, `"v1.2"`. `"v1.2.3-rc1"`.
+Example: `"v{major}.{minor}.{patch}"` will match `"v1.2.3"` but not
+`"1.2.3"`, `"v1.2"`. `"v1.2.3-rc1"`.
 
-Multiple patterns can be given as an array of strings (e.g. `[ "v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}" ]`).
+Multiple patterns can be given as an array of strings
+(e.g. `[ "v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}" ]`).
 
-When omitted, all refs within the scope defined in `sources[i].git` will qualify for indexing if they don't also qualify for pruning.
+When omitted, all refs within the scope defined in `sources[i].git` will qualify
+for indexing if they don't also qualify for pruning.
 
 - Required: No
 - Type: String or Array[String]
@@ -261,11 +299,14 @@ When omitted, all refs within the scope defined in `sources[i].git` will qualify
 
 ### `sources[i].since`
 
-Defines the starting point for indexing relative to the most recent point in the commit history within the scope defined in `sources[i].git`.  The starting point is an inclusion floor.
+Defines the starting point for indexing relative to the most recent point in the
+commit history within the scope defined in `sources[i].git`.  The starting point
+is an inclusion floor.
 
 Exactly one child field can be given (`age`, `date`, `commit`, or `ref`).
 
-When `null`, empty (`{}`), or omitted, the entire history is considered for indexing, and filtered only by `sources[i].match` and `sources[i].retain`.
+When `null`, empty (`{}`), or omitted, the entire history is considered for
+indexing, and filtered only by `sources[i].match` and `sources[i].retain`.
 
 - Required: No
 - Type: Object
@@ -307,9 +348,11 @@ A specific ref name from which to begin indexing (e.g. `"v1.2.3"`).
 
 ### `sources[i].retain`
 
-Defines how long to retain indexed refs before they qualify for pruning. Also prevents indexing refs that already qualify for pruning.
+Defines how long to retain indexed refs before they qualify for pruning.
+Also prevents indexing refs that already qualify for pruning.
 
-When multiple criteria (`age`, `count`, `version`) are specified, the strictest criteria that matches at runtime will be used.
+When multiple criteria (`age`, `count`, `version`) are specified, the strictest
+criteria that matches at runtime will be used.
 
 If omitted, indexed refs will never qualify for pruning and will be kept forever.
 
@@ -339,7 +382,8 @@ The number of refs to retain.
 
 The semantic version of refs to retain.
 
-Each field keeps the newest *n* values at that level within its parent group (a threshold of `latest − (n−1)`), not a count of existing refs.
+Each field keeps the newest *n* values at that level within its parent group
+(a threshold of `latest − (n−1)`), not a count of existing refs.
 
 Omit a field (or set `null`) for no constraint at that level.
 
@@ -357,7 +401,8 @@ The number of major versions to retain before a ref qualifies for pruning.
 
 ### `sources[i].retain.version.minors`
 
-The number of minor versions to retain for each retained major version before a ref qualifies for pruning.
+The number of minor versions to retain for each retained major version before a
+ref qualifies for pruning.
 
 - Required: No
 - Type: Integer
@@ -365,7 +410,8 @@ The number of minor versions to retain for each retained major version before a 
 
 ### `sources[i].retain.version.patches`
 
-The number of patch versions to retain for each retained major/minor version (whichever is most specific) before a ref qualifies for pruning.
+The number of patch versions to retain for each retained major/minor version
+(whichever is most specific) before a ref qualifies for pruning.
 
 - Required: No
 - Type: Integer
@@ -373,7 +419,8 @@ The number of patch versions to retain for each retained major/minor version (wh
 
 ### `sources[i].retain.version.builds`
 
-The number of build versions to retain for each retained major/minor/build version (whichever is most specific) before a ref qualifies for pruning.
+The number of build versions to retain for each retained major/minor/build
+version (whichever is most specific) before a ref qualifies for pruning.
 
 - Required: No
 - Type: Integer
@@ -381,7 +428,8 @@ The number of build versions to retain for each retained major/minor/build versi
 
 ### `sources[i].retain.version.prereleases`
 
-The number of prerelease versions to retain for each retained major/minor/build/patch version (whichever is most specific) before a ref qualifies for pruning.
+The number of prerelease versions to retain for each retained major/minor/build/patch
+version (whichever is most specific) before a ref qualifies for pruning.
 
 - Required: No
 - Type: Integer
@@ -389,9 +437,11 @@ The number of prerelease versions to retain for each retained major/minor/build/
 
 ### `sources[i].retain.prerelease`
 
-Whether to keep or drop prelease versions once its respective version is generally available.
+Whether to keep or drop prelease versions once its respective version is
+generally available.
 
-Example: `"v1.2.3-rc1"` qualifies for pruning if `"v1.2.3"` exists and `sources[i].retain.prerelease` is `"superseded"`.
+Example: `"v1.2.3-rc1"` qualifies for pruning if `"v1.2.3"` exists and
+`sources[i].retain.prerelease` is `"superseded"`.
 
 - Required: No
 - Type: String
@@ -403,9 +453,11 @@ Example: `"v1.2.3-rc1"` qualifies for pruning if `"v1.2.3"` exists and `sources[
 
 NOT IMPLEMENTED
 
-Configures the indexing schedule for refs that match `sources[i].match`, overriding anything in `schedules` that might have otherwise applied to those refs.
+Configures the indexing schedule for refs that match `sources[i].match`,
+overriding anything in `schedules` that might have otherwise applied to those refs.
 
-When omitted, refs that match `sources[i].match` will always qualify for indexing (if they don't also qualify for pruning).
+When omitted, refs that match `sources[i].match` will always qualify for
+indexing (if they don't also qualify for pruning).
 
 - Required: No
 - Type: String
@@ -415,7 +467,8 @@ When omitted, refs that match `sources[i].match` will always qualify for indexin
 
 ## Example
 
-Here are the full example contents of sourcerer.yml that will replace repos.yml and remain referenced by the --config argument of commands:
+Here are the full example contents of sourcerer.yml that will replace repos.yml
+and remain referenced by the --config argument of commands:
 
 ```yaml
 hosts:
