@@ -41,8 +41,12 @@ from .git import (
     resolve_commit,
     _rev_info,
 )
-from .markers import commit_fully_indexed, count_commit_docs, pre_clone_skip, should_index, write_ref_marker
+from .markers import (
+    commit_fully_indexed, count_commit_docs, pre_clone_skip, should_index,
+    write_indexing_marker, write_ref_marker,
+)
 from .report import dry_run_config
+from .schedule import filter_config_by_schedule
 from .runtime import _aborted, _tuning, bulk_indexing_settings, handle_interrupts
 from .selection import _effective_since_floor, _load_config, _resolve_entry
 
@@ -114,6 +118,10 @@ def index_ref_in_dir(
     else:
         reporter.set_total_files(unit, count_tracked_files(repo_dir))
         reporter.set_stage(unit, "indexing")
+        # Mark the ref as in-progress before ingest so the schedule gate can detect
+        # that this scope is currently being indexed by another run and skip it.
+        # The terminal write_ref_marker (status:'complete') overwrites this doc in place.
+        write_indexing_marker(es, host, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso)
         files_count, lines_count = index_repo(
             es, host, org, repo, repo_dir, commit_sha,
             on_progress=lambda f, l: reporter.update_counts(unit, f, l),
@@ -267,17 +275,43 @@ def run_config(
         click.echo(f"Error: invalid config: {e}", err=True)
         sys.exit(1)
 
-    entries = config.repos
     hosts = config.hosts
-    # Look up a repo's selectors when resolving each ref's `since` floor below.
-    cfg_by_repo = {(c.host, c.org, c.repo): c for c in entries}
-
     es = make_client(url, api_key, username, password)
     cache_root = None if ephemeral else resolve_cache_root(cache_dir)
 
+    # Schedule gate: determine which sources are due for indexing based on their configured
+    # schedule and the refs index's record of when they were last indexed. Sources with no
+    # schedule (or schedule "* * * * *") are always due; others are skipped until their next
+    # scheduled tick fires. A source actively being indexed by another run is also skipped
+    # (until RETRY_INTERVAL elapses, at which point it is assumed stuck and retried).
+    #
+    # Any source that has no schedule fields at all passes through unchanged (all due = True),
+    # so the gate is transparent for configs that don't use scheduling.
+    has_schedules = bool(config.schedules) or any(
+        sel.schedule is not None
+        for repo_cfg in config.repos
+        for sel in repo_cfg.selectors
+    )
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if has_schedules:
+        filtered_config, schedule_decisions = filter_config_by_schedule(es, config, now)
+    else:
+        filtered_config = config
+        schedule_decisions = []
+
+    entries = filtered_config.repos
+
     if dry_run:
-        dry_run_config(es, entries, cfg_by_repo, hosts, cache_root, ephemeral, force, prune)
+        # Look up a repo's selectors when resolving each ref's `since` floor below.
+        cfg_by_repo = {(c.host, c.org, c.repo): c for c in entries}
+        dry_run_config(
+            es, entries, cfg_by_repo, hosts, cache_root, ephemeral, force, prune,
+            schedule_decisions=schedule_decisions,
+        )
         return
+
+    # Look up a repo's selectors when resolving each ref's `since` floor below.
+    cfg_by_repo = {(c.host, c.org, c.repo): c for c in entries}
 
     reporter = make_reporter(quiet)
     failures = 0

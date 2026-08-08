@@ -29,7 +29,7 @@ Avoid `git_repo: *` without an org filter unless you genuinely need all orgs - i
 From the result rows:
 - **Distinct `git.repo` values** - the repos available to query.
 - **`git.ref_type`** - whether each repo has branches, tags, or both. Useful for knowing whether `ref-resolution` will find tags or needs to fall back to a branch.
-- **`status`** - a ref with status other than `ready` may have incomplete content.
+- **`status`** - `complete` means fully indexed; `indexing` means an in-progress snapshot (content may be incomplete — prefer `complete` refs).
 
 ## Example: expanding scope mid-conversation
 A question about Elasticsearch's query parsing leads into how Lucene's `QueryParser` works underneath:

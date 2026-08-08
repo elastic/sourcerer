@@ -190,13 +190,40 @@ sources:
 
 Indexing is idempotent - re-running only indexes refs that are new or have moved.
 
+### Scheduling (`schedules:` / `sources[i].schedule`)
+
+One `sourcerer.yml` can declare per-source schedules, replacing the old pattern of multiple
+config files each driven by their own cron job. Run `sourcerer index --config` on a **frequent
+cron** (e.g. every 5 minutes) and let the schedule config control the actual indexing cadence.
+
+**How the gate works**: on each invocation of `index --config`, before any ls-remote or clone
+work, the command queries `sourcerer-v2-refs` to see when each source was last fully indexed
+(`status: complete`) and whether any ref in its scope is actively being indexed (`status:
+indexing`). Only sources whose schedule has fired since their last indexed run proceed to the
+expensive pipeline. Sources where another run is actively indexing are skipped.
+
+- **Schedule syntax**: a 5-field cron expression (e.g. `"0 */3 * * *"` = every 3 hours) or a
+  duration (`"3h"`, `"1d"` — same syntax as `retain.age`).
+- **Precedence**: `sources[i].schedule` > most-specific `schedules[i]` rule > default (always due).
+- **In-progress guard**: if a ref in scope has `status: indexing` with `indexing_started_at`
+  newer than 6 hours ago, the whole source is skipped. After 6 hours (stuck-retry interval),
+  the source is treated as due regardless.
+- **Two-phase marker**: before content ingest, a ref doc is written with `status: indexing` and
+  `indexing_started_at`. On successful completion, it is overwritten with `status: complete` and
+  `indexed_at`. A killed/crashed run leaves behind an `indexing` marker that the gate detects;
+  after 6 hours it retries automatically.
+- **No-schedule fallback**: a config with no `schedules` section and no `sources[i].schedule`
+  fields behaves identically to before (all sources always due — the gate is transparent).
+- **`--dry-run`**: when schedules are configured, `--dry-run` prints a schedule gate report
+  (which sources are due / not-due / in-progress and why) before the normal ref-level preview.
+
 ### Clone cache
 
 `index` keeps each repo cloned under a persistent cache directory and refreshes it with
-`git fetch` on later runs, rather than re-cloning every time. A regularly-scheduled run (e.g.
-nightly) then transfers only the new commits since the last run instead of a full clone of a
-large repo's history. Combined with the cheap pre-clone skip (a repo with no moved refs isn't
-even fetched) and immutable-tag dedup, repeated runs stay fast.
+`git fetch` on later runs, rather than re-cloning every time. A frequently-scheduled run (e.g.
+every 5 minutes via the scheduling feature above) then transfers only the new commits since the
+last run instead of a full clone of a large repo's history. Combined with the cheap pre-clone
+skip (a repo with no moved refs isn't even fetched) and immutable-tag dedup, repeated runs stay fast.
 
 - **Blobless clone**: clones use `git clone --filter=blob:none` - every commit, tree, and ref is
   present (so any branch/tag/pinned commit stays reachable and checkoutable), but file contents

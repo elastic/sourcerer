@@ -16,13 +16,12 @@ performs its `setup`, `index`, and `prune` commands.
 |`hosts[i].urls.file`                   |String               |Yes     ||
 |`hosts[i].urls.line`                   |String               |Yes     ||
 |`hosts[i].urls.line_range`             |String               |Yes     ||
-|`schedules`                            |Array                |No      |NOT IMPLEMENTED|
-|`schedules[i].git`                     |Object               |No      |NOT IMPLEMENTED|
-|`schedules[i].git.host`                |String, Array[String]|No      |NOT IMPLEMENTED|
-|`schedules[i].git.org`                 |String, Array[String]|No      |NOT IMPLEMENTED|
-|`schedules[i].git.repo`                |String, Array[String]|No      |NOT IMPLEMENTED|
-|`schedules[i].git.commit`              |String, Array[String]|No      |NOT IMPLEMENTED|
-|`schedules[i].schedule`                |String, Array[String]|No      |NOT IMPLEMENTED|
+|`schedules`                            |Array                |No      ||
+|`schedules[i].git`                     |Object               |No      ||
+|`schedules[i].git.host`                |String               |No      ||
+|`schedules[i].git.org`                 |String               |No      ||
+|`schedules[i].git.repo`                |String               |No      ||
+|`schedules[i].schedule`                |String               |Yes     ||
 |`sources`                              |Array[Object]        |No      ||
 |`sources[i].git`                       |Object               |Yes     ||
 |`sources[i].git.host`                  |String               |Yes     ||
@@ -45,7 +44,7 @@ performs its `setup`, `index`, and `prune` commands.
 |`sources[i].retain.version.builds`     |Integer              |No      ||
 |`sources[i].retain.version.prereleases`|Integer              |No      ||
 |`sources[i].retain.prerelease`         |String               |No      ||
-|`sources[i].schedule`                  |String               |No      |NOT IMPLEMENTED|
+|`sources[i].schedule`                  |String               |No      ||
 |`sources[i].index.level`               |String               |No      |NOT IMPLEMENTED|
 |`sources[i].index.suffix`              |String               |No      |NOT IMPLEMENTED|
 
@@ -188,27 +187,76 @@ Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#
 
 ### `schedules`
 
-NOT IMPLEMENTED
+Defines coarse, scope-based default schedules. A schedule rule specifies an
+optional git scope (`host`/`org`/`repo`) and a schedule expression. The most
+specific matching rule wins; if no rule matches a source, the source is always
+due (equivalent to `"* * * * *"`).
+
+Sources without any `schedule` field and configs without a `schedules` section
+behave identically to before: every source is treated as always due (the gate is
+transparent).
+
+Intended use: run `sourcerer index --config` on a frequent cron (e.g. every 5 minutes)
+and let the schedules control the actual indexing cadence. Each run only indexes
+sources whose schedule has fired since they were last indexed.
+
+- Required: No
+- Default: `null` (omitted)
+- Type: Array[Object]
 
 ### `schedules[i].git`
 
-NOT IMPLEMENTED
+Optional scope filter for this schedule rule. A rule with no `git` (or an empty
+`git` block) matches all sources. A rule with `git.host` only matches sources
+with that host; adding `git.org` narrows to that org; adding `git.repo` narrows
+further to that repo. `git.ref_type` is not supported at the `schedules` level.
+Use `sources[i].schedule` to schedule by ref type.
+
+- Required: No
+- Default: `null` (matches all sources)
+- Type: Object
 
 ### `schedules[i].git.host`
 
-NOT IMPLEMENTED
+Match sources with this `git.host`. When omitted, the rule matches sources on any host.
+
+- Required: No
+- Default: `null` (matches any host)
+- Type: String
+- Validation:
+  - Must be a single concrete host id (no wildcards, no arrays)
 
 ### `schedules[i].git.org`
 
-NOT IMPLEMENTED
+Match sources with this `git.org`. When omitted, the rule matches sources in any org.
+
+- Required: No
+- Default: `null` (matches any org)
+- Type: String
+- Validation:
+  - Must be a single concrete value (no wildcards, no arrays)
 
 ### `schedules[i].git.repo`
 
-NOT IMPLEMENTED
+Match sources with this `git.repo`. When omitted, the rule matches sources in any repo.
 
-### `schedules[i].git.commit`
+- Required: No
+- Default: `null` (matches any repo)
+- Type: String
+- Validation:
+  - Must be a single concrete value (no wildcards, no arrays)
 
-NOT IMPLEMENTED
+### `schedules[i].schedule`
+
+The schedule expression for this rule. Accepts:
+
+- **Cron**: a 5-field cron expression (e.g. `"0 */3 * * *"` = every 3 hours, `"0 2 * * *"` = daily at 2am).
+- **Duration**: a duration string in the same syntax as `retain.age` / `since.age` (e.g. `"3h"`, `"1d"`). Due when `now - last_indexed_at >= duration`.
+
+- Required: Yes (if `schedules[i]` exists)
+- Type: String
+- Validation:
+  - Must be a valid 5-field cron expression (e.g. `"0 * * * *"`) or a duration string (e.g. `"3h"`, `"1d"`, `"30m"`)
 
 ### `sources`
 
@@ -453,19 +501,34 @@ Example: `"v1.2.3-rc1"` qualifies for pruning if `"v1.2.3"` exists and
 
 ### `sources[i].schedule`
 
-NOT IMPLEMENTED
+Configures the indexing schedule for refs that match `sources[i].match`.
+Overrides anything in `schedules` that might have otherwise applied to this source.
 
-Configures the indexing schedule for refs that match `sources[i].match`,
-overriding anything in `schedules` that might have otherwise applied to those refs.
+Schedule precedence (highest to lowest):
 
-When omitted, refs that match `sources[i].match` will always qualify for
-indexing (if they don't also qualify for pruning).
+1. `sources[i].schedule` (per-source override)
+2. Most specific matching `schedules[i]` rule (host+org+repo > host+org > host > catch-all)
+3. Default: always due (`"* * * * *"`)
+
+When omitted and no `schedules` rule matches, the source is always due for
+indexing (if it doesn't also qualify for pruning).
+
+Accepts a 5-field cron expression or a duration string (see `schedules[i].schedule`).
+
+The "due" check compares against the **most recently completed** indexing run for
+this source's scope `(host, org, repo, ref_type)` as recorded in `sourcerer-v2-refs`.
+A source is **not due** if another run has `status: indexing` for a ref in scope
+with `indexing_started_at` newer than 6 hours ago. This prevents redundant
+parallel work when the same config is invoked on a tight cron schedule.
+
+If a run was interrupted and left a ref with `status: indexing` older than
+6 hours, the source is retried automatically on the next invocation.
 
 - Required: No
 - Type: String
-- Default: `null` (omitted)
+- Default: `null` (omitted, source inherits from `schedules` or is always due)
 - Validation:
-  - Must use cron syntax (e.g. `"0 * * * *"`)
+  - Must be a valid 5-field cron expression (e.g. `"0 * * * *"`) or a duration (e.g. `"3h"`)
 
 ### `sources[i].index`
 
@@ -547,16 +610,13 @@ hosts:
     line: "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number}"
     line_range: "https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number_start}-L{line.number_end}"
 
-# NOT IMPLEMENTED
-# # Configure when to index the sources during `sourcerer index`
-# # This is separate from "sources" because most schedules will be coarsely defined, while sources are much more specific (refs).
-# # schedules: # optional, defaults to [{git: {}, schedule: "* * * * *"}]
-# - git: {} # default schedule for everything
-#   schedule: "* * * * *"
-# - git: { host: "github", org: "elastic" }
-#   schedule: "0 * * * *"
-# - git: { host: "github", org: "elastic", repo: "elasticsearch" }
-#   schedule: "0 0 * * *"
+# Coarse schedules by scope. The most specific matching rule wins;
+# if no rule matches a source, it is always due.
+schedules:
+- git: { host: "github", org: "elastic" }
+  schedule: "0 */3 * * *"   # elastic org: every 3 hours
+- git: { host: "github", org: "elastic", repo: "docs-content" }
+  schedule: "0 2 * * *"     # docs repo: nightly at 2am (more specific -> wins)
 
 sources:
 - git: { host: "github", org: "elastic", repo: "elasticsearch", ref_type: "tag" }
@@ -564,5 +624,5 @@ sources:
   since.ref: "v1.0.0"
   retain.version: { majors: 2, patches: 1 }
   retain.prerelease: superseded
-  # schedule: "0 0 * * *" # override "schedules" (IGNORE: this is a future config field) # NOT IMPLEMENTED
+  schedule: "0 0 * * *"   # per-source override: nightly (overrides the 3h schedules rule above)
 ```

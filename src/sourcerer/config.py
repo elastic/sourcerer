@@ -48,9 +48,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Union
 
 # Third-party packages
 import yaml
+from croniter import croniter
 
 # App packages
 from .hosts import Host, resolve_hosts, validate_host_id
@@ -64,6 +66,108 @@ _PLURAL_TO_LEVEL = {"majors": "major", "minors": "minor", "patches": "patch", "b
 # git's own "short hash" convention (the shortest form `git rev-parse --short` will produce), and
 # rejecting anything shorter bounds how many distinct commits a single prefix could collide with.
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+
+@dataclass(frozen=True)
+class Schedule:
+    """Parsed schedule value: either a duration interval or a cron expression.
+
+    `kind` is "duration" or "cron". `value` is a timedelta (duration) or a cron string (cron).
+
+    `due(last, now)` returns True if the schedule has fired since `last`:
+      - never indexed (last is None) -> always due.
+      - duration: due if now - last >= value.
+      - cron: due if the first cron tick after `last` is at or before `now`.
+    """
+    kind: str          # "duration" | "cron"
+    value: Union[timedelta, str]  # timedelta for duration, cron expr string for cron
+
+    def due(self, last: datetime | None, now: datetime) -> bool:
+        if last is None:
+            return True
+        if self.kind == "duration":
+            return (now - last) >= self.value  # type: ignore[operator]
+        # cron: has the next scheduled tick after `last` already passed?
+        # croniter is exclusive on the start -- get_next returns the first tick strictly after last.
+        try:
+            nxt = croniter(self.value, last).get_next(datetime)
+            # get_next returns a naive datetime; make it timezone-aware to match `now`.
+            if nxt.tzinfo is None and now.tzinfo is not None:
+                nxt = nxt.replace(tzinfo=now.tzinfo)
+            return nxt <= now
+        except Exception:
+            return True  # parse failure at runtime -> treat as always due (fail open)
+
+    @staticmethod
+    def always() -> "Schedule":
+        """The default 'always due' schedule: fires every minute (cron '* * * * *')."""
+        return Schedule(kind="cron", value="* * * * *")
+
+
+def parse_schedule(text) -> "Schedule":
+    """Parse a schedule string (cron or duration) into a Schedule.
+
+    Accepts a 5-field cron expression (e.g. '0 */3 * * *') or a duration string in the same
+    syntax as `retain.age` / `since.age` (e.g. '3h', '1d', '30m'). Raises ValueError if the
+    text is neither.
+    """
+    s = str(text).strip()
+    if _DURATION_RE.match(s):
+        return Schedule(kind="duration", value=parse_duration(s))
+    if croniter.is_valid(s):
+        return Schedule(kind="cron", value=s)
+    raise ValueError(
+        f"invalid schedule {s!r}: expected a cron expression (e.g. '0 */3 * * *') "
+        f"or a duration (e.g. '3h', '1d', '30m')"
+    )
+
+
+@dataclass
+class ScheduleRule:
+    """A top-level `schedules[i]` entry: an optional git-scope filter plus a parsed schedule.
+
+    A rule with all-None scope fields matches every source (the default-schedule fallback).
+    Matching uses substring inclusion: a non-None field must equal the source's corresponding
+    field. More specific rules (more non-None fields) take precedence over broader ones.
+    """
+    host: str | None        # if set, only matches sources with this git.host
+    org: str | None         # if set, only matches sources with this git.org
+    repo: str | None        # if set, only matches sources with this git.repo
+    schedule: Schedule
+
+    def specificity(self) -> int:
+        """Higher is more specific. Used to pick the winning rule when multiple rules match."""
+        return sum(1 for v in (self.host, self.org, self.repo) if v is not None)
+
+    def matches(self, host: str, org: str, repo: str) -> bool:
+        if self.host is not None and self.host != host:
+            return False
+        if self.org is not None and self.org != org:
+            return False
+        if self.repo is not None and self.repo != repo:
+            return False
+        return True
+
+
+def resolve_schedule(
+    host: str, org: str, repo: str, selector: "Selector", schedules: list[ScheduleRule]
+) -> Schedule:
+    """Pick the effective Schedule for a source selector:
+      1. sources[i].schedule wins (per-source override).
+      2. Most-specific matching schedules[i] rule wins (highest specificity = most non-None fields).
+      3. Default: Schedule.always() (every minute, i.e. always due when invoked).
+    """
+    if selector.schedule is not None:
+        return selector.schedule
+    best: Schedule | None = None
+    best_spec = -1
+    for rule in schedules:
+        if rule.matches(host, org, repo):
+            s = rule.specificity()
+            if s > best_spec:
+                best_spec = s
+                best = rule.schedule
+    return best if best is not None else Schedule.always()
 
 
 def parse_duration(text) -> timedelta:
@@ -110,7 +214,8 @@ class Selector:
     compiled: list[CompiledPattern]
     since: Since | None
     retain: Retain | None
-    levels: tuple[str, ...] = ()   # numeric levels shared by the versioned match patterns
+    levels: tuple[str, ...] = ()           # numeric levels shared by the versioned match patterns
+    schedule: Schedule | None = None       # per-source schedule override (sources[i].schedule)
 
     def matches(self, ref_type: str, ref: str) -> Version | None:
         if self.ref_type != ref_type:
@@ -304,9 +409,60 @@ def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
         if retain.is_empty():
             retain = None
 
+    schedule = None
+    if raw.get("schedule") is not None:
+        try:
+            schedule = parse_schedule(raw["schedule"])
+        except ValueError as e:
+            raise ValueError(f"{ctx} schedule: {e}") from e
+
     selector = Selector(ref_type=ref_type, raw_patterns=patterns, compiled=compiled,
-                        since=since, retain=retain, levels=levels)
+                        since=since, retain=retain, levels=levels, schedule=schedule)
     return host, org, repo, selector
+
+
+def _parse_schedule_rule(raw: dict, ctx: str) -> ScheduleRule:
+    """Parse one `schedules[i]` entry into a ScheduleRule.
+
+    A schedule rule has an optional `git` scope (host/org/repo, each a single string or omitted)
+    and a required `schedule` (cron or duration string).
+    """
+    unknown = set(raw) - {"git", "schedule"}
+    if unknown:
+        raise ValueError(f"{ctx}: unknown keys {sorted(unknown)}")
+    if "schedule" not in raw or raw["schedule"] is None:
+        raise ValueError(f"{ctx}: 'schedule' is required")
+    try:
+        schedule = parse_schedule(raw["schedule"])
+    except ValueError as e:
+        raise ValueError(f"{ctx} schedule: {e}") from e
+
+    host = org = repo = None
+    git = raw.get("git")
+    if git is not None:
+        if not isinstance(git, dict):
+            raise ValueError(f"{ctx} git: must be a mapping")
+        unknown_git = set(git) - {"host", "org", "repo"}
+        if unknown_git:
+            raise ValueError(f"{ctx} git: unknown keys {sorted(unknown_git)} "
+                             f"(schedules git scope supports host, org, repo only)")
+        if git.get("host") is not None:
+            h = git["host"]
+            if not isinstance(h, str):
+                raise ValueError(f"{ctx} git.host: must be a string")
+            host = h
+        if git.get("org") is not None:
+            o = git["org"]
+            if not isinstance(o, str):
+                raise ValueError(f"{ctx} git.org: must be a string")
+            org = o
+        if git.get("repo") is not None:
+            r = git["repo"]
+            if not isinstance(r, str):
+                raise ValueError(f"{ctx} git.repo: must be a string")
+            repo = r
+
+    return ScheduleRule(host=host, org=org, repo=repo, schedule=schedule)
 
 
 def _deep_merge(dst: dict, src: dict) -> None:
@@ -355,9 +511,11 @@ def _expand_dotted_keys(obj):
 @dataclass
 class Config:
     """A parsed sourcerer.yml: the resolved git-host registry (built-in defaults merged with the
-    file's `hosts:` overrides) and the repos/selectors the `sources:` section selects."""
+    file's `hosts:` overrides), the repos/selectors the `sources:` section selects, and the
+    top-level schedule rules from `schedules:`."""
     hosts: dict[str, Host]
     repos: list[RepoConfig]
+    schedules: list[ScheduleRule] = field(default_factory=list)
 
 
 def load_config(config_path: str) -> Config:
@@ -406,4 +564,14 @@ def parse_config(data) -> Config:
             grouped[key] = RepoConfig(host=host, org=org, repo=repo, selectors=[])
         grouped[key].selectors.append(selector)
 
-    return Config(hosts=hosts, repos=list(grouped.values()))
+    raw_schedules = data.get("schedules")
+    if raw_schedules is not None and not isinstance(raw_schedules, list):
+        raise ValueError("config: 'schedules' must be a list")
+    schedule_rules: list[ScheduleRule] = []
+    for i, entry in enumerate(raw_schedules or []):
+        ctx = f"schedules[{i}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{ctx} must be a mapping")
+        schedule_rules.append(_parse_schedule_rule(entry, ctx))
+
+    return Config(hosts=hosts, repos=list(grouped.values()), schedules=schedule_rules)

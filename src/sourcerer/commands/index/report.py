@@ -25,6 +25,7 @@ from ...utils import ES_ERRORS
 from .git import _rev_info, prepared_repo
 from .markers import build_ref_id, commit_fully_indexed, should_index
 from .runtime import _tuning
+from .schedule import ScheduleDecision
 from .selection import _effective_since_floor, _resolve_entry
 
 
@@ -165,6 +166,28 @@ def _print_dry_run_repo(result: dict, prune: bool) -> tuple[int, int, int]:
     return (index_count, markers, commits)
 
 
+def _print_schedule_report(schedule_decisions: list[ScheduleDecision]) -> None:
+    """Print a schedule gate report showing which sources are due / skipped and why."""
+    if not schedule_decisions:
+        return
+    click.echo("Schedule gate:\n")
+    for d in schedule_decisions:
+        sched_desc = (
+            d.schedule.value if d.schedule.kind == "cron"
+            else str(d.schedule.value)
+        )
+        ref_type = d.selector.ref_type
+        patterns = ", ".join(d.selector.raw_patterns[:3])
+        if len(d.selector.raw_patterns) > 3:
+            patterns += f" (+{len(d.selector.raw_patterns) - 3} more)"
+        label = "  due   " if d.due else "  skip  "
+        click.echo(
+            f"{label} {d.repo.host}/{d.repo.org}/{d.repo.repo} "
+            f"[{ref_type}: {patterns}]  schedule={sched_desc!r}  {d.reason}"
+        )
+    click.echo("")
+
+
 def dry_run_config(
     es: Elasticsearch,
     entries: list[RepoConfig],
@@ -174,15 +197,24 @@ def dry_run_config(
     ephemeral: bool,
     force: bool,
     prune: bool,
+    schedule_decisions: list[ScheduleDecision] | None = None,
 ) -> None:
     """Preview an `index [--prune]` run without writing anything to Elasticsearch. Resolves the
     plan (ls-remote), then per repo clones/fetches its cached clone to resolve real commits +
     dates and classify each ref, and -- with `prune` -- plans the post-index prune. Prints one
     combined report (what would be indexed, then what would be pruned) and exits non-zero if any
-    repo could not be previewed."""
+    repo could not be previewed.
+
+    When `schedule_decisions` is provided (from the schedule gate), a schedule summary is printed
+    first, then the full plan for the due sources follows as normal.
+    """
     now = datetime.datetime.now(datetime.timezone.utc)
     # refs is tiny; refresh once so the prune preview sees the latest existing markers.
     es.indices.refresh(index=REFS_INDEX, ignore_unavailable=True)
+
+    click.echo("DRY RUN - no changes will be made to Elasticsearch.\n")
+    if schedule_decisions:
+        _print_schedule_report(schedule_decisions)
 
     # Phase 1: resolve the plan, identical to the real run (see command.run_config).
     units: list[Unit] = []
@@ -194,9 +226,8 @@ def dry_run_config(
     for unit in units:
         groups.setdefault((unit.host, unit.org, unit.repo), []).append(unit)
 
-    click.echo("DRY RUN - no changes will be made to Elasticsearch.\n")
     if not groups:
-        click.echo("Nothing selected by the config.")
+        click.echo("Nothing selected by the config (all sources not due or filtered).")
         return
 
     failures = 0

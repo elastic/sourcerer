@@ -74,6 +74,9 @@
         },
         "indexed_at": {
           "type": "date"
+        },
+        "indexing_started_at": {
+          "type": "date"
         }
       }
     }

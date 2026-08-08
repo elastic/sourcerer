@@ -134,6 +134,45 @@ def should_index(es: Elasticsearch, host: str, org: str, repo: str, ref_type: st
     return not content_present(es, host, org, repo, commit_sha)
 
 
+def write_indexing_marker(
+    es: Elasticsearch,
+    host: str,
+    org: str,
+    repo: str,
+    ref_type: str,
+    ref: str,
+    commit_sha: str,
+    commit_date_iso: str | None,
+) -> None:
+    """Write a status:'indexing' marker for a ref that is about to be ingested.
+
+    Uses the same build_ref_id-keyed doc as write_ref_marker, so the terminal write_ref_marker
+    call (status:'complete') will overwrite this marker in place once ingest completes.
+
+    This marker allows the schedule gate to detect that another run is currently indexing this
+    source's scope (host/org/repo/ref_type) and skip it, preventing redundant parallel work.
+    If the run dies before calling write_ref_marker, the indexing marker stays behind; the gate
+    retries the source after RETRY_INTERVAL (6h by default).
+    """
+    ref_id = build_ref_id(host, org, repo, ref_type, ref, commit_sha)
+    doc = {
+        "git": {
+            "host": host,
+            "org": org,
+            "repo": repo,
+            "ref": ref,
+            "ref_type": ref_type,
+            "commit": commit_sha,
+            "commit_date": commit_date_iso,
+        },
+        "status": "indexing",
+        "indexing_started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "files_count": 0,
+        "lines_count": 0,
+    }
+    es.index(index=REFS_INDEX, id=ref_id, document=doc)
+
+
 def write_ref_marker(
     es: Elasticsearch,
     host: str,
