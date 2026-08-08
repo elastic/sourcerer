@@ -46,6 +46,8 @@ performs its `setup`, `index`, and `prune` commands.
 |`sources[i].retain.version.prereleases`|Integer              |No      ||
 |`sources[i].retain.prerelease`         |String               |No      ||
 |`sources[i].schedule`                  |String               |No      |NOT IMPLEMENTED|
+|`sources[i].index.level`               |String               |No      |NOT IMPLEMENTED|
+|`sources[i].index.suffix`              |String               |No      |NOT IMPLEMENTED|
 
 Notes:
 - Fields can be expressed either in nested format or flat dotted format.
@@ -464,6 +466,68 @@ indexing (if they don't also qualify for pruning).
 - Default: `null` (omitted)
 - Validation:
   - Must use cron syntax (e.g. `"0 * * * *"`)
+
+### `sources[i].index`
+
+NOT IMPLEMENTED
+
+Configures the name of the `files` and `lines` indices that this source will be
+indexed to.
+
+- Required: No
+- Type: Object
+- Default: `null` (omitted)
+
+### `sources[i].index.level`
+
+NOT IMPLEMENTED
+
+Defines the namespacing level for the names of the `files` and `lines` indices.
+
+This provides finer control over the size of indices and shards. An org with
+many small repos can have its files and lines collocated in a single org-level
+index for each to keep the shard count low. A repo with large commits can have
+its files and lines separated into commit-level indices to control shard size.
+
+Values of `level` and their effects on index names:
+
+|`level`   |Index name                                                   |
+|----------|-------------------------------------------------------------|
+|`"host"`  |`sourcerer-v2-*~{git.host}`                                  |
+|`"org"`   |`sourcerer-v2-*~{git.host}~{git.org}`                        |
+|`"repo"`  |`sourcerer-v2-*~{git.host}~{git.org}~{git.repo}`             |
+|`"commit"`|`sourcerer-v2-*~{git.host}~{git.org}~{git.repo}~{git.commit}`|
+
+- Required: No
+- Type: String
+- Default: `"repo"`
+- Validation:
+  - Must be one of: `"host"`, `"org"`, `"repo"`, or `"commit"`
+
+### `sources[i].index.suffix`
+
+NOT IMPLEMENTED
+
+If not `null`, this suffix is appended to the end of the index name separated by
+a caret (`^`).
+
+Example index naming pattern where `sources[i].index.level` is `"repo"` and
+`sources[i].index.suffix` is `"@deploy"`:
+
+`sourcerer-v2-*~{git.host}~{git.org}~{git.repo}^@deploy`
+
+For instance:
+
+`sourcerer-v2-files~github~elastic~kibana^@deploy`
+`sourcerer-v2-lines~github~elastic~kibana^@deploy`
+
+- Required: No
+- Type: String
+- Default: Omitted (`null`)
+- Validation:
+  - Cannot contain these characters: `~`, `^`, `\`, `/`, `*`, `?`, `"`, `<`, `>`, `|`, `:`
+  - Cannot contain uppercase characters or whitespace characters
+  - An empty string (`""`) is treated as omitted (`null`)
 
 ## Example
 
