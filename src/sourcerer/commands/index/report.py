@@ -23,7 +23,10 @@ from ...progress import Unit
 from ...queries import fetch_markers
 from ...utils import ES_ERRORS
 from .git import _rev_info, prepared_repo
-from .markers import build_ref_id, commit_fully_indexed, should_index
+from .markers import (
+    build_ref_id, commit_fully_indexed, commits_with_content,
+    markers_status_by_id, _needs_index,
+)
 from .runtime import _tuning
 from .schedule import ScheduleDecision
 from .selection import _effective_since_floor, _resolve_entry
@@ -56,11 +59,11 @@ def _dry_run_repo(
         rows = result["rows"]
         synth: list[Marker] = []
 
-        # Pass 1: resolve each ref and classify the already-decided cases (unresolvable,
-        # already-indexed, below a `since` floor). Branches resolve to their fetched
-        # origin tip -- the same commit checkout_branch would land on -- not a stale local
-        # branch; tags dereference to their commit (matching write_ref_marker).
-        pending: list[tuple[Unit, str, str, datetime.datetime | None]] = []
+        # Pass 1: resolve each ref's commit SHA and date from the local clone.
+        # Branches resolve to their fetched origin tip -- the same commit checkout_branch would
+        # land on -- not a stale local branch; tags dereference to their commit (matching
+        # write_ref_marker).
+        resolved: list[tuple[Unit, str, str, datetime.datetime | None]] = []  # (unit, ref_type, sha, cd)
         for unit in group:
             ref_type = unit.kind
             rev = f"origin/{unit.ref}" if ref_type == "branch" else unit.ref
@@ -69,7 +72,33 @@ def _dry_run_repo(
             if not sha:
                 rows.append((unit, "error", "could not resolve ref", None, None))
                 continue
-            if not force and not should_index(es, host, org, repo, ref_type, unit.ref, sha):
+            resolved.append((unit, ref_type, sha, cd))
+
+        # Pass 2: batched ES skip check -- one markers lookup + one content-presence check for
+        # the whole group instead of per-ref should_index calls. On ES error, fall back to
+        # treating every ref as needing indexing (the post-clone guard remains authoritative).
+        status_map: dict[str, dict] = {}
+        content_commits: set[str] = set()
+        if not force and resolved:
+            ref_ids = [
+                build_ref_id(host, org, repo, ref_type, unit.ref or "", sha)
+                for unit, ref_type, sha, _ in resolved
+            ]
+            try:
+                status_map = markers_status_by_id(es, ref_ids)
+                complete_commits = {
+                    m["commit"] for m in status_map.values()
+                    if m.get("status") == "complete" and m.get("commit")
+                }
+                content_commits = commits_with_content(es, host, org, repo, complete_commits)
+            except ES_ERRORS:
+                pass  # fall through: all refs treated as needing indexing
+
+        # Pass 3: classify resolved refs.
+        pending: list[tuple[Unit, str, str, datetime.datetime | None]] = []
+        for unit, ref_type, sha, cd in resolved:
+            ref_id = build_ref_id(host, org, repo, ref_type, unit.ref or "", sha)
+            if not force and not _needs_index(ref_id, sha, status_map, content_commits):
                 rows.append((unit, "up-to-date", "already indexed", sha, cd))
                 continue
             floor = _effective_since_floor(cfg, repo_dir, ref_type, unit.ref, now)

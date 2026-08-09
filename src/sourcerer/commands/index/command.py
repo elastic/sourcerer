@@ -42,7 +42,8 @@ from .git import (
     _rev_info,
 )
 from .markers import (
-    commit_fully_indexed, count_commit_docs, pre_clone_skip, should_index,
+    build_ref_id, commit_fully_indexed, commits_with_content, count_commit_docs,
+    markers_status_by_id, _needs_index, pre_clone_skip, should_index,
     write_indexing_marker, write_ref_marker,
 )
 from .report import dry_run_config
@@ -364,28 +365,100 @@ def run_config(
                 return
             (host, org, repo), group = item
             clone_url = hosts[host].clone_url(org, repo)
-            # 2a. Cheap per-ref skip for the whole group (no clone yet). A transient ES error
-            # here fails just that ref (the skip check hits the cluster) and the batch goes on.
-            pending: list[tuple[Unit, str | None, str | None, str | None]] = []
+            # 2a. Cheap pre-clone skip for the whole group (no clone yet).
+            #
+            # Batched approach: for branch/tag units that carry a remote_sha from Phase 1's
+            # ls-remote, compute all their ref_ids up front and fetch marker status in one ES
+            # query per repo (instead of one per ref). Pinned-commit units have no remote_sha
+            # and fall back to the per-ref pre_clone_skip path unchanged.
+            #
+            # On an ES error for the batched lookup, fall back to treating the whole group as
+            # pending (clone + authoritative post-clone guard) rather than counting each ref as
+            # a failure -- the post-clone should_index remains the correctness backstop.
             for unit in group:
-                if _aborted.is_set():
-                    return
                 reporter.start(unit)
-                branch = unit.ref if unit.kind == "branch" else None
-                tag = unit.ref if unit.kind == "tag" else None
-                commit = unit.ref if unit.kind == "commit" else None
-                try:
-                    skip, ref_for_id, _ = pre_clone_skip(es, host, org, repo, branch, tag, commit, clone_url, force)
-                except ES_ERRORS as e:
-                    with failures_lock:
-                        failures += 1
-                    reporter.finish(unit, "error", detail=str(e))
-                    continue
-                if skip:
-                    unit.ref = ref_for_id
-                    reporter.finish(unit, "skipped")
-                else:
-                    pending.append((unit, branch, tag, commit))
+
+            if force:
+                # --force bypasses all pre-clone checks; everything is pending.
+                pending: list[tuple[Unit, str | None, str | None, str | None]] = []
+                for unit in group:
+                    if _aborted.is_set():
+                        return
+                    pending.append((
+                        unit,
+                        unit.ref if unit.kind == "branch" else None,
+                        unit.ref if unit.kind == "tag" else None,
+                        unit.ref if unit.kind == "commit" else None,
+                    ))
+            else:
+                # Split into units we can check cheaply via the batched path (branch/tag with a
+                # Phase-1 remote_sha) and units that need per-ref logic (commit selectors or
+                # anything without a pre-resolved SHA).
+                batchable: list[tuple[Unit, str]] = []   # (unit, remote_sha)
+                fallback: list[Unit] = []
+                for unit in group:
+                    if unit.remote_sha is not None and unit.kind in ("branch", "tag"):
+                        batchable.append((unit, unit.remote_sha))
+                    else:
+                        fallback.append(unit)
+
+                # Batch ES lookup for batchable units.
+                status_map: dict[str, dict] = {}
+                content_commits: set[str] = set()
+                batch_error: Exception | None = None
+                if batchable:
+                    ref_ids = [
+                        build_ref_id(host, org, repo, unit.kind, unit.ref or "", sha)
+                        for unit, sha in batchable
+                    ]
+                    try:
+                        status_map = markers_status_by_id(es, ref_ids)
+                        # For the complete markers, check whether their content is still present.
+                        complete_commits = {
+                            m["commit"] for m in status_map.values()
+                            if m.get("status") == "complete" and m.get("commit")
+                        }
+                        content_commits = commits_with_content(es, host, org, repo, complete_commits)
+                    except ES_ERRORS as e:
+                        batch_error = e
+
+                pending = []
+                for unit, sha in batchable:
+                    if _aborted.is_set():
+                        return
+                    branch = unit.ref if unit.kind == "branch" else None
+                    tag = unit.ref if unit.kind == "tag" else None
+                    if batch_error is not None:
+                        # ES error -- treat as pending; post-clone guard is authoritative.
+                        pending.append((unit, branch, tag, None))
+                        continue
+                    ref_id = build_ref_id(host, org, repo, unit.kind, unit.ref or "", sha)
+                    if _needs_index(ref_id, sha, status_map, content_commits):
+                        pending.append((unit, branch, tag, None))
+                    else:
+                        reporter.finish(unit, "skipped")
+
+                # Per-ref fallback for commit selectors and any unit without a remote_sha.
+                for unit in fallback:
+                    if _aborted.is_set():
+                        return
+                    branch = unit.ref if unit.kind == "branch" else None
+                    tag = unit.ref if unit.kind == "tag" else None
+                    commit = unit.ref if unit.kind == "commit" else None
+                    try:
+                        skip, ref_for_id, _ = pre_clone_skip(
+                            es, host, org, repo, branch, tag, commit, clone_url, force
+                        )
+                    except ES_ERRORS as e:
+                        with failures_lock:
+                            failures += 1
+                        reporter.finish(unit, "error", detail=str(e))
+                        continue
+                    if skip:
+                        unit.ref = ref_for_id
+                        reporter.finish(unit, "skipped")
+                    else:
+                        pending.append((unit, branch, tag, commit))
 
             if not pending:
                 return  # whole repo already indexed -> no clone at all

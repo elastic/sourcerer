@@ -56,6 +56,12 @@ class Unit:
     detail: str | None = None
     started_at: float | None = None
     finished_at: float | None = None
+    # SHA resolved by Phase 1 ls-remote (branch/tag only; None for commit selectors and the
+    # single-repo CLI path). When set, process_group reuses it directly and skips a second
+    # per-ref ls-remote in pre_clone_skip. May be slightly stale for fast-moving branches, but
+    # the post-clone should_index guard is authoritative -- a stale SHA can only cause a
+    # redundant clone, never an incorrect skip.
+    remote_sha: str | None = None
 
     @property
     def label(self) -> str:

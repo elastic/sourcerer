@@ -16,7 +16,7 @@ from ...config import Config, RepoConfig, load_config
 from ...hosts import Host
 from ...planner import Marker, plan_repo
 from ...progress import Unit
-from .git import _commit_date_of, list_remote_ref_names
+from .git import _commit_date_of, list_remote_ref_names, list_remote_refs
 
 
 def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
@@ -27,7 +27,11 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
     no units so the run continues with the repos that did resolve. `host` supplies the clone
     URL and is carried on every emitted Unit."""
     clone_url = host.clone_url(cfg.org, cfg.repo)
-    fetched: dict[str, list[str] | None] = {}  # kind -> names (None = ls-remote failed)
+    # Maps ref kind ("branch"/"tag") -> {short_name: commit_sha} or None on ls-remote failure.
+    # Using list_remote_refs (vs. list_remote_ref_names) so we capture each ref's commit SHA
+    # here in Phase 1 and can stash it on the Unit, avoiding a second per-ref ls-remote in
+    # Phase 2's pre-clone skip check.
+    fetched: dict[str, dict[str, str] | None] = {}
     seen: set[tuple[str, str]] = set()
     units: list[Unit] = []
     for sel in cfg.selectors:
@@ -43,14 +47,12 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
                 units.append(Unit(host=cfg.host, org=cfg.org, repo=cfg.repo, ref=prefix, kind=rt))
             continue
         if rt not in fetched:
-            fetched[rt] = list_remote_ref_names(
-                clone_url, "heads" if rt == "branch" else "tags"
-            )
-        names = fetched[rt]
-        if names is None:
+            fetched[rt] = list_remote_refs(clone_url, "heads" if rt == "branch" else "tags")
+        ref_map = fetched[rt]
+        if ref_map is None:
             continue  # ls-remote failed for this ref type, skip
         floor = sel.since_version_floor()  # version-based `since: {ref}`, name-only
-        for name in names:
+        for name in sorted(ref_map):
             if (rt, name) in seen:
                 continue
             v = sel.matches(rt, name)
@@ -59,7 +61,10 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
             if floor is not None and v.components < floor:
                 continue  # below the since version floor
             seen.add((rt, name))
-            units.append(Unit(host=cfg.host, org=cfg.org, repo=cfg.repo, ref=name, kind=rt))
+            units.append(Unit(
+                host=cfg.host, org=cfg.org, repo=cfg.repo, ref=name, kind=rt,
+                remote_sha=ref_map[name],
+            ))
 
     failed_kinds = sorted(k for k, v in fetched.items() if v is None)
     if failed_kinds:

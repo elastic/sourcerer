@@ -28,6 +28,102 @@ def build_ref_id(host: str, org: str, repo: str, ref_type: str, ref: str, commit
     return make_doc_id(host, org, repo, ref_type, ref, commit_sha)
 
 
+def markers_status_by_id(es: Elasticsearch, ref_ids: list[str]) -> dict[str, dict]:
+    """Fetch the status and commit for a batch of ref marker ids in a single query.
+
+    Returns a mapping of {ref_id: {"status": ..., "commit": ...}} for every id that exists
+    in the refs alias as a complete marker. Missing ids (never indexed) are simply absent from
+    the result. Returns {} when the refs index does not exist yet.
+
+    This is the batched equivalent of the per-ref `should_index` ids-lookup: instead of N
+    serial searches (one per ref), callers compute all ref_ids up front and fetch them in one
+    shot before the per-ref loop.
+    """
+    if not ref_ids:
+        return {}
+    try:
+        resp = es.search(
+            index=REFS_ALIAS,
+            size=len(ref_ids),
+            query={"ids": {"values": ref_ids}},
+            source_includes=["status", "git.commit"],
+        )
+    except NotFoundError:
+        return {}
+    out: dict[str, dict] = {}
+    for hit in resp["hits"]["hits"]:
+        src = hit["_source"]
+        out[hit["_id"]] = {
+            "status": src.get("status"),
+            "commit": src.get("git", {}).get("commit"),
+        }
+    return out
+
+
+def commits_with_content(
+    es: Elasticsearch, host: str, org: str, repo: str, commit_shas: set[str],
+) -> set[str]:
+    """Return the subset of `commit_shas` that have at least one content doc in the files alias.
+
+    This is the batched equivalent of `content_present`: instead of one `es.count` per
+    (complete-marker) commit, a single terms aggregation resolves all of them at once.
+
+    Used to detect the GC'd-out-from-under case: a ref whose marker is `status:complete` but
+    whose content was deleted needs re-indexing even though its marker exists.
+
+    Returns an empty set when `commit_shas` is empty or the files index does not exist yet.
+    """
+    if not commit_shas:
+        return set()
+    try:
+        resp = es.search(
+            index=FILES_ALIAS,
+            size=0,
+            query={
+                "bool": {
+                    "filter": [
+                        {"term": {"git.host": host}},
+                        {"term": {"git.org": org}},
+                        {"term": {"git.repo": repo}},
+                        {"terms": {"git.commit": sorted(commit_shas)}},
+                    ]
+                }
+            },
+            aggs={"present": {"terms": {"field": "git.commit", "size": len(commit_shas)}}},
+        )
+    except NotFoundError:
+        return set()
+    return {b["key"] for b in resp["aggregations"]["present"]["buckets"]}
+
+
+def _needs_index(
+    ref_id: str,
+    remote_sha: str,
+    status_map: dict[str, dict],
+    content_commits: set[str],
+) -> bool:
+    """Pure (no ES) per-ref skip decision -- the decision port of `should_index`.
+
+    Returns True if this ref needs (re)indexing.
+
+    - Missing from status_map: no marker -> must index.
+    - status != 'complete': in-progress or abandoned -> must index.
+    - commit in content_commits: complete marker AND content still present -> skip.
+    - complete marker but content absent (GC'd): must index.
+
+    `status_map` is the result of `markers_status_by_id` and `content_commits` is the result of
+    `commits_with_content` over the set of complete-marker commits. Both are computed once per
+    repo group before the per-ref loop.
+    """
+    marker = status_map.get(ref_id)
+    if marker is None:
+        return True
+    if marker.get("status") != "complete":
+        return True
+    commit = marker.get("commit") or remote_sha
+    return commit not in content_commits
+
+
 def count_commit_docs(es: Elasticsearch, index: str, host: str, org: str, repo: str, commit_sha: str) -> int:
     """Count docs in `index` for one commit. Content is keyed by (host, org, repo, commit, path),
     so the commit alone identifies a snapshot regardless of which ref reached it.

@@ -418,13 +418,17 @@ def resolve_remote(
     return sha, default_branch
 
 
-def list_remote_ref_names(url: str, kind: str) -> list[str] | None:
+def list_remote_refs(url: str, kind: str) -> dict[str, str] | None:
     """
-    List the short names of a remote's refs of `kind` ("heads" or "tags") via `git ls-remote`,
-    without cloning, against `url`. Strips the `refs/<kind>/` prefix and the peeled `^{}` suffix
-    (annotated tags appear twice), dedupes, and returns them sorted. Returns None on ls-remote
-    failure after retries (caller should warn); returns [] when the remote has no refs of that
-    kind.
+    List the short names and commit SHAs of a remote's refs of `kind` ("heads" or "tags") via
+    `git ls-remote`, without cloning, against `url`. Returns a mapping of {short_name: commit_sha}.
+
+    For annotated tags the remote emits two lines -- the tag object SHA and the peeled commit SHA
+    (suffixed with `^{}`). The peeled line wins so the SHA matches `git rev-parse HEAD` after
+    checkout, matching the behaviour of `resolve_remote`.
+
+    Returns None on ls-remote failure after retries; returns {} when the remote has no refs of
+    that kind.
     """
     out = None
     for attempt in range(3):
@@ -436,19 +440,36 @@ def list_remote_ref_names(url: str, kind: str) -> list[str] | None:
     if out is None:
         return None
     prefix = f"refs/{kind}/"
-    names = set()
+    result: dict[str, str] = {}
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) != 2:
             continue
-        name = parts[1]
-        if not name.startswith(prefix):
+        sha, refname = parts
+        if not refname.startswith(prefix):
             continue
-        name = name[len(prefix) :]
-        if name.endswith("^{}"):
-            name = name[: -len("^{}")]
-        names.add(name)
-    return sorted(names)
+        short = refname[len(prefix):]
+        if short.endswith("^{}"):
+            # Peeled commit SHA for an annotated tag -- always overwrites the tag-object SHA.
+            result[short[:-len("^{}")]] = sha
+        else:
+            # Only set if not already set by a peeled entry (peeled line wins).
+            result.setdefault(short, sha)
+    return result
+
+
+def list_remote_ref_names(url: str, kind: str) -> list[str] | None:
+    """
+    List the short names of a remote's refs of `kind` ("heads" or "tags") via `git ls-remote`,
+    without cloning, against `url`. Strips the `refs/<kind>/` prefix and the peeled `^{}` suffix
+    (annotated tags appear twice), dedupes, and returns them sorted. Returns None on ls-remote
+    failure after retries (caller should warn); returns [] when the remote has no refs of that
+    kind.
+    """
+    refs = list_remote_refs(url, kind)
+    if refs is None:
+        return None
+    return sorted(refs)
 
 
 def commit_date(repo_dir: pathlib.Path) -> str | None:

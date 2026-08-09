@@ -73,6 +73,80 @@ def promisor_origin(tmp_path, monkeypatch):
     return origin_dir, f"ext::git upload-pack {origin_dir}"
 
 
+@pytest.fixture
+def local_origin(tmp_path):
+    """A bare origin repo seeded with one branch and one lightweight + one annotated tag.
+    Exposed via a plain file:// URL (no ext:: transport needed since we are only testing
+    ls-remote, not blobless filtering)."""
+    origin = tmp_path / "origin.git"
+    work = tmp_path / "work"
+
+    _run("init", "-q", "-b", "main", str(work))
+    _commit_file(work, "a.txt", b"a", "init")
+    _run("-C", str(work), "-c", "user.email=test@example.com", "-c", "user.name=test",
+        "tag", "v0.1")          # lightweight tag
+    _run("-C", str(work), "-c", "user.email=test@example.com", "-c", "user.name=test",
+        "tag", "-a", "v1.0", "-m", "release")  # annotated tag
+    _run("-C", str(work), "checkout", "-q", "-b", "feature")
+    _commit_file(work, "b.txt", b"b", "feature commit")
+
+    _run("clone", "--bare", "-q", str(work), str(origin))
+    url = f"file://{origin}"
+    return origin, url, work
+
+
+def _sha(repo: pathlib.Path, rev: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", rev],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+class TestListRemoteRefs:
+    def test_branches_return_name_to_sha_map(self, local_origin):
+        origin, url, work = local_origin
+        result = gitmod.list_remote_refs(url, "heads")
+        assert result is not None
+        assert set(result) == {"main", "feature"}
+        assert result["main"] == _sha(origin, "refs/heads/main")
+        assert result["feature"] == _sha(origin, "refs/heads/feature")
+
+    def test_tags_lightweight_resolves_to_commit_sha(self, local_origin):
+        origin, url, work = local_origin
+        result = gitmod.list_remote_refs(url, "tags")
+        assert result is not None
+        # v0.1 is a lightweight tag pointing directly to a commit
+        assert result["v0.1"] == _sha(origin, "refs/tags/v0.1")
+
+    def test_tags_annotated_resolves_to_commit_sha_not_tag_object(self, local_origin):
+        origin, url, work = local_origin
+        result = gitmod.list_remote_refs(url, "tags")
+        assert result is not None
+        # The annotated tag object SHA and the dereferenced commit SHA differ;
+        # list_remote_refs must return the commit (^{}) SHA so it matches git rev-parse HEAD.
+        tag_object_sha = _sha(origin, "refs/tags/v1.0")
+        commit_sha = _sha(origin, "refs/tags/v1.0^{}")
+        assert tag_object_sha != commit_sha
+        assert result["v1.0"] == commit_sha
+
+    def test_names_match_list_remote_ref_names(self, local_origin):
+        """list_remote_ref_names must be a sorted list of the keys from list_remote_refs."""
+        origin, url, work = local_origin
+        ref_map = gitmod.list_remote_refs(url, "tags")
+        names = gitmod.list_remote_ref_names(url, "tags")
+        assert names == sorted(ref_map)
+
+    def test_empty_repo_returns_empty_dict(self, tmp_path):
+        empty = tmp_path / "empty.git"
+        _run("init", "--bare", "-q", str(empty))
+        result = gitmod.list_remote_refs(f"file://{empty}", "heads")
+        assert result == {}
+
+    def test_bad_url_returns_none(self, tmp_path):
+        result = gitmod.list_remote_refs(f"file://{tmp_path}/does_not_exist", "heads")
+        assert result is None
+
+
 class TestBloblessClone:
     def test_other_branch_blob_missing_until_checked_out(self, tmp_path, promisor_origin):
         origin_dir, url = promisor_origin
