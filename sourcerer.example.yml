@@ -196,7 +196,7 @@ sources:
   since:
     age: 1w
   retain:
-    age: 1m
+    age: 1M
     count: 1
 
 # Pin explicit commits (7-40 hex chars). `since` is not valid; only `age` retention

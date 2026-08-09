@@ -56,7 +56,7 @@ class TestParseSchedule:
     def test_duration_30m(self):
         s = parse_schedule("30m")
         assert s.kind == "duration"
-        assert s.value == timedelta(seconds=30 * 2592000)  # 30 * 30-day months
+        assert s.value == timedelta(minutes=30)
 
     def test_cron_every_hour(self):
         s = parse_schedule("0 * * * *")

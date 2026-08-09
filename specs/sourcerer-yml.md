@@ -320,7 +320,7 @@ The schedule expression for this rule. Accepts:
 - Required: Yes (if `schedules[i]` exists)
 - Type: String
 - Validation:
-  - Must be a valid 5-field cron expression (e.g. `"0 * * * *"`) or a duration string (e.g. `"3h"`, `"1d"`, `"30m"`)
+  - Must be a valid 5-field cron expression (e.g. `"0 * * * *"`) or a duration string (e.g. `"15m"`, `"3h"`, `"1d"`)
 
 ### `sources`
 

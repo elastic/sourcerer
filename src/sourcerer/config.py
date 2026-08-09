@@ -59,8 +59,8 @@ from croniter import croniter
 from .hosts import Host, resolve_hosts, validate_host_id
 from .version import CompiledPattern, Version, compile_pattern, match_version, parse_bound
 
-_DURATION_RE = re.compile(r"^\s*(\d+)\s*(s|h|d|w|m|y)\s*$")
-_DURATION_UNITS = {"s": 1, "h": 3600, "d": 86400, "w": 604800, "m": 2592000, "y": 31536000}
+_DURATION_RE = re.compile(r"^\s*(\d+)\s*(s|m|h|d|w|M|y)\s*$")
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "M": 2592000, "y": 31536000}
 _NUMERIC_LEVELS = ("major", "minor", "patch", "build")
 _PLURAL_TO_LEVEL = {"majors": "major", "minors": "minor", "patches": "patch", "builds": "build"}
 # A commit selector's `match` entries are SHA prefixes, not version-DSL patterns: 7 hex chars is
@@ -131,7 +131,7 @@ def parse_schedule(text) -> "Schedule":
     """Parse a schedule string (cron or duration) into a Schedule.
 
     Accepts a 5-field cron expression (e.g. '0 */3 * * *') or a duration string in the same
-    syntax as `retain.age` / `since.age` (e.g. '3h', '1d', '30m'). Raises ValueError if the
+    syntax as `retain.age` / `since.age` (e.g. '15m', '3h', '1d'). Raises ValueError if the
     text is neither.
     """
     s = str(text).strip()
@@ -141,7 +141,7 @@ def parse_schedule(text) -> "Schedule":
         return Schedule(kind="cron", value=s)
     raise ValueError(
         f"invalid schedule {s!r}: expected a cron expression (e.g. '0 */3 * * *') "
-        f"or a duration (e.g. '3h', '1d', '30m')"
+        f"or a duration (e.g. '15m', '3h', '1d')"
     )
 
 
@@ -239,7 +239,7 @@ def resolve_schedule(
 def parse_duration(text) -> timedelta:
     m = _DURATION_RE.match(str(text))
     if not m:
-        raise ValueError(f"invalid duration {text!r} (use e.g. 30s, 12h, 7d, 2w, 3m, 1y)")
+        raise ValueError(f"invalid duration {text!r} (use e.g. 30s, 15m, 12h, 7d, 2w, 3M, 1y)")
     return timedelta(seconds=int(m.group(1)) * _DURATION_UNITS[m.group(2)])
 
 

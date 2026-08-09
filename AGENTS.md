@@ -130,8 +130,8 @@ constraint at that level.
 Because it is value- not count-based, with majors `{2, 9}` indexed, `majors: 2` keeps `{9}`
 (threshold 8), not `{9, 2}`.
 
-Duration format (for `age`/`since.age`): `<n><unit>` where unit is `s` (seconds), `h` (hours),
-`d` (days), `w` (weeks), `m` (30-day month), `y` (365-day year).
+Duration format (for `age`/`since.age`): `<n><unit>` where unit is `s` (seconds), `m` (minutes),
+`h` (hours), `d` (days), `w` (weeks), `M` (30-day month), `y` (365-day year).
 
 #### Example
 

@@ -17,10 +17,11 @@ class TestParseDuration:
         "text,expected_seconds",
         [
             ("30s", 30),
+            ("15m", 15 * 60),     # minutes
             ("12h", 12 * 3600),
             ("7d", 7 * 86400),
             ("2w", 2 * 604800),
-            ("3m", 3 * 2592000),  # month = 30d
+            ("3M", 3 * 2592000),  # months = 30d each
             ("1y", 365 * 86400),  # year = 365d
         ],
     )
