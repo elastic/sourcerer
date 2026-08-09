@@ -45,6 +45,7 @@ def _dry_run_repo(
     force: bool,
     prune: bool,
     now: datetime.datetime,
+    retry_window: datetime.timedelta | None = None,
 ) -> dict:
     """Compute one repo's dry-run preview. Clones/fetches its cached clone to resolve each
     planned ref's real commit + date (read-only -- writes nothing to ES), classifying every ref
@@ -95,10 +96,11 @@ def _dry_run_repo(
                 pass  # fall through: all refs treated as needing indexing
 
         # Pass 3: classify resolved refs.
+        indexing_cutoff = (now - retry_window) if retry_window is not None else None
         pending: list[tuple[Unit, str, str, datetime.datetime | None]] = []
         for unit, ref_type, sha, cd in resolved:
             ref_id = build_ref_id(host, org, repo, ref_type, unit.ref or "", sha)
-            if not force and not _needs_index(ref_id, sha, status_map, content_commits):
+            if not force and not _needs_index(ref_id, sha, status_map, content_commits, indexing_cutoff):
                 rows.append((unit, "up-to-date", "already indexed", sha, cd))
                 continue
             floor = _effective_since_floor(cfg, repo_dir, ref_type, unit.ref, now)
@@ -227,6 +229,7 @@ def dry_run_config(
     force: bool,
     prune: bool,
     schedule_decisions: list[ScheduleDecision] | None = None,
+    retry_window: datetime.timedelta | None = None,
 ) -> None:
     """Preview an `index [--prune]` run without writing anything to Elasticsearch. Resolves the
     plan (ls-remote), then per repo clones/fetches its cached clone to resolve real commits +
@@ -266,7 +269,10 @@ def dry_run_config(
         cfg = cfg_by_repo.get((host, org, repo))
         clone_url = hosts[host].clone_url(org, repo)
         try:
-            return _dry_run_repo(es, cfg, host, org, repo, clone_url, group, cache_root, ephemeral, force, prune, now)
+            return _dry_run_repo(
+            es, cfg, host, org, repo, clone_url, group, cache_root, ephemeral,
+            force, prune, now, retry_window=retry_window,
+        )
         except (FileNotFoundError, subprocess.CalledProcessError, ValueError, *ES_ERRORS) as e:
             return {"host": host, "org": org, "repo": repo, "error": str(e)}
 

@@ -557,3 +557,56 @@ class TestResolveScheduleGlob:
         branch_sel = _branch_selector()    # match: main
         assert resolve_schedule("github", "org", "repo", tag_sel, rules).value == timedelta(hours=2)
         assert resolve_schedule("github", "org", "repo", branch_sel, rules).value == timedelta(days=1)
+
+
+class TestSourceStateRetryWindow:
+    """Tests that source_state honors a custom retry_window when detecting active indexing."""
+
+    def _make_es(self, active_count):
+        """Return a mock ES that reports `active_count` actively-indexing refs."""
+        from unittest.mock import MagicMock
+        es = MagicMock()
+        es.search.return_value = {
+            "aggregations": {
+                "max_indexed_at": {"ts": {"value": None}},
+                "active_indexing": {"doc_count": active_count},
+            }
+        }
+        return es
+
+    def test_default_retry_window_used_when_not_supplied(self):
+        from sourcerer.commands.index.schedule import RETRY_INTERVAL, source_state
+        es = self._make_es(1)
+        now = datetime(2026, 8, 9, 18, 0, 0, tzinfo=_UTC)
+        state = source_state(es, "github", "acme", "widgets", "branch", now)
+        assert state.active_indexing is True
+        # The range query uses now - RETRY_INTERVAL (1h by default).
+        call = es.search.call_args.kwargs
+        aggs = call["aggregations"]
+        expected_gte = (now - RETRY_INTERVAL).isoformat()
+        assert aggs["active_indexing"]["filter"]["bool"]["filter"][1] == {
+            "range": {"indexing_started_at": {"gte": expected_gte}}
+        }
+
+    def test_custom_retry_window_overrides_default(self):
+        from sourcerer.commands.index.schedule import source_state
+        es = self._make_es(1)
+        now = datetime(2026, 8, 9, 18, 0, 0, tzinfo=_UTC)
+        window = timedelta(minutes=30)
+        state = source_state(es, "github", "acme", "widgets", "branch", now, retry_window=window)
+        assert state.active_indexing is True
+        call = es.search.call_args.kwargs
+        aggs = call["aggregations"]
+        expected_gte = (now - window).isoformat()
+        assert aggs["active_indexing"]["filter"]["bool"]["filter"][1] == {
+            "range": {"indexing_started_at": {"gte": expected_gte}}
+        }
+
+    def test_short_window_treats_older_marker_as_not_active(self):
+        # With a 30m window and 0 active indexing refs -> not active.
+        es = self._make_es(0)
+        from sourcerer.commands.index.schedule import source_state
+        now = datetime(2026, 8, 9, 18, 0, 0, tzinfo=_UTC)
+        state = source_state(es, "github", "acme", "widgets", "branch", now,
+                             retry_window=timedelta(minutes=30))
+        assert state.active_indexing is False

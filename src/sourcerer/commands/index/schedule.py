@@ -18,9 +18,9 @@ from elasticsearch import Elasticsearch, NotFoundError
 from ...config import Config, RepoConfig, Selector, Schedule, ScheduleRule, resolve_schedule
 from ...indices import REFS_ALIAS
 
-# A source is retried after this interval if its status is still "indexing" (guards against a
-# process that was killed mid-ingest leaving a permanent "indexing" marker).
-RETRY_INTERVAL = datetime.timedelta(hours=6)
+# Default retry window: how long an "indexing" marker is trusted as an active run before
+# being treated as stuck/abandoned and retried. Configurable via --retry-window; default 1h.
+RETRY_INTERVAL = datetime.timedelta(hours=1)
 
 
 @dataclass
@@ -48,6 +48,7 @@ def source_state(
     repo: str,
     ref_type: str,
     now: datetime.datetime,
+    retry_window: datetime.timedelta = RETRY_INTERVAL,
 ) -> SourceState:
     """Query the refs index for the current state of one source scope.
 
@@ -79,7 +80,7 @@ def source_state(
                     "filter": [
                         {"term": {"status": "indexing"}},
                         {"range": {"indexing_started_at": {
-                            "gte": (now - RETRY_INTERVAL).isoformat(),
+                            "gte": (now - retry_window).isoformat(),
                         }}},
                     ]
                 }
@@ -111,6 +112,7 @@ def compute_decisions(
     es: Elasticsearch,
     config: Config,
     now: datetime.datetime,
+    retry_window: datetime.timedelta = RETRY_INTERVAL,
 ) -> list[ScheduleDecision]:
     """Determine which (repo, selector) pairs are due for indexing.
 
@@ -130,7 +132,8 @@ def compute_decisions(
             scope = (repo_cfg.host, repo_cfg.org, repo_cfg.repo, sel.ref_type)
             if scope not in state_cache:
                 state_cache[scope] = source_state(
-                    es, repo_cfg.host, repo_cfg.org, repo_cfg.repo, sel.ref_type, now
+                    es, repo_cfg.host, repo_cfg.org, repo_cfg.repo, sel.ref_type, now,
+                    retry_window=retry_window,
                 )
             state = state_cache[scope]
             schedule = resolve_schedule(
@@ -163,6 +166,7 @@ def filter_config_by_schedule(
     es: Elasticsearch,
     config: Config,
     now: datetime.datetime,
+    retry_window: datetime.timedelta = RETRY_INTERVAL,
 ) -> tuple[Config, list[ScheduleDecision]]:
     """Return a filtered Config containing only sources that are due for indexing, plus the full
     list of decisions (for dry-run reporting).
@@ -171,7 +175,7 @@ def filter_config_by_schedule(
     kept (so a partially-due repo's not-due selectors are excluded from ls-remote / indexing,
     meaning they don't contribute units to Phase 1).
     """
-    decisions = compute_decisions(es, config, now)
+    decisions = compute_decisions(es, config, now, retry_window=retry_window)
 
     # Build the filtered repos list: keep repos with at least one due selector, carrying only
     # those due selectors. This preserves the existing grouping shape so downstream code is

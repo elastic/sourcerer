@@ -13,6 +13,15 @@ from .commands.prune import command as prune_cmd
 from .commands.setup import command as setup_cmd
 
 
+def _parse_retry_window(ctx, param, value):
+    """Option callback: parse a duration string like '30m', '1h', '6h', '1d' into a timedelta."""
+    from .config import parse_duration
+    try:
+        return parse_duration(value)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param=param)
+
+
 def _load_env(ctx, param, value):
     """Eager option callback: load the chosen `.env` before other options resolve envvars.
 
@@ -131,9 +140,17 @@ def setup(url, api_key, username, password, kb_url, config_path):
     help="Preview what would be indexed (and, with --prune, what would be pruned afterwards) "
     "without writing to Elasticsearch. Clones/fetches the cached repos to resolve real commits. Requires --config.",
 )
+@click.option(
+    "--retry-window",
+    default="1h",
+    callback=_parse_retry_window,
+    help="How long a ref's in-progress 'indexing' marker is trusted as an active concurrent "
+    "run (skip re-indexing it); older markers are treated as stuck and re-indexed. Also "
+    "drives the schedule gate's stuck-run detection. Duration like 30m, 1h, 6h, 1d. Default 1h.",
+)
 @env_option
 @auth_options
-def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, prune, dry_run, url, api_key, username, password):
+def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window, url, api_key, username, password):
     """Index a remote GitHub repo's git-tracked files into Elasticsearch.
 
     Provide a REPO_SPEC ('<host>/<org>/<repo>') for a single repo, or --config to index multiple
@@ -146,7 +163,7 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
     if config_path:
         if repo_spec or branch or tag or commit:
             raise click.UsageError("--config cannot be combined with REPO_SPEC or -b/-t/-c")
-        index_cmd.run_config(config_path, url, api_key, username, password, force, quiet, cache_dir, ephemeral, prune, dry_run)
+        index_cmd.run_config(config_path, url, api_key, username, password, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window=retry_window)
     else:
         if prune:
             raise click.UsageError("--prune requires --config (there is no retention policy for a single ref)")
@@ -154,7 +171,7 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
             raise click.UsageError("--dry-run requires --config")
         if not repo_spec:
             raise click.UsageError("provide a REPO_SPEC ('<host>/<org>/<repo>') or --config")
-        index_cmd.run(repo_spec, branch, tag, commit, url, api_key, username, password, force, quiet, cache_dir, ephemeral)
+        index_cmd.run(repo_spec, branch, tag, commit, url, api_key, username, password, force, quiet, cache_dir, ephemeral, retry_window=retry_window)
 
 
 @cli.command()

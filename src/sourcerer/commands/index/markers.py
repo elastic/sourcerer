@@ -29,11 +29,11 @@ def build_ref_id(host: str, org: str, repo: str, ref_type: str, ref: str, commit
 
 
 def markers_status_by_id(es: Elasticsearch, ref_ids: list[str]) -> dict[str, dict]:
-    """Fetch the status and commit for a batch of ref marker ids in a single query.
+    """Fetch the status, commit, and indexing_started_at for a batch of ref marker ids.
 
-    Returns a mapping of {ref_id: {"status": ..., "commit": ...}} for every id that exists
-    in the refs alias as a complete marker. Missing ids (never indexed) are simply absent from
-    the result. Returns {} when the refs index does not exist yet.
+    Returns a mapping of {ref_id: {"status": ..., "commit": ..., "indexing_started_at": ...}}
+    for every id that exists in the refs alias. Missing ids (never indexed) are absent from the
+    result. Returns {} when the refs index does not exist yet.
 
     This is the batched equivalent of the per-ref `should_index` ids-lookup: instead of N
     serial searches (one per ref), callers compute all ref_ids up front and fetch them in one
@@ -46,7 +46,7 @@ def markers_status_by_id(es: Elasticsearch, ref_ids: list[str]) -> dict[str, dic
             index=REFS_ALIAS,
             size=len(ref_ids),
             query={"ids": {"values": ref_ids}},
-            source_includes=["status", "git.commit"],
+            source_includes=["status", "git.commit", "indexing_started_at"],
         )
     except NotFoundError:
         return {}
@@ -56,8 +56,29 @@ def markers_status_by_id(es: Elasticsearch, ref_ids: list[str]) -> dict[str, dic
         out[hit["_id"]] = {
             "status": src.get("status"),
             "commit": src.get("git", {}).get("commit"),
+            "indexing_started_at": src.get("indexing_started_at"),
         }
     return out
+
+
+def _parse_marker_started(value: object) -> datetime.datetime | None:
+    """Parse an `indexing_started_at` field value to a tz-aware UTC datetime, or None.
+
+    Handles:
+    - None / missing field -> None
+    - Malformed / non-ISO strings -> None (safe: treated as unknown/stuck)
+    - Naive ISO strings -> coerced to UTC (legacy / hand-written markers)
+    - Tz-aware ISO strings -> returned as-is
+    """
+    if value is None:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
 
 
 def commits_with_content(
@@ -101,13 +122,17 @@ def _needs_index(
     remote_sha: str,
     status_map: dict[str, dict],
     content_commits: set[str],
+    indexing_cutoff: datetime.datetime | None = None,
 ) -> bool:
     """Pure (no ES) per-ref skip decision -- the decision port of `should_index`.
 
     Returns True if this ref needs (re)indexing.
 
     - Missing from status_map: no marker -> must index.
-    - status != 'complete': in-progress or abandoned -> must index.
+    - status == 'indexing' AND indexing_started_at >= indexing_cutoff: another run is actively
+      indexing this ref -> skip (return False). If indexing_cutoff is None the active-run check
+      is bypassed (back-compat default).
+    - status != 'complete' (stuck/abandoned marker, or no cutoff given): must index.
     - commit in content_commits: complete marker AND content still present -> skip.
     - complete marker but content absent (GC'd): must index.
 
@@ -118,7 +143,15 @@ def _needs_index(
     marker = status_map.get(ref_id)
     if marker is None:
         return True
-    if marker.get("status") != "complete":
+    status = marker.get("status")
+    if status != "complete":
+        if (
+            status == "indexing"
+            and indexing_cutoff is not None
+        ):
+            started = _parse_marker_started(marker.get("indexing_started_at"))
+            if started is not None and started >= indexing_cutoff:
+                return False  # another run is actively indexing this ref
         return True
     commit = marker.get("commit") or remote_sha
     return commit not in content_commits
@@ -209,12 +242,25 @@ def commit_prefix_indexed(es: Elasticsearch, host: str, org: str, repo: str, sha
     return hits[0]["_source"]["git"]["commit"] if hits else None
 
 
-def should_index(es: Elasticsearch, host: str, org: str, repo: str, ref_type: str, ref: str, commit_sha: str) -> bool:
+def should_index(
+    es: Elasticsearch,
+    host: str,
+    org: str,
+    repo: str,
+    ref_type: str,
+    ref: str,
+    commit_sha: str,
+    retry_window: datetime.timedelta | None = None,
+) -> bool:
     """
     True if this exact (ref_type, ref, commit) needs (re)indexing. The id now encodes the
     commit, so a moved branch simply misses (NotFound -> index the new commit, old marker
     retained). A present+complete marker is guaranteed to be this commit; the only remaining
     reason to re-index is content GC'd out from under a surviving marker.
+
+    With `retry_window` set, an `indexing` marker whose `indexing_started_at` is within the
+    window is treated as an active concurrent run and returns False (skip). Without it (default),
+    any non-complete marker triggers re-indexing (previous behavior).
     """
     ref_id = build_ref_id(host, org, repo, ref_type, ref, commit_sha)
     try:
@@ -225,7 +271,13 @@ def should_index(es: Elasticsearch, host: str, org: str, repo: str, ref_type: st
     if not hits:
         return True
     marker = hits[0]["_source"]
-    if marker.get("status") != "complete":
+    status = marker.get("status")
+    if status != "complete":
+        if status == "indexing" and retry_window is not None:
+            cutoff = datetime.datetime.now(datetime.timezone.utc) - retry_window
+            started = _parse_marker_started(marker.get("indexing_started_at"))
+            if started is not None and started >= cutoff:
+                return False  # another run is actively indexing this ref
         return True
     return not content_present(es, host, org, repo, commit_sha)
 
@@ -248,7 +300,8 @@ def write_indexing_marker(
     This marker allows the schedule gate to detect that another run is currently indexing this
     source's scope (host/org/repo/ref_type) and skip it, preventing redundant parallel work.
     If the run dies before calling write_ref_marker, the indexing marker stays behind; the gate
-    retries the source after RETRY_INTERVAL (6h by default).
+    retries the source after the retry window elapses (default 1h, configurable via
+    --retry-window).
     """
     ref_id = build_ref_id(host, org, repo, ref_type, ref, commit_sha)
     doc = {
@@ -314,12 +367,13 @@ def pre_clone_skip(
     commit: str | None,
     clone_url: str,
     force: bool,
+    retry_window: datetime.timedelta | None = None,
 ) -> tuple[bool, str | None, str | None]:
     """
     Cheap pre-clone decision -- no clone needed either way. Returns
     (skip, ref_for_id, remote_sha):
-      - skip=True  -> the ref is already fully indexed; the caller should finish "skipped"
-        (using the returned ref_for_id) without cloning.
+      - skip=True  -> the ref is already fully indexed (or actively being indexed by another
+        run within the retry window); the caller should finish "skipped" without cloning.
       - skip=False -> the caller must clone/checkout and run the post-clone path.
 
     branch/tag resolve via `git ls-remote` against `clone_url`. A pinned commit (-c, or a
@@ -340,7 +394,9 @@ def pre_clone_skip(
         return False, None, None
     ref_type = "tag" if tag else "branch"  # branch, or the resolved remote HEAD (a branch)
     ref_for_id = branch or tag or resolved_default_branch
-    if ref_for_id and not should_index(es, host, org, repo, ref_type, ref_for_id, remote_sha):
+    if ref_for_id and not should_index(
+        es, host, org, repo, ref_type, ref_for_id, remote_sha, retry_window=retry_window
+    ):
         return True, ref_for_id, remote_sha
     return False, ref_for_id, remote_sha
 

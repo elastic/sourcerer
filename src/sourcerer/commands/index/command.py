@@ -64,6 +64,7 @@ def index_ref_in_dir(
     force: bool = False,
     reporter: ProgressReporter | None = None,
     unit: Unit | None = None,
+    retry_window: datetime.timedelta | None = None,
 ) -> None:
     """
     Index a single ref of one repo into an already-cloned `repo_dir`. Checks out the ref
@@ -103,7 +104,9 @@ def index_ref_in_dir(
 
     # Post-clone guard: authoritative SHA check (covers -c and any ls-remote
     # peeling mismatch).
-    if not force and not should_index(es, host, org, repo, ref_type, ref_for_id, commit_sha):
+    if not force and not should_index(
+        es, host, org, repo, ref_type, ref_for_id, commit_sha, retry_window=retry_window
+    ):
         reporter.finish(unit, "skipped")
         return
 
@@ -146,6 +149,7 @@ def index_one(
     unit: Unit | None = None,
     cache_root=None,
     ephemeral: bool = False,
+    retry_window: datetime.timedelta | None = None,
 ) -> None:
     """
     Index a single ref (branch, tag, or commit) of one repo into an existing ES client.
@@ -168,8 +172,11 @@ def index_one(
 
     reporter.start(unit)
 
-    # Pre-clone skip: if the ref is already fully indexed, skip before paying the clone cost.
-    skip, ref_for_id, _ = pre_clone_skip(es, host, org, repo, branch, tag, commit, clone_url, force)
+    # Pre-clone skip: if the ref is already fully indexed (or another run is actively
+    # indexing it within the retry window), skip before paying the clone cost.
+    skip, ref_for_id, _ = pre_clone_skip(
+        es, host, org, repo, branch, tag, commit, clone_url, force, retry_window=retry_window
+    )
     if skip:
         unit.ref = ref_for_id
         reporter.finish(unit, "skipped")
@@ -180,7 +187,10 @@ def index_one(
         if repo_dir is None:
             reporter.finish(unit, "locked", detail="another sourcerer run holds this repo's cache lock")
             return
-        index_ref_in_dir(es, host, org, repo, repo_dir, branch, tag, commit, force, reporter, unit)
+        index_ref_in_dir(
+            es, host, org, repo, repo_dir, branch, tag, commit, force, reporter, unit,
+            retry_window=retry_window,
+        )
 
 
 def run(
@@ -196,6 +206,7 @@ def run(
     quiet: bool = False,
     cache_dir: str | None = None,
     ephemeral: bool = False,
+    retry_window: datetime.timedelta | None = None,
 ) -> None:
     parts = repo_spec.split("/", 2)
     if len(parts) != 3 or not all(parts):
@@ -228,6 +239,7 @@ def run(
             index_one(
                 es, host, org, repo, clone_url, branch, tag, commit, force,
                 reporter=reporter, unit=unit, cache_root=cache_root, ephemeral=ephemeral,
+                retry_window=retry_window,
             )
         except FileNotFoundError as e:
             reporter.finish(unit, "error", detail=str(e))
@@ -255,6 +267,7 @@ def run_config(
     ephemeral: bool = False,
     prune: bool = False,
     dry_run: bool = False,
+    retry_window: datetime.timedelta | None = None,
 ) -> None:
     """
     Index every (repo, ref) the config selects. First list the remote branches and tags for
@@ -295,7 +308,9 @@ def run_config(
     )
     now = datetime.datetime.now(datetime.timezone.utc)
     if has_schedules:
-        filtered_config, schedule_decisions = filter_config_by_schedule(es, config, now)
+        filtered_config, schedule_decisions = filter_config_by_schedule(
+            es, config, now, retry_window=retry_window
+        )
     else:
         filtered_config = config
         schedule_decisions = []
@@ -308,6 +323,7 @@ def run_config(
         dry_run_config(
             es, entries, cfg_by_repo, hosts, cache_root, ephemeral, force, prune,
             schedule_decisions=schedule_decisions,
+            retry_window=retry_window,
         )
         return
 
@@ -355,6 +371,10 @@ def run_config(
             groups.setdefault((unit.host, unit.org, unit.repo), []).append(unit)
 
         failures_lock = threading.Lock()
+
+        # Precompute once: the cutoff datetime before which an "indexing" marker is considered
+        # stuck/abandoned and eligible for retry (used by the batch skip check below).
+        indexing_cutoff = (now - retry_window) if retry_window is not None else None
 
         def process_group(item: tuple[tuple[str, str, str], list[Unit]]) -> None:
             nonlocal failures
@@ -433,7 +453,7 @@ def run_config(
                         pending.append((unit, branch, tag, None))
                         continue
                     ref_id = build_ref_id(host, org, repo, unit.kind, unit.ref or "", sha)
-                    if _needs_index(ref_id, sha, status_map, content_commits):
+                    if _needs_index(ref_id, sha, status_map, content_commits, indexing_cutoff):
                         pending.append((unit, branch, tag, None))
                     else:
                         reporter.finish(unit, "skipped")
@@ -447,7 +467,8 @@ def run_config(
                     commit = unit.ref if unit.kind == "commit" else None
                     try:
                         skip, ref_for_id, _ = pre_clone_skip(
-                            es, host, org, repo, branch, tag, commit, clone_url, force
+                            es, host, org, repo, branch, tag, commit, clone_url, force,
+                            retry_window=retry_window,
                         )
                     except ES_ERRORS as e:
                         with failures_lock:
@@ -527,7 +548,7 @@ def run_config(
                         try:
                             index_ref_in_dir(
                                 es, host, org, repo, repo_dir, branch, tag, commit,
-                                force, reporter, unit,
+                                force, reporter, unit, retry_window=retry_window,
                             )
                         except KeyboardInterrupt:
                             break  # aborted mid-ref -- stop this group, leave the rest unmarked

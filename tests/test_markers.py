@@ -2,6 +2,7 @@
 helpers. Every ES call is mocked."""
 
 # Standard packages
+import datetime
 from unittest.mock import MagicMock
 
 # Third-party packages
@@ -11,11 +12,13 @@ from elasticsearch import NotFoundError
 # App packages
 from sourcerer.commands.index.markers import (
     build_ref_id, commit_prefix_indexed, commits_with_content,
-    markers_status_by_id, _needs_index, pre_clone_skip, should_index,
+    markers_status_by_id, _needs_index, _parse_marker_started, pre_clone_skip, should_index,
 )
 from sourcerer.indices import FILES_ALIAS, REFS_ALIAS
 
 FULL_SHA = "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60"
+
+_UTC = datetime.timezone.utc
 
 
 def _not_found() -> NotFoundError:
@@ -97,6 +100,60 @@ class TestShouldIndex:
         assert build_ref_id("github", "acme", "widgets", "branch", "main", FULL_SHA) != \
             build_ref_id("gitlab", "acme", "widgets", "branch", "main", FULL_SHA)
 
+    def _es_with_marker(self, status, started_at=None):
+        """Return a mock ES that returns a marker with the given status and indexing_started_at."""
+        es = MagicMock()
+        source = {"status": status}
+        if started_at is not None:
+            source["indexing_started_at"] = started_at
+        es.search.return_value = {"hits": {"hits": [{"_source": source}]}}
+        return es
+
+    def test_indexing_within_window_returns_false(self):
+        # An 'indexing' marker started recently -> another run is active -> skip.
+        window = datetime.timedelta(hours=1)
+        now = datetime.datetime.now(_UTC)
+        started = (now - datetime.timedelta(minutes=10)).isoformat()
+        es = self._es_with_marker("indexing", started_at=started)
+        result = should_index(es, "github", "acme", "w", "branch", "main", FULL_SHA, retry_window=window)
+        assert result is False
+
+    def test_indexing_older_than_window_returns_true(self):
+        # A stale 'indexing' marker -> stuck run -> must re-index.
+        window = datetime.timedelta(hours=1)
+        now = datetime.datetime.now(_UTC)
+        started = (now - datetime.timedelta(hours=2)).isoformat()
+        es = self._es_with_marker("indexing", started_at=started)
+        result = should_index(es, "github", "acme", "w", "branch", "main", FULL_SHA, retry_window=window)
+        assert result is True
+
+    def test_indexing_missing_started_at_returns_true(self):
+        # No indexing_started_at -> treat as stuck -> must index.
+        window = datetime.timedelta(hours=1)
+        es = self._es_with_marker("indexing")   # no started_at
+        result = should_index(es, "github", "acme", "w", "branch", "main", FULL_SHA, retry_window=window)
+        assert result is True
+
+    def test_indexing_no_retry_window_returns_true(self):
+        # Default (no retry_window) -> any non-complete status -> must index.
+        now = datetime.datetime.now(_UTC)
+        started = (now - datetime.timedelta(minutes=5)).isoformat()
+        es = self._es_with_marker("indexing", started_at=started)
+        result = should_index(es, "github", "acme", "w", "branch", "main", FULL_SHA)
+        assert result is True
+
+    def test_es_query_shape_unchanged(self):
+        # should_index must NOT change the ES query -- a test asserts exact kwargs.
+        window = datetime.timedelta(hours=1)
+        es = MagicMock()
+        es.search.return_value = {"hits": {"hits": [{"_source": {"status": "complete"}}]}}
+        should_index(es, "github", "acme", "widgets", "branch", "main", FULL_SHA, retry_window=window)
+        assert es.search.call_args.kwargs == {
+            "index": REFS_ALIAS,
+            "size": 1,
+            "query": {"ids": {"values": [build_ref_id("github", "acme", "widgets", "branch", "main", FULL_SHA)]}},
+        }
+
 
 class TestMarkersStatusById:
     def test_returns_status_and_commit_for_found_ids(self):
@@ -108,12 +165,28 @@ class TestMarkersStatusById:
             ]}
         }
         result = markers_status_by_id(es, [ref_id])
-        assert result == {ref_id: {"status": "complete", "commit": FULL_SHA}}
+        assert result == {ref_id: {"status": "complete", "commit": FULL_SHA, "indexing_started_at": None}}
         call = es.search.call_args.kwargs
         assert call["index"] == REFS_ALIAS
         assert call["query"] == {"ids": {"values": [ref_id]}}
         assert "status" in call["source_includes"]
         assert "git.commit" in call["source_includes"]
+        assert "indexing_started_at" in call["source_includes"]
+
+    def test_returns_indexing_started_at_for_indexing_marker(self):
+        es = MagicMock()
+        ref_id = build_ref_id("github", "acme", "widgets", "branch", "main", FULL_SHA)
+        started = "2026-08-09T17:14:03.000000+00:00"
+        es.search.return_value = {
+            "hits": {"hits": [
+                {"_id": ref_id, "_source": {
+                    "status": "indexing", "git": {"commit": FULL_SHA},
+                    "indexing_started_at": started,
+                }}
+            ]}
+        }
+        result = markers_status_by_id(es, [ref_id])
+        assert result == {ref_id: {"status": "indexing", "commit": FULL_SHA, "indexing_started_at": started}}
 
     def test_missing_id_is_absent_from_result(self):
         es = MagicMock()
@@ -175,7 +248,12 @@ class TestNeedsIndex:
     def test_missing_from_status_map_needs_indexing(self):
         assert _needs_index(self.ID, self.SHA, {}, set()) is True
 
+    def test_incomplete_status_needs_indexing_no_cutoff(self):
+        # Without a cutoff (default None), any non-complete status -> must index (back-compat).
+        assert _needs_index(self.ID, self.SHA, {self.ID: {"status": "indexing", "commit": self.SHA}}, {self.SHA}) is True
+
     def test_incomplete_status_needs_indexing(self):
+        # Alias retained for back-compat: same as above with explicit args.
         assert _needs_index(self.ID, self.SHA, {self.ID: {"status": "indexing", "commit": self.SHA}}, {self.SHA}) is True
 
     def test_complete_with_content_present_is_skipped(self):
@@ -188,3 +266,68 @@ class TestNeedsIndex:
         # A marker without a 'commit' field falls back to remote_sha for the content check.
         assert _needs_index(self.ID, self.SHA, {self.ID: {"status": "complete"}}, {self.SHA}) is False
         assert _needs_index(self.ID, self.SHA, {self.ID: {"status": "complete"}}, set()) is True
+
+    # --- retry-window aware tests ---
+
+    def _marker(self, started_at):
+        """Helper: build a status:indexing marker dict with the given indexing_started_at."""
+        return {self.ID: {"status": "indexing", "commit": self.SHA, "indexing_started_at": started_at}}
+
+    def test_indexing_within_window_is_skipped(self):
+        # A fresh 'indexing' marker within the window -> skip (another run is active).
+        cutoff = datetime.datetime(2026, 8, 9, 17, 0, 0, tzinfo=_UTC)
+        started = "2026-08-09T17:10:00+00:00"   # 10 min after cutoff -> within window
+        assert _needs_index(self.ID, self.SHA, self._marker(started), set(), cutoff) is False
+
+    def test_indexing_older_than_window_needs_reindex(self):
+        # A stale 'indexing' marker (older than cutoff) -> must re-index.
+        cutoff = datetime.datetime(2026, 8, 9, 17, 0, 0, tzinfo=_UTC)
+        started = "2026-08-09T16:55:00+00:00"   # 5 min before cutoff -> stuck
+        assert _needs_index(self.ID, self.SHA, self._marker(started), set(), cutoff) is True
+
+    def test_indexing_at_exact_cutoff_boundary_is_skipped(self):
+        # Boundary is inclusive (>= cutoff): started == cutoff -> skip.
+        cutoff = datetime.datetime(2026, 8, 9, 17, 0, 0, tzinfo=_UTC)
+        started = "2026-08-09T17:00:00+00:00"
+        assert _needs_index(self.ID, self.SHA, self._marker(started), set(), cutoff) is False
+
+    def test_indexing_missing_started_at_with_cutoff_needs_reindex(self):
+        # No indexing_started_at in marker -> treat as unknown/stuck -> must index.
+        cutoff = datetime.datetime(2026, 8, 9, 17, 0, 0, tzinfo=_UTC)
+        marker = {self.ID: {"status": "indexing", "commit": self.SHA, "indexing_started_at": None}}
+        assert _needs_index(self.ID, self.SHA, marker, set(), cutoff) is True
+
+    def test_indexing_malformed_started_at_needs_reindex(self):
+        # Malformed started_at -> treat as unknown/stuck -> must index.
+        cutoff = datetime.datetime(2026, 8, 9, 17, 0, 0, tzinfo=_UTC)
+        marker = {self.ID: {"status": "indexing", "commit": self.SHA, "indexing_started_at": "not-a-date"}}
+        assert _needs_index(self.ID, self.SHA, marker, set(), cutoff) is True
+
+    def test_indexing_naive_iso_within_window_is_skipped(self):
+        # A naive (tz-unaware) ISO string is coerced to UTC before comparison -- no TypeError.
+        cutoff = datetime.datetime(2026, 8, 9, 17, 0, 0, tzinfo=_UTC)
+        started = "2026-08-09T17:10:00"   # no tz suffix -> naive
+        assert _needs_index(self.ID, self.SHA, self._marker(started), set(), cutoff) is False
+
+
+class TestParseMarkerStarted:
+    """Tests for the _parse_marker_started helper."""
+
+    def test_none_returns_none(self):
+        assert _parse_marker_started(None) is None
+
+    def test_malformed_string_returns_none(self):
+        assert _parse_marker_started("not-a-date") is None
+
+    def test_aware_iso_returns_datetime(self):
+        result = _parse_marker_started("2026-08-09T17:00:00+00:00")
+        assert result == datetime.datetime(2026, 8, 9, 17, 0, 0, tzinfo=_UTC)
+
+    def test_naive_iso_is_coerced_to_utc(self):
+        result = _parse_marker_started("2026-08-09T17:00:00")
+        assert result is not None
+        assert result.tzinfo == _UTC
+        assert result == datetime.datetime(2026, 8, 9, 17, 0, 0, tzinfo=_UTC)
+
+    def test_empty_string_returns_none(self):
+        assert _parse_marker_started("") is None
