@@ -12,6 +12,7 @@ dependencies = [
     "croniter>=6.2.4",
     "elasticsearch==8.17.1",
     "fastmcp==2.14.3",
+    "packaging==26.2",
     "python-dotenv>=1.1.0",
     "pyyaml==6.0.2",
     "requests==2.34.2",
