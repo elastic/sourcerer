@@ -188,36 +188,135 @@ class TestScheduleDueCron:
 # ---------------------------------------------------------------------------
 
 
+def _matches(rule: ScheduleRule, host: str, org: str, repo: str,
+             ref_type: str = "tag", patterns: list[str] | None = None) -> bool:
+    """Convenience wrapper so most tests don't have to pass ref_type/patterns."""
+    return rule.matches(host, org, repo, ref_type, patterns or ["v{major}.{minor}.{patch}"])
+
+
 class TestScheduleRuleMatches:
     def test_empty_scope_matches_everything(self):
         rule = ScheduleRule(host=None, org=None, repo=None, schedule=Schedule.always())
-        assert rule.matches("github", "elastic", "elasticsearch")
-        assert rule.matches("gitlab", "someorg", "somerepo")
+        assert _matches(rule, "github", "elastic", "elasticsearch")
+        assert _matches(rule, "gitlab", "someorg", "somerepo")
 
     def test_host_only_matches_same_host(self):
         rule = ScheduleRule(host="github", org=None, repo=None, schedule=Schedule.always())
-        assert rule.matches("github", "elastic", "elasticsearch")
-        assert not rule.matches("gitlab", "elastic", "elasticsearch")
+        assert _matches(rule, "github", "elastic", "elasticsearch")
+        assert not _matches(rule, "gitlab", "elastic", "elasticsearch")
 
     def test_host_org_matches_same_org(self):
         rule = ScheduleRule(host="github", org="elastic", repo=None, schedule=Schedule.always())
-        assert rule.matches("github", "elastic", "elasticsearch")
-        assert not rule.matches("github", "other", "elasticsearch")
+        assert _matches(rule, "github", "elastic", "elasticsearch")
+        assert not _matches(rule, "github", "other", "elasticsearch")
 
     def test_host_org_repo_matches_exact(self):
         rule = ScheduleRule(host="github", org="elastic", repo="elasticsearch", schedule=Schedule.always())
-        assert rule.matches("github", "elastic", "elasticsearch")
-        assert not rule.matches("github", "elastic", "kibana")
+        assert _matches(rule, "github", "elastic", "elasticsearch")
+        assert not _matches(rule, "github", "elastic", "kibana")
 
     def test_specificity_ordering(self):
+        # Exact fields each contribute 2; globs contribute 1; None contributes 0.
         r0 = ScheduleRule(host=None, org=None, repo=None, schedule=Schedule.always())
         r1 = ScheduleRule(host="github", org=None, repo=None, schedule=Schedule.always())
         r2 = ScheduleRule(host="github", org="elastic", repo=None, schedule=Schedule.always())
         r3 = ScheduleRule(host="github", org="elastic", repo="elasticsearch", schedule=Schedule.always())
         assert r0.specificity() == 0
-        assert r1.specificity() == 1
-        assert r2.specificity() == 2
-        assert r3.specificity() == 3
+        assert r1.specificity() == 2   # one exact field = 2
+        assert r2.specificity() == 4   # two exact fields = 4
+        assert r3.specificity() == 6   # three exact fields = 6
+
+    # --- glob matching ---
+
+    def test_glob_org_prefix(self):
+        rule = ScheduleRule(host="github", org="elastic-*", repo=None, schedule=Schedule.always())
+        assert _matches(rule, "github", "elastic-foo", "myrepo")
+        assert _matches(rule, "github", "elastic-bar", "myrepo")
+        assert not _matches(rule, "github", "other", "myrepo")
+
+    def test_glob_repo_prefix(self):
+        rule = ScheduleRule(host=None, org=None, repo="docs-*", schedule=Schedule.always())
+        assert _matches(rule, "github", "elastic", "docs-content")
+        assert not _matches(rule, "github", "elastic", "elasticsearch")
+
+    def test_glob_bare_star_matches_any(self):
+        rule = ScheduleRule(host="github", org="*", repo=None, schedule=Schedule.always())
+        assert _matches(rule, "github", "elastic", "es")
+        assert _matches(rule, "github", "anyorg", "anyrepo")
+
+    def test_exact_value_still_exact(self):
+        """A value with no glob chars still requires an exact match."""
+        rule = ScheduleRule(host=None, org="elastic", repo=None, schedule=Schedule.always())
+        assert _matches(rule, "github", "elastic", "repo")
+        assert not _matches(rule, "github", "elasticfoo", "repo")
+
+    # --- ref_type scoping ---
+
+    def test_ref_type_exact_match(self):
+        rule = ScheduleRule(host=None, org=None, repo=None, ref_type="branch",
+                            schedule=Schedule.always())
+        assert _matches(rule, "github", "org", "repo", ref_type="branch")
+        assert not _matches(rule, "github", "org", "repo", ref_type="tag")
+        assert not _matches(rule, "github", "org", "repo", ref_type="commit")
+
+    def test_ref_type_star_matches_all(self):
+        rule = ScheduleRule(host=None, org=None, repo=None, ref_type="*",
+                            schedule=Schedule.always())
+        assert _matches(rule, "github", "org", "repo", ref_type="branch")
+        assert _matches(rule, "github", "org", "repo", ref_type="tag")
+        assert _matches(rule, "github", "org", "repo", ref_type="commit")
+
+    def test_ref_type_none_matches_all(self):
+        rule = ScheduleRule(host=None, org=None, repo=None, ref_type=None,
+                            schedule=Schedule.always())
+        assert _matches(rule, "github", "org", "repo", ref_type="branch")
+        assert _matches(rule, "github", "org", "repo", ref_type="tag")
+
+    # --- ref scoping (matched against selector match patterns) ---
+
+    def test_ref_glob_matches_pattern(self):
+        rule = ScheduleRule(host=None, org=None, repo=None, ref="v*",
+                            schedule=Schedule.always())
+        assert _matches(rule, "gh", "org", "repo", patterns=["v{major}.{minor}.{patch}"])
+        assert not _matches(rule, "gh", "org", "repo", patterns=["main"])
+
+    def test_ref_none_matches_any_pattern(self):
+        rule = ScheduleRule(host=None, org=None, repo=None, ref=None,
+                            schedule=Schedule.always())
+        assert _matches(rule, "gh", "org", "repo", patterns=["main"])
+        assert _matches(rule, "gh", "org", "repo", patterns=["v{major}.{minor}.{patch}"])
+
+    def test_ref_matches_any_of_multiple_patterns(self):
+        """The rule matches if the ref glob hits at least one of the source's match patterns."""
+        rule = ScheduleRule(host=None, org=None, repo=None, ref="v*",
+                            schedule=Schedule.always())
+        # One pattern matches v*, the other doesn't — should still match
+        assert _matches(rule, "gh", "org", "repo",
+                        patterns=["main", "v{major}.{minor}.{patch}"])
+        # Neither matches
+        assert not _matches(rule, "gh", "org", "repo", patterns=["main", "feature-*"])
+
+    # --- specificity with globs ---
+
+    def test_specificity_exact_beats_glob(self):
+        exact = ScheduleRule(host="github", org="elastic", repo=None, schedule=Schedule.always())
+        glob_ = ScheduleRule(host="github", org="elastic-*", repo=None, schedule=Schedule.always())
+        catch = ScheduleRule(host=None, org=None, repo=None, schedule=Schedule.always())
+        assert exact.specificity() > glob_.specificity() > catch.specificity()
+
+    def test_specificity_ref_type_exact_vs_star(self):
+        exact = ScheduleRule(host=None, org=None, repo=None, ref_type="branch",
+                             schedule=Schedule.always())
+        star = ScheduleRule(host=None, org=None, repo=None, ref_type="*",
+                            schedule=Schedule.always())
+        assert exact.specificity() > star.specificity() > 0
+
+    def test_specificity_ref_exact_vs_glob(self):
+        exact_ref = ScheduleRule(host=None, org=None, repo=None, ref="main",
+                                 schedule=Schedule.always())
+        glob_ref = ScheduleRule(host=None, org=None, repo=None, ref="v*",
+                                schedule=Schedule.always())
+        assert exact_ref.specificity() > glob_ref.specificity()
 
 
 class TestResolveSchedule:
@@ -322,3 +421,139 @@ class TestParseConfigSchedules:
         from sourcerer.config import parse_config
         cfg = parse_config({"sources": [self._src()]})
         assert cfg.schedules == []
+
+    # --- new fields: ref_type and ref ---
+
+    def test_schedule_ref_type_parsed(self):
+        from sourcerer.config import parse_config
+        cfg = parse_config({
+            "schedules": [
+                {"git": {"ref_type": "tag"}, "schedule": "6h"},
+                {"git": {"ref_type": "*"}, "schedule": "1d"},
+            ],
+            "sources": [self._src()],
+        })
+        assert cfg.schedules[0].ref_type == "tag"
+        assert cfg.schedules[1].ref_type == "*"
+
+    def test_schedule_ref_parsed(self):
+        from sourcerer.config import parse_config
+        cfg = parse_config({
+            "schedules": [{"git": {"ref": "v*"}, "schedule": "3h"}],
+            "sources": [self._src()],
+        })
+        assert cfg.schedules[0].ref == "v*"
+
+    def test_schedule_glob_org_parsed(self):
+        from sourcerer.config import parse_config
+        cfg = parse_config({
+            "schedules": [{"git": {"org": "elastic-*"}, "schedule": "3h"}],
+            "sources": [self._src()],
+        })
+        assert cfg.schedules[0].org == "elastic-*"
+
+    def test_schedule_ref_type_partial_glob_rejected(self):
+        """ref_type only allows exact values or bare '*' — no partial globs."""
+        from sourcerer.config import parse_config
+        with pytest.raises(ValueError, match="ref_type"):
+            parse_config({
+                "schedules": [{"git": {"ref_type": "bra*"}, "schedule": "1d"}],
+                "sources": [],
+            })
+
+    def test_schedule_ref_type_invalid_value_rejected(self):
+        from sourcerer.config import parse_config
+        with pytest.raises(ValueError, match="ref_type"):
+            parse_config({
+                "schedules": [{"git": {"ref_type": "sha"}, "schedule": "1d"}],
+                "sources": [],
+            })
+
+    def test_schedule_unknown_git_key_rejected(self):
+        from sourcerer.config import parse_config
+        with pytest.raises(ValueError, match="unknown keys"):
+            parse_config({
+                "schedules": [{"git": {"bogus": "x"}, "schedule": "1d"}],
+                "sources": [],
+            })
+
+    def test_dotted_git_ref_type_shorthand(self):
+        """Dotted key git.ref_type in a schedule rule is expanded correctly."""
+        from sourcerer.config import parse_config
+        cfg = parse_config({
+            "schedules": [{"git.ref_type": "tag", "schedule": "6h"}],
+            "sources": [self._src()],
+        })
+        assert cfg.schedules[0].ref_type == "tag"
+
+
+# ---------------------------------------------------------------------------
+# resolve_schedule with globs
+# ---------------------------------------------------------------------------
+
+
+def _branch_selector() -> Selector:
+    """Minimal Selector with a branch ref_type and a 'main' match pattern."""
+    return Selector(
+        ref_type="branch",
+        raw_patterns=["main"],
+        compiled=[compile_pattern("main")],
+        since=None,
+        retain=None,
+        levels=(),
+        schedule=None,
+    )
+
+
+class TestResolveScheduleGlob:
+    """Tests that verify glob rules and the exact > glob > any specificity hierarchy."""
+
+    def test_exact_org_beats_glob_org(self):
+        """An exact org rule wins over a glob org rule at the same level."""
+        exact = ScheduleRule(host="github", org="elastic", repo=None,
+                             schedule=parse_schedule("1h"))
+        glob_ = ScheduleRule(host="github", org="elastic-*", repo=None,
+                             schedule=parse_schedule("6h"))
+        catch = ScheduleRule(host=None, org=None, repo=None,
+                             schedule=parse_schedule("1d"))
+        rules = [glob_, catch, exact]  # order shouldn't matter
+        sel = _selector()
+        result = resolve_schedule("github", "elastic", "elasticsearch", sel, rules)
+        assert result.value == timedelta(hours=1)
+
+    def test_glob_org_beats_catch_all(self):
+        """A glob org rule is more specific than a catch-all rule."""
+        glob_ = ScheduleRule(host=None, org="elastic-*", repo=None,
+                             schedule=parse_schedule("6h"))
+        catch = ScheduleRule(host=None, org=None, repo=None,
+                             schedule=parse_schedule("1d"))
+        rules = [catch, glob_]
+        sel = _selector()
+        result = resolve_schedule("github", "elastic-inner", "somerepo", sel, rules)
+        assert result.value == timedelta(hours=6)
+
+    def test_ref_type_scoping(self):
+        """A ref_type=tag rule matches tag selectors but not branch selectors."""
+        tag_rule = ScheduleRule(host=None, org=None, repo=None, ref_type="tag",
+                                schedule=parse_schedule("1h"))
+        catch = ScheduleRule(host=None, org=None, repo=None,
+                             schedule=parse_schedule("1d"))
+        rules = [tag_rule, catch]
+        tag_sel = _selector()
+        branch_sel = _branch_selector()
+        # tag selector gets the tag-specific rule
+        assert resolve_schedule("github", "org", "repo", tag_sel, rules).value == timedelta(hours=1)
+        # branch selector falls back to the catch-all
+        assert resolve_schedule("github", "org", "repo", branch_sel, rules).value == timedelta(days=1)
+
+    def test_ref_scoping_by_match_pattern(self):
+        """A ref=v* rule matches selectors whose match patterns start with 'v'."""
+        ref_rule = ScheduleRule(host=None, org=None, repo=None, ref="v*",
+                                schedule=parse_schedule("2h"))
+        catch = ScheduleRule(host=None, org=None, repo=None,
+                             schedule=parse_schedule("1d"))
+        rules = [ref_rule, catch]
+        tag_sel = _selector()          # match: v{major}.{minor}.{patch}
+        branch_sel = _branch_selector()    # match: main
+        assert resolve_schedule("github", "org", "repo", tag_sel, rules).value == timedelta(hours=2)
+        assert resolve_schedule("github", "org", "repo", branch_sel, rules).value == timedelta(days=1)

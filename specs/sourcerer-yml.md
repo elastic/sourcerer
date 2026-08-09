@@ -21,6 +21,8 @@ performs its `setup`, `index`, and `prune` commands.
 |`schedules[i].git.host`                |String               |No      ||
 |`schedules[i].git.org`                 |String               |No      ||
 |`schedules[i].git.repo`                |String               |No      ||
+|`schedules[i].git.ref_type`            |String               |No      ||
+|`schedules[i].git.ref`                 |String               |No      ||
 |`schedules[i].schedule`                |String               |Yes     ||
 |`sources`                              |Array[Object]        |No      ||
 |`sources[i].git`                       |Object               |Yes     ||
@@ -188,9 +190,15 @@ Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#
 ### `schedules`
 
 Defines coarse, scope-based default schedules. A schedule rule specifies an
-optional git scope (`host`/`org`/`repo`) and a schedule expression. The most
-specific matching rule wins; if no rule matches a source, the source is always
-due (equivalent to `"* * * * *"`).
+optional git scope (`host`/`org`/`repo`/`ref_type`/`ref`) and a schedule
+expression. The most specific matching rule wins; if no rule matches a source,
+the source is always due (equivalent to `"* * * * *"`).
+
+Scope fields support glob patterns: `host`, `org`, `repo`, and `ref` accept
+fnmatch wildcards (`*`, `?`, `[seq]`); `ref_type` accepts exact values or bare
+`*`. Specificity ranks exact fields (2 points) above glob fields (1 point) above
+omitted fields (0 points) — so a rule with `org: "elastic"` beats one with
+`org: "elastic-*"` for an org named `elastic`.
 
 Sources without any `schedule` field and configs without a `schedules` section
 behave identically to before: every source is treated as always due (the gate is
@@ -206,11 +214,21 @@ sources whose schedule has fired since they were last indexed.
 
 ### `schedules[i].git`
 
-Optional scope filter for this schedule rule. A rule with no `git` (or an empty
-`git` block) matches all sources. A rule with `git.host` only matches sources
-with that host; adding `git.org` narrows to that org; adding `git.repo` narrows
-further to that repo. `git.ref_type` is not supported at the `schedules` level.
-Use `sources[i].schedule` to schedule by ref type.
+Optional scope filter for this schedule rule. Five scope fields are available:
+`host`, `org`, `repo`, `ref_type`, and `ref`. A rule with no `git` (or an empty
+`git` block) matches all sources.
+
+**Glob wildcards**: `host`, `org`, `repo`, and `ref` all support
+[fnmatch](https://docs.python.org/3/library/fnmatch.html) glob patterns
+(`*`, `?`, `[seq]`). A plain string with no glob characters still requires exact
+equality. `ref_type` supports only an exact value (`branch`/`tag`/`commit`) or
+the bare wildcard `*` — partial globs on an enum are rejected.
+
+**Precedence / specificity**: the most-specific matching rule wins (see
+`sources[i].schedule` for the full precedence chain). Specificity is computed
+per field: an exact value counts 2, a glob pattern counts 1, omitted counts 0.
+Sums are compared, so a rule with two exact fields (4) beats one with two glob
+fields (2) beats a catch-all (0).
 
 - Required: No
 - Default: `null` (matches all sources)
@@ -218,33 +236,79 @@ Use `sources[i].schedule` to schedule by ref type.
 
 ### `schedules[i].git.host`
 
-Match sources with this `git.host`. When omitted, the rule matches sources on any host.
+Match sources with this `git.host`. Glob patterns are allowed.
+When omitted, the rule matches sources on any host.
 
 - Required: No
 - Default: `null` (matches any host)
 - Type: String
 - Validation:
-  - Must be a single concrete host id (no wildcards, no arrays)
+  - A plain string (no glob chars) must be a concrete host id; globs may match any host.
+  - No arrays.
 
 ### `schedules[i].git.org`
 
-Match sources with this `git.org`. When omitted, the rule matches sources in any org.
+Match sources with this `git.org`. Glob patterns are allowed.
+When omitted, the rule matches sources in any org.
 
 - Required: No
 - Default: `null` (matches any org)
 - Type: String
 - Validation:
-  - Must be a single concrete value (no wildcards, no arrays)
+  - Globs (e.g. `elastic-*`) are accepted; a plain string requires exact equality.
+  - No arrays.
 
 ### `schedules[i].git.repo`
 
-Match sources with this `git.repo`. When omitted, the rule matches sources in any repo.
+Match sources with this `git.repo`. Glob patterns are allowed.
+When omitted, the rule matches sources in any repo.
 
 - Required: No
 - Default: `null` (matches any repo)
 - Type: String
 - Validation:
-  - Must be a single concrete value (no wildcards, no arrays)
+  - Globs (e.g. `docs-*`) are accepted; a plain string requires exact equality.
+  - No arrays.
+
+### `schedules[i].git.ref_type`
+
+Match sources with this `git.ref_type`. When omitted (or set to `*`), the rule
+matches sources regardless of ref type.
+
+Because `ref_type` is a fixed enum, only exact values or the bare wildcard `*`
+are accepted — partial globs (e.g. `bra*`) are rejected with an error.
+
+- Required: No
+- Default: `null` (matches any ref_type)
+- Type: String
+- Validation:
+  - Must be one of `branch`, `tag`, `commit`, or `*`.
+
+### `schedules[i].git.ref`
+
+Match sources whose configured `match` pattern(s) are matched by this glob.
+Glob patterns are allowed.
+
+Because the schedule gate runs **before any ls-remote or clone** (to avoid
+network work for not-due sources), actual ref names are not yet available. `ref`
+therefore scopes by the configured `match` pattern string, not by live ref names.
+A rule matches a source if its `ref` glob hits at least one of the source's
+`match` entries.
+
+Examples:
+- `ref: "v*"` matches sources with `match: v{major}.{minor}.{patch}` (the literal
+  pattern text starts with `v`).
+- `ref: "main"` matches a source with `match: main`.
+- `ref: "feat-*"` matches sources whose match pattern starts with `feat-`.
+
+When omitted, the rule matches any source regardless of its `match` patterns.
+
+- Required: No
+- Default: `null` (matches any source)
+- Type: String
+- Validation:
+  - Globs are accepted; a plain string requires the source's match pattern to equal it exactly.
+  - No arrays.
 
 ### `schedules[i].schedule`
 
@@ -507,7 +571,10 @@ Overrides anything in `schedules` that might have otherwise applied to this sour
 Schedule precedence (highest to lowest):
 
 1. `sources[i].schedule` (per-source override)
-2. Most specific matching `schedules[i]` rule (host+org+repo > host+org > host > catch-all)
+2. Most specific matching `schedules[i]` rule. Specificity is the sum of per-field
+   weights: exact value = 2, glob pattern = 1, omitted = 0, across all five scope
+   fields (`host`, `org`, `repo`, `ref_type`, `ref`). Ties are broken by the order
+   the rules appear in the config file (first matching rule wins).
 3. Default: always due (`"* * * * *"`)
 
 When omitted and no `schedules` rule matches, the source is always due for

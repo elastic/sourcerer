@@ -205,6 +205,11 @@ expensive pipeline. Sources where another run is actively indexing are skipped.
 - **Schedule syntax**: a 5-field cron expression (e.g. `"0 */3 * * *"` = every 3 hours) or a
   duration (`"3h"`, `"1d"` — same syntax as `retain.age`).
 - **Precedence**: `sources[i].schedule` > most-specific `schedules[i]` rule > default (always due).
+  Schedule rule scope fields (`host`, `org`, `repo`, `ref_type`, `ref`) support fnmatch glob
+  wildcards; `ref_type` accepts exact values or bare `*` only. Specificity weights: exact = 2,
+  glob = 1, omitted = 0, summed across all five fields — so an exact field always beats a glob field
+  at the same level. `ref` is matched against the source's configured `match` pattern string(s)
+  (not live ref names — the gate runs pre-network).
 - **In-progress guard**: if a ref in scope has `status: indexing` with `indexing_started_at`
   newer than 6 hours ago, the whole source is skipped. After 6 hours (stuck-retry interval),
   the source is treated as due regardless.

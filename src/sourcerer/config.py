@@ -45,6 +45,7 @@ Duration units: s, h, d, w, m (=30d month), y (=365d year).
 from __future__ import annotations
 
 # Standard packages
+import fnmatch
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -66,6 +67,28 @@ _PLURAL_TO_LEVEL = {"majors": "major", "minors": "minor", "patches": "patch", "b
 # git's own "short hash" convention (the shortest form `git rev-parse --short` will produce), and
 # rejecting anything shorter bounds how many distinct commits a single prefix could collide with.
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+_GLOB_CHARS = frozenset("*?[")
+
+
+def _has_glob(s: str) -> bool:
+    """Return True if `s` contains any fnmatch wildcard character."""
+    return any(c in _GLOB_CHARS for c in s)
+
+
+def _scope_field_matches(pattern: str | None, value: str) -> bool:
+    """Test a single schedule-rule scope field against a concrete source value.
+
+    - ``None`` (field omitted): matches any value.
+    - A pattern with no glob chars: exact equality (same as before).
+    - A pattern with glob chars (``*``, ``?``, ``[…]``): fnmatch case-sensitive glob.
+
+    This means bare ``*`` and existing exact strings keep backward-compatible behaviour
+    (bare ``*`` is a glob that matches everything; an exact string matches only itself),
+    while ``elastic-*`` / ``docs-?`` etc. enable partial-prefix matching.
+    """
+    if pattern is None:
+        return True
+    return fnmatch.fnmatchcase(value, pattern)
 
 
 @dataclass(frozen=True)
@@ -127,25 +150,66 @@ class ScheduleRule:
     """A top-level `schedules[i]` entry: an optional git-scope filter plus a parsed schedule.
 
     A rule with all-None scope fields matches every source (the default-schedule fallback).
-    Matching uses substring inclusion: a non-None field must equal the source's corresponding
-    field. More specific rules (more non-None fields) take precedence over broader ones.
+
+    Scope fields (all optional):
+    - ``host`` / ``org`` / ``repo``: matched with fnmatch glob against the source's concrete
+      values.  A plain string (no glob chars) behaves as before — exact equality.  A glob
+      (e.g. ``elastic-*``) enables partial matching.  ``None`` matches any value.
+    - ``ref_type``: matched against the source selector's ``ref_type``.  Only the exact values
+      ``branch``/``tag``/``commit`` or the bare wildcard ``*`` are accepted (no partial globs
+      on an enum field).  ``None`` matches any ref_type.
+    - ``ref``: glob-matched against the source selector's raw ``match`` pattern string(s)
+      (e.g. ``v{major}.{minor}.{patch}``).  The schedule gate runs before any ls-remote, so
+      actual ref names are not yet available; ``ref`` therefore scopes by the configured match
+      pattern.  ``None`` matches any source.
+
+    Specificity (higher = more specific, used to pick the winning rule):
+    Each of the five scope fields contributes:
+    - 2 if set to an exact value (no glob metacharacters);
+    - 1 if set to a glob/wildcard pattern (including bare ``*``);
+    - 0 if omitted (``None``).
+    The field weights are summed.  ``ref_type: "*"`` counts as glob-tier (1);
+    ``ref_type: "branch"`` counts as exact (2).
     """
-    host: str | None        # if set, only matches sources with this git.host
-    org: str | None         # if set, only matches sources with this git.org
-    repo: str | None        # if set, only matches sources with this git.repo
+    host: str | None          # if set, glob-matched against sources with this git.host
+    org: str | None           # if set, glob-matched against sources with this git.org
+    repo: str | None          # if set, glob-matched against sources with this git.repo
     schedule: Schedule
+    ref_type: str | None = None  # if set, matches source selector ref_type (exact or "*")
+    ref: str | None = None       # if set, glob-matched against the selector's match pattern(s)
+
+    def _field_weight(self, v: str | None) -> int:
+        """Return the specificity weight for a single scope field."""
+        if v is None:
+            return 0
+        return 1 if _has_glob(v) else 2
 
     def specificity(self) -> int:
         """Higher is more specific. Used to pick the winning rule when multiple rules match."""
-        return sum(1 for v in (self.host, self.org, self.repo) if v is not None)
+        return sum(self._field_weight(v)
+                   for v in (self.host, self.org, self.repo, self.ref_type, self.ref))
 
-    def matches(self, host: str, org: str, repo: str) -> bool:
-        if self.host is not None and self.host != host:
+    def matches(self, host: str, org: str, repo: str, ref_type: str,
+                match_patterns: list[str]) -> bool:
+        """Return True if this rule's scope matches the given source.
+
+        ``match_patterns`` is the selector's raw ``match`` pattern list
+        (used to test the ``ref`` scope field before any ls-remote).
+        """
+        if not _scope_field_matches(self.host, host):
             return False
-        if self.org is not None and self.org != org:
+        if not _scope_field_matches(self.org, org):
             return False
-        if self.repo is not None and self.repo != repo:
+        if not _scope_field_matches(self.repo, repo):
             return False
+        # ref_type: None or "*" matches any; exact values matched directly (no partial glob).
+        if self.ref_type is not None and self.ref_type != "*" and self.ref_type != ref_type:
+            return False
+        # ref: matched against the selector's configured match patterns.  The rule matches if
+        # its ref glob matches at least one of the source's match pattern strings.
+        if self.ref is not None:
+            if not any(_scope_field_matches(self.ref, p) for p in match_patterns):
+                return False
         return True
 
 
@@ -154,7 +218,9 @@ def resolve_schedule(
 ) -> Schedule:
     """Pick the effective Schedule for a source selector:
       1. sources[i].schedule wins (per-source override).
-      2. Most-specific matching schedules[i] rule wins (highest specificity = most non-None fields).
+      2. Most-specific matching schedules[i] rule wins (highest specificity).
+         Specificity ranks: exact field (2) > glob field (1) > omitted (0), summed across
+         all five scope fields (host, org, repo, ref_type, ref).
       3. Default: Schedule.always() (every minute, i.e. always due when invoked).
     """
     if selector.schedule is not None:
@@ -162,7 +228,7 @@ def resolve_schedule(
     best: Schedule | None = None
     best_spec = -1
     for rule in schedules:
-        if rule.matches(host, org, repo):
+        if rule.matches(host, org, repo, selector.ref_type, selector.raw_patterns):
             s = rule.specificity()
             if s > best_spec:
                 best_spec = s
@@ -424,9 +490,16 @@ def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
 def _parse_schedule_rule(raw: dict, ctx: str) -> ScheduleRule:
     """Parse one `schedules[i]` entry into a ScheduleRule.
 
-    A schedule rule has an optional `git` scope (host/org/repo, each a single string or omitted)
-    and a required `schedule` (cron or duration string).
+    A schedule rule has an optional `git` scope and a required `schedule` (cron or duration).
+
+    Scope fields (all optional, inside a `git:` mapping):
+    - `host` / `org` / `repo`: a string; glob wildcards (``*``, ``?``, ``[…]``) are allowed.
+    - `ref_type`: one of ``branch``/``tag``/``commit`` or the bare wildcard ``*``.
+      Partial globs (e.g. ``bra*``) are rejected — ref_type is an enum.
+    - `ref`: a string; glob wildcards are allowed.  Matched against the selector's raw
+      ``match`` pattern string(s) (pre-ls-remote semantics).
     """
+    _SCHEDULE_GIT_KEYS = {"host", "org", "repo", "ref_type", "ref"}
     unknown = set(raw) - {"git", "schedule"}
     if unknown:
         raise ValueError(f"{ctx}: unknown keys {sorted(unknown)}")
@@ -437,32 +510,50 @@ def _parse_schedule_rule(raw: dict, ctx: str) -> ScheduleRule:
     except ValueError as e:
         raise ValueError(f"{ctx} schedule: {e}") from e
 
-    host = org = repo = None
+    host = org = repo = ref_type = ref = None
     git = raw.get("git")
     if git is not None:
         if not isinstance(git, dict):
             raise ValueError(f"{ctx} git: must be a mapping")
-        unknown_git = set(git) - {"host", "org", "repo"}
+        unknown_git = set(git) - _SCHEDULE_GIT_KEYS
         if unknown_git:
             raise ValueError(f"{ctx} git: unknown keys {sorted(unknown_git)} "
-                             f"(schedules git scope supports host, org, repo only)")
+                             f"(schedules git scope supports: "
+                             f"{', '.join(sorted(_SCHEDULE_GIT_KEYS))})")
         if git.get("host") is not None:
             h = git["host"]
-            if not isinstance(h, str):
-                raise ValueError(f"{ctx} git.host: must be a string")
+            if not isinstance(h, str) or not h:
+                raise ValueError(f"{ctx} git.host: must be a non-empty string")
             host = h
         if git.get("org") is not None:
             o = git["org"]
-            if not isinstance(o, str):
-                raise ValueError(f"{ctx} git.org: must be a string")
+            if not isinstance(o, str) or not o:
+                raise ValueError(f"{ctx} git.org: must be a non-empty string")
             org = o
         if git.get("repo") is not None:
             r = git["repo"]
-            if not isinstance(r, str):
-                raise ValueError(f"{ctx} git.repo: must be a string")
+            if not isinstance(r, str) or not r:
+                raise ValueError(f"{ctx} git.repo: must be a non-empty string")
             repo = r
+        if git.get("ref_type") is not None:
+            rt = git["ref_type"]
+            if not isinstance(rt, str) or not rt:
+                raise ValueError(f"{ctx} git.ref_type: must be a non-empty string")
+            if rt not in ("branch", "tag", "commit", "*"):
+                # Partial globs (e.g. "bra*") are not meaningful for an enum field.
+                raise ValueError(
+                    f"{ctx} git.ref_type: must be 'branch', 'tag', 'commit', or '*' "
+                    f"(no partial globs on an enum field); got {rt!r}"
+                )
+            ref_type = rt
+        if git.get("ref") is not None:
+            rf = git["ref"]
+            if not isinstance(rf, str) or not rf:
+                raise ValueError(f"{ctx} git.ref: must be a non-empty string")
+            ref = rf
 
-    return ScheduleRule(host=host, org=org, repo=repo, schedule=schedule)
+    return ScheduleRule(host=host, org=org, repo=repo, schedule=schedule,
+                        ref_type=ref_type, ref=ref)
 
 
 def _deep_merge(dst: dict, src: dict) -> None:

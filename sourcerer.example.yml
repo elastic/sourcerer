@@ -1,8 +1,10 @@
 # sourcerer.yml - the config passed to `sourcerer index --config` and `sourcerer prune --config`
 # (and, for its `hosts:` section only, `sourcerer setup --config`).
 #
-# Two optional top-level sections: `hosts:` (override/extend the built-in host defaults)
-# and `sources:` (what to index).
+# Three optional top-level sections:
+#   hosts:     override/extend the built-in git-host defaults
+#   schedules: coarse, scope-based default indexing cadences (glob wildcards supported)
+#   sources:   what to index
 
 # ---------------------------------------------------------------------------------------------
 # hosts: OPTIONAL. Omit entirely to use the built-in defaults for all known hosts
@@ -85,6 +87,42 @@ hosts:
     file: "https://myinstance-123456789.us-central1.sourcemanager.dev/{git.org}/{git.repo}/src/commit/{git.commit}/{file.path}"
     line: "https://myinstance-123456789.us-central1.sourcemanager.dev/{git.org}/{git.repo}/src/commit/{git.commit}/{file.path}#L{line.number}"
     line_range: "https://myinstance-123456789.us-central1.sourcemanager.dev/{git.org}/{git.repo}/src/commit/{git.commit}/{file.path}#L{line.number_start}-L{line.number_end}"
+
+# ---------------------------------------------------------------------------------------------
+# schedules: OPTIONAL. Coarse, scope-based default indexing cadences.
+# Run `sourcerer index --config` on a frequent cron (e.g. every 5 minutes) and let the
+# schedules control when each source actually re-indexes. A source is indexed only if its
+# configured schedule has fired since it was last fully indexed.
+#
+# Each rule has an optional `git` scope (host / org / repo / ref_type / ref) and a required
+# `schedule` (5-field cron or duration string).  The most-specific matching rule wins.
+# Scope fields support fnmatch glob wildcards (*  ?  [seq]); `ref_type` accepts exact values
+# or bare `*` only (no partial globs on an enum).  Specificity: exact = 2 pts, glob = 1 pt,
+# omitted = 0 pts — summed across all five fields.
+#
+# A source with no matching rule (and no per-source `schedule` field) is always due.
+schedules:
+# Match all sources on github, in the elastic org — every 3 hours.
+- git:
+    host: github
+    org: elastic
+  schedule: "0 */3 * * *"
+
+# More specific: only repos whose name starts with "docs-" — nightly instead.
+# (Exact fields beat glob fields, so this rule beats the elastic-org rule for docs repos.)
+- git:
+    host: github
+    org: elastic
+    repo: docs-*
+  schedule: "0 2 * * *"
+
+# Scope to tag selectors only (any host / org / repo).
+- git:
+    ref_type: tag
+  schedule: "0 1 * * 0"   # weekly on Sundays at 1am
+
+# Catch-all for everything else — once a day.
+- schedule: "1d"
 
 # ---------------------------------------------------------------------------------------------
 # sources: what to index.
