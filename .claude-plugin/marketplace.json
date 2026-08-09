@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "sourcerer",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "description": "Search indexed git repositories and generate responses with citations.",
       "source": "./",
       "strict": false,
