@@ -1,6 +1,6 @@
-id: sourcerer.code.search
+id: sourcerer.repos.search
 type: esql
-description: search code in repo file(s) with fast, relevant, code-optimized bm25
+description: find repo(s) whose code best matches a query
 tags: []
 configuration:
   query: |-
@@ -19,9 +19,27 @@ configuration:
     | EVAL _file_segs = MV_COUNT(SPLIT(file.path, "/"))
     | WHERE _fp_is_recursive OR _file_segs == _fp_segs
 
+    // Collapse matching lines to one row per repo + commit
+    | STATS
+        _commit_file_count_distinct = COUNT_DISTINCT(file.path),
+        _commit_score_sum = SUM(_score)
+        BY git.host, git.org, git.repo, git.commit
+
+    // Normalize by distinct files so breadth beats duplication
+    | EVAL _commit_score_density = _commit_score_sum / SQRT(TO_DOUBLE(_commit_file_count_distinct))
+
+    // Collapse commits to one row per repo
+    | STATS
+        _repo_ref_count = COUNT(*),
+        _repo_score_sum = SUM(_commit_score_density)
+        BY git.host, git.org, git.repo
+
+    // Dampen by ref count so repos with more indexed branches don't win on volume alone
+    | EVAL score = _repo_score_sum / SQRT(TO_DOUBLE(_repo_ref_count))
+
     // Format the response
-    | SORT _score DESC
-    | KEEP git.host, git.org, git.repo, git.commit, file.path, file.size, line.number, line.content
+    | SORT score DESC
+    | KEEP git.host, git.org, git.repo, score
     | LIMIT ?n
   params:
     git_host:
@@ -46,7 +64,7 @@ configuration:
       defaultValue: "*"
     file_path:
       type: string
-      description: File path(s) to grep (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)
+      description: File path(s) to search (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)
       optional: true
       defaultValue: "**"
     q:

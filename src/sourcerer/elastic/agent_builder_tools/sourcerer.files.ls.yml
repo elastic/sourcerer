@@ -76,12 +76,12 @@ configuration:
   params:
     git_host:
       type: string
-      description: Filter by git host(s)
+      description: Filter by git host(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     git_org:
       type: string
-      description: Filter by git org(s)
+      description: Filter by git org(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     git_repo:

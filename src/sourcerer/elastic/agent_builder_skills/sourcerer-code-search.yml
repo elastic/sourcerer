@@ -15,5 +15,7 @@ skill_dir: code-search
 # auto-generated from SKILL.md body:
 # content: ...
 
-tool_ids: []
+tool_ids:
+- sourcerer.code.grep
+- sourcerer.code.search
 referenced_content: []

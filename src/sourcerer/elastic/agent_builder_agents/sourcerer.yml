@@ -27,18 +27,11 @@ configuration:
   - sourcerer-repo-discovery
   tools:
   - tool_ids:
-    - platform.core.search
-    - platform.core.list_indices
-    - platform.core.get_index_mapping
-    - platform.core.get_document_by_id
-    - sourcerer.code.grep
-    - sourcerer.code.search
     - sourcerer.files.cat
     - sourcerer.files.head
     - sourcerer.files.ls
     - sourcerer.files.read_lines
     - sourcerer.files.tail
-    - sourcerer.refs.list
   enable_elastic_capabilities: false
   workflow_ids: []
   plugin_ids: []

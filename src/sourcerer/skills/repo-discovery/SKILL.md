@@ -8,8 +8,11 @@ description: "Use at the start of most questions to identify which repos are ind
 - **Mid-investigation**: when the trail leads into a dependency, upstream library, or sibling repo - expand scope before drawing conclusions.
 - **When a dependency boundary is reached**: if the current repo's code delegates to an external dependency (e.g., an import resolves outside the repo, behavior is implemented in an upstream library), always check whether that dependency is indexed before concluding the answer can't be found. Never assume a dependency is unindexed without checking.
 
-## Tool
-Use `sourcerer.refs.list` with wildcard `git_repo` and `git_org` patterns. Each result row is one indexed ref; the distinct `git.repo` values in the results are the repos available to query.
+## Tools
+
+- `sourcerer.repos.list` lists all indexed repos by git host. Each result is an org/repo that has at least one ref indexed. Start here. Avoid filters; it's cheap to run.
+- `sourcerer.repos.search` ranks repos whose code best matches a free-text query. You can improve recall by adding search terms and using snake_case or PascalCase (e.g. "elastic es|ql disk_bbq" matches any hits for "elastic", "disk_bbq", "disk", "bbq"; "DiskBBQ" matches any hits for "diskbbq", "disk", "bbq"; "es|ql" matches any hits for "es|ql", "es", "ql"). Prefer repos with higher scores. Helps with deciding which repo(s) are most relevant to your work, not for finding specific files or code. Run this in parallel with (or right after) `sourcerer.repos.list` and cross-reference to handle false matches or missed matches.
+- `sourcerer.refs.list` lists all indexed refs by repo. Each result row is one indexed ref; the distinct `git.repo` values in the results are the repos available to query. Prefer filtering only by git_org and git_repo, using * wildcards as needed.
 
 ## Progressive disclosure - narrow first, expand only as needed
 
@@ -33,7 +36,7 @@ From the result rows:
 
 ## Example: expanding scope mid-conversation
 A question about Elasticsearch's query parsing leads into how Lucene's `QueryParser` works underneath:
-1. Initial discovery: `refs.list(git_org: elastic, git_repo: elasticsearch)` - confirm the repo and plan the search.
+1. Initial discovery: `sourcerer.repos.list` and `sourcerer.refs.list(git_org: elastic, git_repo: elasticsearch)` - confirm the repo and plan the search.
 2. Answer the Elasticsearch side. When the trail leads to Lucene, expand:
 3. `refs.list(git_org: apache, git_repo: lucene*)` - discover which Lucene repos are indexed.
 4. Use `ref-resolution` on the relevant Lucene repo to pin a commit, then query content.

@@ -17,4 +17,6 @@ skill_dir: repo-discovery
 
 tool_ids:
 - sourcerer.refs.list
+- sourcerer.repos.list
+- sourcerer.repos.search
 referenced_content: []

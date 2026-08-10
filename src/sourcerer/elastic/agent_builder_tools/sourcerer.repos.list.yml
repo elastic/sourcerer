@@ -1,6 +1,6 @@
-id: sourcerer.refs.list
+id: sourcerer.repos.list
 type: esql
-description: list the git refs (branches, tags) indexed for org(s)/repo(s)
+description: list the git org(s)/repo(s) indexed
 tags: []
 configuration:
   query: |-
@@ -15,8 +15,11 @@ configuration:
         AND status LIKE ?status
 
     // Format the response
-    | SORT indexed_at DESC
-    | KEEP git.host, git.org, git.repo, git.ref, git.ref_type, git.commit, git.commit_date, status, files_count, lines_count, indexed_at, indexing_started_at
+    | EVAL repo_line = CONCAT(git.org, "/", git.repo)
+    | STATS repos = VALUES(repo_line) BY git.host
+    | EVAL repos = MV_SORT(repos)
+    | EVAL org_repos_by_host = CONCAT("# host: ", git.host, "\n", MV_CONCAT(repos, "\n"))
+    | KEEP org_repos_by_host
     | LIMIT 1000000
   params:
     git_host:
