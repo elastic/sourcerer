@@ -1,0 +1,27 @@
+version: "1"
+name: sourcerer-subagents-spawn
+description: "[experimental] Fans out subagent tasks (or runs a single one) and returns their responses."
+enabled: true
+triggers:
+  - type: manual
+    inputs:
+      properties:
+        tasks:
+          type: array
+          items:
+            type: string
+          description: One self-contained task description per subagent. Prefer a single task unless you already know of multiple distinct, located targets.
+      required:
+        - tasks
+steps:
+  - name: fan_out
+    type: parallel
+    foreach: "{{ inputs.tasks }}"
+    mode: settled
+    concurrency: 10
+    steps:
+      - name: run_subagent
+        type: ai.agent
+        agent-id: sourcerer-subagent
+        with:
+          message: "{{ foreach.item }}"

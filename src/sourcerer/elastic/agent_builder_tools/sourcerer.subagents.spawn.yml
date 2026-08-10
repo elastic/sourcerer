@@ -1,0 +1,7 @@
+id: sourcerer.subagents.spawn
+type: workflow
+description: delegates a list of independent subtasks to parallel subagents and returns their responses. use when a request decomposes into multiple independent pieces of work that can run concurrently.
+tags: []
+configuration:
+  workflow_id: sourcerer-subagents-spawn
+  wait_for_completion: true

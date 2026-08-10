@@ -20,6 +20,7 @@ ELASTICSEARCH_INDEX_TEMPLATES_DIR = _ELASTIC / "index_templates"
 AGENT_BUILDER_TOOLS_DIR = _ELASTIC / "agent_builder_tools"
 AGENT_BUILDER_AGENTS_DIR = _ELASTIC / "agent_builder_agents"
 AGENT_BUILDER_SKILLS_DIR = _ELASTIC / "agent_builder_skills"
+AGENT_BUILDER_WORKFLOWS_DIR = _ELASTIC / "workflows"
 KIBANA_SAVED_OBJECTS_DIR = _ELASTIC / "kibana_saved_objects"
 SKILLS_DIR = resources.files("sourcerer") / "skills"
 
@@ -135,6 +136,10 @@ def _agent_put_body(agent: dict) -> dict:
     return {k: v for k, v in agent.items() if k != "id"}
 
 
+def _skill_post_body(skill: dict) -> dict:
+    return {k: v for k, v in skill.items() if k != "skill_dir"}
+
+
 def _skill_put_body(skill: dict) -> dict:
     return {k: v for k, v in skill.items() if k not in ("id", "skill_dir")}
 
@@ -223,7 +228,7 @@ def _upsert_skill(session: requests.Session, base: str, skill: dict) -> str:
     if get_resp.status_code == 200:
         resp = session.put(item_url, json=_skill_put_body(skill))  # update
     else:
-        resp = session.post(f"{base}/api/agent_builder/skills", json=skill)  # create
+        resp = session.post(f"{base}/api/agent_builder/skills", json=_skill_post_body(skill))  # create
     resp.raise_for_status()
     return skill_id
 
@@ -247,6 +252,40 @@ def load_agent_builder_skills(
         if skill["id"] == "sourcerer-code-citations":
             skill["referenced_content"] = rc_items
         loaded.append(_upsert_skill(session, base, skill))
+    return loaded
+
+
+def load_kibana_workflows(
+    session: requests.Session, kb_url: str,
+    workflows_dir: pathlib.Path = AGENT_BUILDER_WORKFLOWS_DIR,
+) -> list[str]:
+    """Idempotently create-or-update each Kibana workflow from every .yml/.yaml file in
+    `workflows_dir`. Workflows are identified by their YAML `name:` field; Kibana assigns an
+    opaque id on creation, so we resolve name→id via a search before deciding PUT vs POST.
+
+    Returns the list of upserted workflow names."""
+    workflow_files = sorted(workflows_dir.glob("*.yml")) + sorted(workflows_dir.glob("*.yaml"))
+    if not workflow_files:
+        raise FileNotFoundError(f"No workflow definitions found in {workflows_dir}")
+    base = kb_url.rstrip("/")
+    loaded = []
+    for path in workflow_files:
+        text = path.read_text(encoding="utf-8")
+        parsed = yaml.safe_load(text) or {}
+        name = parsed.get("name")
+        if not name:
+            raise ValueError(f"Workflow file {path} is missing a 'name:' field")
+        # Resolve existing workflow id by name (query is fuzzy; match exactly client-side).
+        list_resp = session.get(f"{base}/api/workflows", params={"query": name, "size": 100})
+        list_resp.raise_for_status()
+        results = list_resp.json().get("results", [])
+        existing_id = next((r["id"] for r in results if r.get("name") == name), None)
+        if existing_id:
+            resp = session.put(f"{base}/api/workflows/workflow/{existing_id}", json={"yaml": text})
+        else:
+            resp = session.post(f"{base}/api/workflows/workflow", json={"yaml": text})
+        resp.raise_for_status()
+        loaded.append(name)
     return loaded
 
 
@@ -381,6 +420,18 @@ def run(url: str, api_key: str | None, username: str | None, password: str | Non
     except requests.HTTPError as e:
         body = e.response.text if e.response is not None else ""
         click.echo(f"[ERROR] Failed to upsert agents: {e}\n{body}", err=True)
+        failed = True
+
+    try:
+        workflow_names = load_kibana_workflows(session, kb_url)
+        for wname in workflow_names:
+            click.echo(f"Upserted workflow: {wname}")
+    except FileNotFoundError as e:
+        click.echo(f"[ERROR] {e}", err=True)
+        failed = True
+    except requests.HTTPError as e:
+        body = e.response.text if e.response is not None else ""
+        click.echo(f"[ERROR] Failed to upsert workflows: {e}\n{body}", err=True)
         failed = True
 
     try:

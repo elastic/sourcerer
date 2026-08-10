@@ -1,0 +1,20 @@
+# Agent Builder skill template.
+#
+# The fields below marked "# auto-generated" are populated at runtime from
+# skills/subagent-orchestration/SKILL.md (see src/sourcerer/skills/).
+# Only the Agent-Builder-specific fields below need to be authored here.
+
+# The canonical skill directory (unprefixed); load_skills() uses this to find the SKILL.md.
+skill_dir: subagent-orchestration
+
+# auto-generated from SKILL.md frontmatter (prefixed for Agent Builder's global namespace):
+# id: subagent-orchestration
+# name: subagent-orchestration
+# description: ...
+
+# auto-generated from SKILL.md body:
+# content: ...
+
+tool_ids:
+- sourcerer.subagents.spawn
+referenced_content: []
