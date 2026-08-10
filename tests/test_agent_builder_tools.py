@@ -15,7 +15,8 @@ def _tools():
     out = {}
     for f in sorted(_TOOLS_DIR.glob("*.yml")):
         tool = yaml.safe_load(f.read_text())
-        out[tool["id"]] = tool
+        if tool.get("type") == "esql":
+            out[tool["id"]] = tool
     return out
 
 
