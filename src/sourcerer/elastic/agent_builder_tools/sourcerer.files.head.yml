@@ -35,11 +35,11 @@ configuration:
 
     // Join lines with newlines, then strip the 10-digit sort key off each line
     // (the visible show_line_numbers prefix, if any, is the 11th+ chars and is preserved)
-    | EVAL content = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(sliced, "\n")), "\n[0-9]{10}", "\n"), 2)
+    | EVAL output = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(sliced, "\n")), "\n[0-9]{10}", "\n"), 2)
 
     // Format the response
     | SORT git.host, git.org, git.repo, git.commit, file.path
-    | KEEP git.host, git.org, git.repo, git.commit, file.path, file.size, content
+    | KEEP git.host, git.org, git.repo, git.commit, file.path, file.size, output
   params:
     git_host:
       type: string

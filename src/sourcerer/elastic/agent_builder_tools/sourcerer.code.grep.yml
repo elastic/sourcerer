@@ -22,7 +22,7 @@ configuration:
     // Format the response
     | SORT git.host, git.org, git.repo, git.commit, file.path, line.number
     | KEEP git.host, git.org, git.repo, git.commit, file.path, file.size, line.number, line.content
-    | LIMIT ?n
+    | LIMIT ?limit
   params:
     git_host:
       type: string
@@ -53,7 +53,7 @@ configuration:
       type: string
       description: Regex to grep. Must wrap with greedy wildcards to match substrings (e.g. .*public static void main.*). Keep patterns simple to avoid errors. Avoid repetition of alternation groups like (a|b){13} or (a|b)*, and avoid long runs of ? wildcards. These cause exponential automaton determinization blowup. Prefer one call per keyword over complex alternations.
       optional: false
-    n:
+    limit:
       type: integer
       description: Number of search results
       optional: true

@@ -32,11 +32,15 @@ configuration:
 
     // Join lines with newlines, then strip the 10-digit sort key off each line
     // (the visible show_line_numbers prefix, if any, is the 11th+ chars and is preserved)
-    | EVAL file_contents = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(pairs, "\n")), "\n[0-9]{10}", "\n"), 2)
+    | EVAL output = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(pairs, "\n")), "\n[0-9]{10}", "\n"), 2)
 
-    // Format the response
+    // Format the response. limit caps the number of files returned, not the
+    // number of lines the STATS above had to read to build them. Each row
+    // here is a whole file's content, the heaviest row in this toolset, so
+    // the default is deliberately low rather than "return everything".
     | SORT git.host, git.org, git.repo, git.commit, file.path
-    | KEEP git.host, git.org, git.repo, git.commit, file.path, file_contents
+    | KEEP git.host, git.org, git.repo, git.commit, file.path, output
+    | LIMIT ?limit
   params:
     git_host:
       type: string
@@ -67,3 +71,8 @@ configuration:
       description: Prefix each returned line with its 1-indexed line number (grep -n style, "<line>:<content>")
       optional: true
       defaultValue: true
+    limit:
+      type: integer
+      description: Maximum number of files to return. Each result is a whole file. Scope file_path narrowly rather than raising this to pull back many files at once.
+      optional: true
+      defaultValue: 10

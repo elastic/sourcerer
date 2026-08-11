@@ -142,7 +142,7 @@ configuration:
         CASE(_show_c, RIGHT(CONCAT("         ", _tb), GREATEST(9, LENGTH(_tb))), ""),
         CASE(_show_x, RIGHT(CONCAT("         ", _tx), GREATEST(9, LENGTH(_tx))), ""),
         "  total (", TO_STRING(files), " files)"), "")
-    | EVAL wc = CONCAT(
+    | EVAL output = CONCAT(
         CASE(_show_l, "    lines", ""),
         CASE(_show_w, "    words", ""),
         CASE(_show_m, "    chars", ""),
@@ -154,7 +154,7 @@ configuration:
 
     // Format the response
     | SORT git.host, git.org, git.repo, git.commit
-    | KEEP git.host, git.org, git.repo, git.commit, wc
+    | KEEP git.host, git.org, git.repo, git.commit, output
   params:
     git_host:
       type: string

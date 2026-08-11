@@ -2,9 +2,11 @@
 # `sourcerer prune --config repos.yml [--dry-run]`
 # `sourcerer prune <host>/<org>/<repo> -b/-t/-c [--dry-run]`
 # Deletes indexed refs that fall outside their repos.yml retention policies (or a single
-# explicitly-named ref), and always sweeps for orphans. Row/plan construction and printing live
-# in report.py; the deletions themselves (retention and orphan sweep) live in execute.py. This
-# file is the entry point that wires the two together.
+# explicitly-named ref). The orphan sweep runs for the --config and no-arg paths (run()), but
+# NOT for a single-ref REPO_SPEC prune (run_ref()) -- that path is strictly scoped to the
+# named ref. Row/plan construction and printing live in report.py; the deletions themselves
+# (retention and orphan sweep) live in execute.py. This file is the entry point that wires
+# the two together.
 
 # Standard packages
 import sys
@@ -141,7 +143,8 @@ def run_ref(
 ) -> None:
     """Prune a single, explicitly-named ref (branch/tag/commit) from the index. Fetches ALL
     markers for the repo so the commit-safety guard (content_delete_set) sees every surviving
-    ref before deciding whether to drop content. The orphan sweep always runs afterwards."""
+    ref before deciding whether to drop content. Only the targeted ref (and any content
+    exclusively owned by it) is deleted -- no orphan sweep is performed."""
     parts = repo_spec.split("/", 2)
     if len(parts) != 3 or not all(parts):
         click.echo(f"Error: repo_spec must be '<host>/<org>/<repo>', got: {repo_spec!r}", err=True)
@@ -197,16 +200,10 @@ def run_ref(
     rows.extend(_ref_rows(host, org, repo, decisions))
     failures = [0]
 
-    # Collect the orphan plan and its rows for the preview. This is read-only, so it's safe
-    # before any deletion. On a real run, _apply_orphan_plan fires after execute_deletions so
-    # it sees the freshly-deleted markers (mirroring the order in run()).
-    orphan_plan = _plan_orphans(es, rows, failures)
-
     if not quiet or dry_run:
         _print(rows)
 
     total_markers = total_commits = 0
-    total_orphan_indices = total_orphan_content = total_orphan_markers = 0
     if not dry_run:
         try:
             total_markers, total_commits = execute_deletions(es, host, org, repo, decisions)
@@ -214,19 +211,11 @@ def run_ref(
             failures[0] += 1
             click.echo(f"{host}/{org}/{repo}: error deleting: {e}", err=True)
 
-        if orphan_plan is not None:
-            total_orphan_indices, total_orphan_content, total_orphan_markers = _apply_orphan_plan(
-                es, orphan_plan, failures
-            )
-
     if dry_run:
         click.echo("Dry run: no changes made.")
     elif not quiet:
         click.echo(
-            f"Pruned {total_markers} marker(s) and {total_commits} commit(s) of content; "
-            f"removed {total_orphan_indices} orphaned index(es), "
-            f"{total_orphan_content} orphaned content commit(s), "
-            f"{total_orphan_markers} orphaned marker commit(s)."
+            f"Pruned {total_markers} marker(s) and {total_commits} commit(s) of content."
         )
     if failures[0]:
         click.echo(f"Completed with {failures[0]} failure(s)", err=True)

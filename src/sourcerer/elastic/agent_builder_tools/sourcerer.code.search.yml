@@ -22,7 +22,7 @@ configuration:
     // Format the response
     | SORT _score DESC
     | KEEP git.host, git.org, git.repo, git.commit, file.path, file.size, line.number, line.content
-    | LIMIT ?n
+    | LIMIT ?limit
   params:
     git_host:
       type: string
@@ -46,14 +46,14 @@ configuration:
       defaultValue: "*"
     file_path:
       type: string
-      description: File path(s) to grep (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)
+      description: File path(s) to search (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)
       optional: true
       defaultValue: "**"
     q:
       type: string
       description: Search string
       optional: false
-    n:
+    limit:
       type: integer
       description: Number of search results
       optional: true

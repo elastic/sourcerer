@@ -228,16 +228,16 @@ def prune(repo_spec, branch, tag, commit, config_path, dry_run, quiet, url, api_
     """Delete indexed refs that fall outside their sourcerer.yml retention policies, then sweep
     for orphans.
 
-    Provide a REPO_SPEC ('<host>/<org>/<repo>') with exactly one of -b/-t/-c to prune a single
-    specific ref without a config file.
+    Provide a REPO_SPEC ('<host>/<org>/<repo>') with exactly one of -b/-t/-c to prune only
+    that single ref and any content exclusively owned by it. No orphan sweep is performed.
 
     With --config, applies the same retain policies the `index` command uses to skip doomed
     refs, but retroactively: refs already indexed that a policy would now delete are removed,
     along with any content (lines/files) no surviving ref still references.
 
-    Afterwards -- or always, if neither REPO_SPEC nor --config is given -- also detects and
-    removes orphans: whole files/lines indices with no matching entry in sourcerer-refs (e.g. a
-    repo removed from the config), commit content left behind with no marker referencing it, and
+    With --config, or when neither REPO_SPEC nor --config is given, also detects and removes
+    orphans: whole files/lines indices with no matching entry in sourcerer-refs (e.g. a repo
+    removed from the config), commit content left behind with no marker referencing it, and
     refs markers whose content is entirely gone. Use --dry-run to preview both passes first.
     """
     if config_path:

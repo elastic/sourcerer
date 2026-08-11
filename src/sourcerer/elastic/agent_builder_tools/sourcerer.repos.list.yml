@@ -18,8 +18,8 @@ configuration:
     | EVAL repo_line = CONCAT(git.org, "/", git.repo)
     | STATS repos = VALUES(repo_line) BY git.host
     | EVAL repos = MV_SORT(repos)
-    | EVAL org_repos_by_host = CONCAT("# host: ", git.host, "\n", MV_CONCAT(repos, "\n"))
-    | KEEP org_repos_by_host
+    | EVAL output = CONCAT("# host: ", git.host, "\n", MV_CONCAT(repos, "\n"))
+    | KEEP output
     | LIMIT 1000000
   params:
     git_host:

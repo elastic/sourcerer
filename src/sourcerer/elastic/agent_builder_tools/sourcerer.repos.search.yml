@@ -40,7 +40,7 @@ configuration:
     // Format the response
     | SORT score DESC
     | KEEP git.host, git.org, git.repo, score
-    | LIMIT ?n
+    | LIMIT ?limit
   params:
     git_host:
       type: string
@@ -71,7 +71,7 @@ configuration:
       type: string
       description: Search string
       optional: false
-    n:
+    limit:
       type: integer
       description: Number of search results
       optional: true

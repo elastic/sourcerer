@@ -158,12 +158,12 @@ configuration:
     // Top the tree with its root and, unless --noreport, close it with tree's
     // summary line
     | EVAL _report = CASE(?noreport == true, "", CONCAT("\n\n", TO_STRING(dirs), " directories, ", TO_STRING(nodes - dirs), " files"))
-    | EVAL tree = CONCAT(_root, "\n", tree, _report)
+    | EVAL output = CONCAT(_root, "\n", tree, _report)
 
     // Format the response
     | SORT git.host, git.org, git.repo, git.commit
-    | KEEP git.host, git.org, git.repo, git.commit, tree
-    | LIMIT ?n
+    | KEEP git.host, git.org, git.repo, git.commit, output
+    | LIMIT ?limit
   params:
     git_host:
       type: string
@@ -225,8 +225,8 @@ configuration:
       description: Omit the trailing report of how many directories and files were listed
       optional: true
       defaultValue: false
-    n:
+    limit:
       type: integer
       description: Number of search results (one result is the whole tree for one repo)
       optional: true
-      defaultValue: 1000
+      defaultValue: 10

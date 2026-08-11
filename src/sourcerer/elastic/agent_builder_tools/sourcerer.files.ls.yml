@@ -69,10 +69,12 @@ configuration:
     // Append a trailing "/" to directory entries so they read like ls output.
     | EVAL name = CASE(is_dir, CONCAT(name, "/"), name)
 
-    // Format the response
+    // Format the response. Each row is a single entry name, the cheapest row
+    // in this toolset, so limit defaults to a high ceiling that mainly exists
+    // to opt out of ES|QL's implicit row cap rather than to trim real usage.
     | SORT is_dir DESC, name
     | KEEP name
-    | LIMIT 1000000
+    | LIMIT ?limit
   params:
     git_host:
       type: string
@@ -99,3 +101,8 @@ configuration:
       description: File path to ls (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)
       optional: true
       defaultValue: "*"
+    limit:
+      type: integer
+      description: Maximum number of entries to return
+      optional: true
+      defaultValue: 1000000

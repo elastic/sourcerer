@@ -5,8 +5,8 @@ list where only the targeted ref is 'delete' and every other marker is 'keep'. T
 content_delete_set only drops commits that no surviving ref still references.
 
 These tests drive the decision-building path via a thin harness that stubs out
-fetch_markers, execute_deletions, plan_orphans_now, and execute_orphan_deletions so no
-real ES cluster is needed.
+fetch_markers and execute_deletions so no real ES cluster is needed. No orphan sweep
+is performed by run_ref, so plan_orphans_now and execute_orphan_deletions are not patched.
 """
 
 # Standard packages
@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 # App packages
 from sourcerer.commands.prune.command import run_ref
-from sourcerer.planner import Decision, Marker, OrphanPlan
+from sourcerer.planner import Decision, Marker
 
 
 # ---------------------------------------------------------------------------
@@ -23,11 +23,6 @@ from sourcerer.planner import Decision, Marker, OrphanPlan
 
 def _marker(id_: str, ref: str, ref_type: str, commit: str) -> Marker:
     return Marker(id=id_, ref=ref, ref_type=ref_type, commit=commit, commit_date=None, indexed_at=None)
-
-
-_EMPTY_ORPHAN_PLAN = OrphanPlan(
-    orphan_index_names=[], orphan_content={}, orphan_marker_commits={}
-)
 
 
 def _make_es():
@@ -44,7 +39,7 @@ def _make_es():
 class TestRunRefDecisionBuilding:
     """Verify that run_ref builds decisions over ALL repo markers, marking only the target
     as 'delete' and every other marker as 'keep'. Tests do not actually call execute_deletions
-    or plan_orphans_now -- the captured decisions list is what we assert on."""
+    -- the captured decisions list is what we assert on. No orphan sweep is performed."""
 
     def _capture_decisions_for_tag(self, all_markers, target_tag):
         """Call run_ref targeting 'target_tag'; return the decisions list passed to
@@ -58,13 +53,8 @@ class TestRunRefDecisionBuilding:
             captured["decisions"] = list(decisions)
             return (1, 0)
 
-        def fake_plan_orphans_now(es):
-            return _EMPTY_ORPHAN_PLAN
-
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch_markers), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_execute_deletions), \
-             patch("sourcerer.commands.prune.command.plan_orphans_now", fake_plan_orphans_now), \
-             patch("sourcerer.commands.prune.command.execute_orphan_deletions", return_value=(0, 0, 0)), \
              patch("sourcerer.commands.prune.command.make_client", return_value=_make_es()):
             run_ref(
                 "github/acme/widgets",
@@ -114,13 +104,8 @@ class TestRunRefDecisionBuilding:
             captured["drop_commits"] = content_delete_set(decisions)
             return (1, 0)
 
-        def fake_plan_orphans_now(es):
-            return _EMPTY_ORPHAN_PLAN
-
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch_markers), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_execute_deletions), \
-             patch("sourcerer.commands.prune.command.plan_orphans_now", fake_plan_orphans_now), \
-             patch("sourcerer.commands.prune.command.execute_orphan_deletions", return_value=(0, 0, 0)), \
              patch("sourcerer.commands.prune.command.make_client", return_value=_make_es()):
             run_ref(
                 "github/acme/widgets",
@@ -154,13 +139,8 @@ class TestRunRefDecisionBuilding:
             captured["drop_commits"] = content_delete_set(decisions)
             return (1, 1)
 
-        def fake_plan_orphans_now(es):
-            return _EMPTY_ORPHAN_PLAN
-
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch_markers), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_execute_deletions), \
-             patch("sourcerer.commands.prune.command.plan_orphans_now", fake_plan_orphans_now), \
-             patch("sourcerer.commands.prune.command.execute_orphan_deletions", return_value=(0, 0, 0)), \
              patch("sourcerer.commands.prune.command.make_client", return_value=_make_es()):
             run_ref(
                 "github/acme/widgets",
@@ -190,13 +170,8 @@ class TestRunRefDecisionBuilding:
             captured["decisions"] = list(decisions)
             return (1, 1)
 
-        def fake_plan(es):
-            return _EMPTY_ORPHAN_PLAN
-
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_exec), \
-             patch("sourcerer.commands.prune.command.plan_orphans_now", fake_plan), \
-             patch("sourcerer.commands.prune.command.execute_orphan_deletions", return_value=(0, 0, 0)), \
              patch("sourcerer.commands.prune.command.make_client", return_value=_make_es()):
             run_ref(
                 "github/acme/widgets",
@@ -279,12 +254,8 @@ class TestRunRefDecisionBuilding:
             execute_called.append(True)
             return (0, 0)
 
-        def fake_plan(es):
-            return _EMPTY_ORPHAN_PLAN
-
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_exec), \
-             patch("sourcerer.commands.prune.command.plan_orphans_now", fake_plan), \
              patch("sourcerer.commands.prune.command.make_client", return_value=_make_es()):
             run_ref(
                 "github/acme/widgets",
@@ -296,3 +267,45 @@ class TestRunRefDecisionBuilding:
             )
 
         assert not execute_called
+
+
+class TestRunRefNoOrphanSweep:
+    """Verify that run_ref never touches the orphan sweep, regardless of dry_run."""
+
+    def _run_ref_with_spy(self, dry_run: bool):
+        markers = [_marker("m1", "v1.0", "tag", "a" * 40)]
+
+        def fake_fetch(es, host, org, repo, ref_type=None, ref=None):
+            return markers
+
+        sweep_called = []
+
+        with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
+             patch("sourcerer.commands.prune.command.execute_deletions", return_value=(1, 0)), \
+             patch("sourcerer.commands.prune.command.plan_orphans_now",
+                   side_effect=lambda *a, **kw: sweep_called.append("plan") or None), \
+             patch("sourcerer.commands.prune.command.execute_orphan_deletions",
+                   side_effect=lambda *a, **kw: sweep_called.append("exec") or (0, 0, 0)), \
+             patch("sourcerer.commands.prune.command.make_client", return_value=_make_es()):
+            run_ref(
+                "github/acme/widgets",
+                branch=None,
+                tag="v1.0",
+                commit=None,
+                dry_run=dry_run,
+                quiet=True,
+            )
+
+        return sweep_called
+
+    def test_orphan_sweep_not_called_on_live_run(self):
+        """run_ref must not call plan_orphans_now or execute_orphan_deletions on a live run."""
+        assert self._run_ref_with_spy(dry_run=False) == [], (
+            "Orphan sweep must not run during a single-ref prune"
+        )
+
+    def test_orphan_sweep_not_called_on_dry_run(self):
+        """run_ref must not call plan_orphans_now or execute_orphan_deletions on --dry-run."""
+        assert self._run_ref_with_spy(dry_run=True) == [], (
+            "Orphan sweep must not run during a single-ref --dry-run prune"
+        )
