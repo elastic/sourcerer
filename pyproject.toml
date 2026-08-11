@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sourcerer"
-version = "2.4.2"
+version = "2.4.3"
 description = "Index and search source code in Elasticsearch."
 requires-python = ">=3.10"
 dependencies = [
