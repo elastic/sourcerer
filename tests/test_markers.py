@@ -11,7 +11,7 @@ from elasticsearch import NotFoundError
 
 # App packages
 from sourcerer.commands.index.markers import (
-    build_ref_id, commit_prefix_indexed, commits_with_content,
+    build_ref_id, commit_prefix_indexed, commits_with_content, fully_indexed_counts,
     markers_status_by_id, _needs_index, _parse_marker_started, pre_clone_skip, should_index,
 )
 from sourcerer.indices import FILES_ALIAS, REFS_ALIAS
@@ -331,3 +331,46 @@ class TestParseMarkerStarted:
 
     def test_empty_string_returns_none(self):
         assert _parse_marker_started("") is None
+
+
+class TestFullyIndexedCounts:
+    def test_hit_returns_files_and_lines_counts(self):
+        es = MagicMock()
+        es.search.return_value = {
+            "hits": {"hits": [{"_source": {"files_count": 42, "lines_count": 3400}}]}
+        }
+        result = fully_indexed_counts(es, "github", "acme", "widgets", FULL_SHA)
+        assert result == (42, 3400)
+        call = es.search.call_args.kwargs
+        assert call["index"] == REFS_ALIAS
+        assert call["size"] == 1
+        assert {"term": {"git.host": "github"}} in call["query"]["bool"]["filter"]
+        assert {"term": {"git.org": "acme"}} in call["query"]["bool"]["filter"]
+        assert {"term": {"git.repo": "widgets"}} in call["query"]["bool"]["filter"]
+        assert {"term": {"git.commit": FULL_SHA}} in call["query"]["bool"]["filter"]
+        assert {"term": {"status": "complete"}} in call["query"]["bool"]["filter"]
+        assert call["source_includes"] == ["files_count", "lines_count"]
+
+    def test_no_hit_returns_none(self):
+        es = MagicMock()
+        es.search.return_value = {"hits": {"hits": []}}
+        assert fully_indexed_counts(es, "github", "acme", "widgets", FULL_SHA) is None
+
+    def test_missing_index_returns_none_not_raise(self):
+        es = MagicMock()
+        es.search.side_effect = _not_found()
+        assert fully_indexed_counts(es, "github", "acme", "widgets", FULL_SHA) is None
+
+    def test_missing_count_fields_default_to_zero(self):
+        es = MagicMock()
+        es.search.return_value = {"hits": {"hits": [{"_source": {}}]}}
+        assert fully_indexed_counts(es, "github", "acme", "widgets", FULL_SHA) == (0, 0)
+
+    def test_host_changes_result(self):
+        es = MagicMock()
+        es.search.return_value = {
+            "hits": {"hits": [{"_source": {"files_count": 7, "lines_count": 900}}]}
+        }
+        assert fully_indexed_counts(es, "gitlab", "acme", "widgets", FULL_SHA) == (7, 900)
+        call = es.search.call_args.kwargs
+        assert {"term": {"git.host": "gitlab"}} in call["query"]["bool"]["filter"]

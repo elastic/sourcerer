@@ -214,6 +214,46 @@ def commit_fully_indexed(es: Elasticsearch, host: str, org: str, repo: str, comm
         return False
 
 
+def fully_indexed_counts(
+    es: Elasticsearch, host: str, org: str, repo: str, commit_sha: str,
+) -> tuple[int, int] | None:
+    """The (files_count, lines_count) recorded by a `status: complete` ref marker for this
+    commit, or None if no such marker exists. The count-returning sibling of commit_fully_indexed.
+
+    Content is keyed by commit (host, org, repo, commit, path), so every complete marker for this
+    exact commit describes the same snapshot and carries identical counts -- any one is
+    authoritative, so we take the first hit. Crucially the counts come from the marker (written by
+    write_ref_marker, tallied from bulk results at ingest), NOT from an es.count over the content
+    indices: during a bulk run refresh is disabled on the content indices
+    (runtime.bulk_indexing_settings), so a sibling that ingested this commit earlier in the same
+    run isn't search-visible yet and an es.count would spuriously return 0 -- but its marker, on
+    the refresh-enabled refs index, holds the real counts. Returns None when no complete marker
+    exists (including when the refs index does not exist yet)."""
+    query = {
+        "bool": {
+            "filter": [
+                {"term": {"git.host": host}},
+                {"term": {"git.org": org}},
+                {"term": {"git.repo": repo}},
+                {"term": {"git.commit": commit_sha}},
+                {"term": {"status": "complete"}},
+            ]
+        }
+    }
+    try:
+        resp = es.search(
+            index=REFS_ALIAS, size=1, query=query,
+            source_includes=["files_count", "lines_count"],
+        )
+    except NotFoundError:
+        return None
+    hits = resp["hits"]["hits"]
+    if not hits:
+        return None
+    src = hits[0]["_source"]
+    return int(src.get("files_count", 0)), int(src.get("lines_count", 0))
+
+
 def commit_prefix_indexed(es: Elasticsearch, host: str, org: str, repo: str, sha_prefix: str) -> str | None:
     """The full commit SHA of a `status: complete` marker in this repo whose commit starts with
     `sha_prefix`, or None if no marker matches. There is no remote way to resolve a SHA/prefix

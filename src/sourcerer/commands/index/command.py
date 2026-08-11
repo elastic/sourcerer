@@ -23,7 +23,6 @@ from elasticsearch import Elasticsearch
 
 # App packages
 from ...hosts import resolve_hosts
-from ...indices import FILES_ALIAS, LINES_ALIAS
 from ...planner import Marker, plan_repo
 from ...progress import ProgressReporter, Unit, make_reporter
 from ...utils import ES_ERRORS, make_client
@@ -42,7 +41,7 @@ from .git import (
     _rev_info,
 )
 from .markers import (
-    build_ref_id, commit_fully_indexed, commits_with_content, count_commit_docs,
+    build_ref_id, commits_with_content, content_present, fully_indexed_counts,
     markers_status_by_id, _needs_index, pre_clone_skip, should_index,
     write_indexing_marker, write_ref_marker,
 )
@@ -110,15 +109,28 @@ def index_ref_in_dir(
         reporter.finish(unit, "skipped")
         return
 
-    if not force and commit_fully_indexed(es, host, org, repo, commit_sha):
-        # Content is keyed by commit, so another ref already fully indexed this exact
-        # snapshot. Don't rewrite the (large) content docs -- just record the ref marker.
-        # "Fully" is load-bearing: an aborted run leaves partial content but no complete
-        # marker, so it falls through to the else branch and re-indexes rather than
-        # recording a half-populated commit as done.
+    # Content is keyed by commit, so another ref may already have fully indexed this exact
+    # snapshot. If a complete sibling marker exists AND its content is still present, reuse that
+    # marker's counts and record this ref without rewriting the (large) content docs.
+    #
+    # Counts come from the sibling marker (fully_indexed_counts), NOT an es.count over the content
+    # indices: refresh is disabled during the bulk phase (runtime.bulk_indexing_settings), so a
+    # sibling that ingested this commit earlier in the same run isn't search-visible and an
+    # es.count would spuriously return 0 -- the refs index is refresh-enabled, so its marker is the
+    # honest source. content_present guards the GC'd case: a surviving complete marker whose
+    # content was deleted must be re-ingested, not recorded again with stale counts. If content is
+    # gone (or a same-run sibling's docs aren't refresh-visible yet) we fall through and re-index
+    # -- safe, since doc ids are idempotent. "Fully" is load-bearing: an aborted run leaves partial
+    # content but no complete marker, so fully_indexed_counts returns None and we fall through.
+    reuse_counts = None
+    if not force:
+        marker_counts = fully_indexed_counts(es, host, org, repo, commit_sha)
+        if marker_counts is not None and content_present(es, host, org, repo, commit_sha):
+            reuse_counts = marker_counts
+
+    if reuse_counts is not None:
         status = "tagged" if tag else "recorded"
-        files_count = count_commit_docs(es, FILES_ALIAS, host, org, repo, commit_sha)
-        lines_count = count_commit_docs(es, LINES_ALIAS, host, org, repo, commit_sha)
+        files_count, lines_count = reuse_counts
     else:
         reporter.set_total_files(unit, count_tracked_files(repo_dir))
         reporter.set_stage(unit, "indexing")
