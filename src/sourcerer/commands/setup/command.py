@@ -149,6 +149,107 @@ def load_skills(
     return skills
 
 
+def strip_esql_comments(query: str) -> str:
+    """
+    Remove `//` line comments and `/* ... */` block comments from an ES|QL
+    query, then drop every blank / whitespace-only line that results (so a
+    comment-only line, and the blank lines that surrounded it, disappear
+    entirely), while leaving the leading indentation of every remaining line
+    untouched.
+
+    Comment-like sequences inside string or backtick-quoted identifier
+    literals are left alone - this is why the function walks the query
+    character by character rather than using a regex, since a regex has no
+    reliable way to know it's "inside a string" at a given position.
+
+    Handles:
+      - "..."      double-quoted strings, with backslash escapes
+      - \"\"\"...\"\"\"  triple-quoted raw strings (no escaping inside)
+      - `...`      backtick-quoted identifiers (a doubled `` is a literal `)
+      - // ...     line comments
+      - /* ... */  block comments (non-nested)
+    """
+    n = len(query)
+    i = 0
+    out = []
+
+    def starts_with(pos: int, token: str) -> bool:
+        return query[pos:pos + len(token)] == token
+
+    while i < n:
+        ch = query[i]
+
+        # Triple-quoted raw string: contents are copied verbatim, no escaping
+        if starts_with(i, '"""'):
+            end = query.find('"""', i + 3)
+            end = n if end == -1 else end + 3
+            out.append(query[i:end])
+            i = end
+            continue
+
+        # Regular double-quoted string; \" and \\ don't end the string
+        if ch == '"':
+            j = i + 1
+            while j < n:
+                if query[j] == '\\' and j + 1 < n:
+                    j += 2
+                    continue
+                if query[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            out.append(query[i:j])
+            i = j
+            continue
+
+        # Backtick-quoted identifier; `` inside is an escaped literal backtick
+        if ch == '`':
+            j = i + 1
+            while j < n:
+                if query[j] == '`':
+                    if j + 1 < n and query[j + 1] == '`':
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            out.append(query[i:j])
+            i = j
+            continue
+
+        # Line comment: drop through to (but not past) the next newline
+        if starts_with(i, '//'):
+            j = query.find('\n', i)
+            i = n if j == -1 else j
+            continue
+
+        # Block comment: drop the text, but keep any newlines it spanned so
+        # line structure survives long enough for the blank-line pass below;
+        # a comment with no newline is replaced by a single space so it
+        # can't fuse the tokens on either side of it together
+        if starts_with(i, '/*'):
+            end = query.find('*/', i + 2)
+            comment = query[i:] if end == -1 else query[i:end + 2]
+            i = n if end == -1 else end + 2
+            newlines = comment.count('\n')
+            out.append('\n' * newlines if newlines else ' ')
+            continue
+
+        out.append(ch)
+        i += 1
+
+    stripped = ''.join(out)
+
+    # Drop every blank / whitespace-only line (this is what removes both
+    # comment-only lines and the blank lines around them); rstrip guards
+    # against trailing whitespace left behind by a removed end-of-line
+    # comment, while leading whitespace - each line's indentation - is
+    # never touched.
+    lines = [line.rstrip() for line in stripped.split('\n')]
+    kept = [line for line in lines if line.strip() != '']
+    return '\n'.join(kept)
+
+
 def _tool_put_body(tool: dict) -> dict:
     return {k: v for k, v in tool.items() if k not in ("id", "type")}
 
@@ -215,6 +316,9 @@ def load_agent_builder_tools(
     loaded = []
     for tool in tools:
         tool_id = tool["id"]
+        cfg = tool.get("configuration")
+        if cfg and "query" in cfg:
+            cfg["query"] = strip_esql_comments(cfg["query"])
         item_url = f"{base}/api/agent_builder/tools/{tool_id}"
         get_resp = session.get(item_url)
         if get_resp.status_code == 200:
