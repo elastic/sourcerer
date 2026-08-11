@@ -53,6 +53,11 @@ Use when the bottom of the file is what matters:
 
 Default n=10.
 
+### `files.wc` - count lines in file(s)
+Use to verify file sizes before deciding how to read files:
+- Avoid using `files.cat` on large files. Prefer `files.head`, `files.tail`, or `files.read_lines` to save tokens.
+- Prefer using l=true to count just the lines (not bytes, words, etc).
+
 ## Iterating toward an answer
 
 **Pattern 1 - concept → file → definition:**

@@ -1,0 +1,218 @@
+id: sourcerer.files.wc
+type: esql
+description: count lines, words, characters, bytes, and longest line in repo file(s)
+tags: []
+configuration:
+  query: |-
+    // Scope the search.
+    FROM sourcerer-lines
+    | WHERE git.host LIKE ?git_host
+        AND git.org LIKE ?git_org
+        AND git.repo LIKE ?git_repo
+        AND git.commit LIKE ?git_commit
+        AND file.path LIKE ?file_path
+
+    // Glob match (* and **) on file.path
+    | EVAL _fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")
+    | EVAL _fp_segs = LENGTH(?file_path) - LENGTH(REPLACE(?file_path, "/", "")) + 1
+    | EVAL _file_segs = MV_COUNT(SPLIT(file.path, "/"))
+    | WHERE _fp_is_recursive OR _file_segs == _fp_segs
+
+    // wc counts a word as a run of non-whitespace, so collapse each run of
+    // spaces and tabs to one space and count the gaps between them. A line that
+    // is empty or all whitespace has no words at all, which TRIM catches before
+    // the gap count would wrongly report one.
+    | EVAL _norm = TRIM(REPLACE(line.content, "[ \t]+", " "))
+    | EVAL _words = CASE(_norm == "", 0, LENGTH(_norm) - LENGTH(REPLACE(_norm, " ", "")) + 1)
+
+    // One row per file. Every count falls out of the same pass:
+    //
+    //   lines        one row per line in the index, so wc -l
+    //   words        wc -w
+    //   chars        wc -m, characters not bytes, so multi-byte text counts once
+    //   bytes        wc -c, taken from the indexed file size
+    //   longest      wc -L
+    | STATS lines = COUNT(*),
+        words = SUM(_words),
+        _content_chars = SUM(LENGTH(line.content)),
+        longest = MAX(LENGTH(line.content)),
+        bytes = MAX(file.size)
+        BY git.host, git.org, git.repo, git.commit, file.path
+
+    // The index holds each line without its terminator, so add one character
+    // per line back to match what wc counts off disk
+    | EVAL chars = _content_chars + lines
+
+    // _sortkey: how the rows are ordered, and the prefix that keeps that order
+    // through the collapse below.
+    //
+    // "path" reads like a listing, with "/" swapped for a carriage return and
+    // lowercased so files sort under their directory regardless of case. Any
+    // count sorts largest first, which is the useful direction for all of them
+    // - the question is always which files are big, never which are small.
+    // Descending is done by subtracting the count from a ceiling and padding
+    // the result to a fixed width, which turns a descending numeric sort into
+    // an ascending lexical one. The path key is appended as a tiebreak so files
+    // with equal counts stay in a stable, readable order.
+    //
+    // An unrecognized sort_by falls through to -1 and sorts by path.
+    | EVAL _path_key = TO_LOWER(REPLACE(file.path, "/", "\r"))
+    | EVAL _sort_val = CASE(
+        ?sort_by == "lines", lines,
+        ?sort_by == "words", words,
+        ?sort_by == "chars", chars,
+        ?sort_by == "bytes", bytes,
+        ?sort_by == "longest", TO_LONG(longest),
+        TO_LONG(-1))
+    | EVAL _key = CASE(
+        _sort_val < 0,
+        _path_key,
+        CONCAT(RIGHT(CONCAT("000000000000000", TO_STRING(999999999999999 - _sort_val)), 15), _path_key))
+
+    // Truncate here rather than after the collapse, so limit counts files and
+    // the total row below reflects exactly what was returned
+    | SORT _key
+    | LIMIT ?limit
+
+    // Which counts to print, following wc: with no flag set it prints lines,
+    // words and bytes; set any flag and it prints only what was asked for.
+    // Suppressing a column is not cheaper to compute - every count came out of
+    // the one pass above - but each one costs 9 characters on every row, so a
+    // caller that only wants line counts shouldn't have to read past four
+    // columns of digits to find them.
+    | EVAL _any = ?l == true OR ?w == true OR ?m == true OR ?c == true OR ?L == true
+    | EVAL _show_l = CASE(_any, ?l == true, true)
+    | EVAL _show_w = CASE(_any, ?w == true, true)
+    | EVAL _show_m = CASE(_any, ?m == true, false)
+    | EVAL _show_c = CASE(_any, ?c == true, true)
+    | EVAL _show_x = CASE(_any, ?L == true, false)
+
+    // Right-align each count in a 9 wide column the way wc does, then the path.
+    // Real wc sizes its columns to the widest value in the batch, which would
+    // need a second pass to learn; a fixed width covers anything short of a
+    // billion and GREATEST lets a larger value push the row wider rather than
+    // losing its leading digits.
+    | EVAL _l = TO_STRING(lines), _w = TO_STRING(words), _c = TO_STRING(chars),
+        _b = TO_STRING(bytes), _x = TO_STRING(longest)
+    | EVAL _line = CONCAT(
+        CASE(_show_l, RIGHT(CONCAT("         ", _l), GREATEST(9, LENGTH(_l))), ""),
+        CASE(_show_w, RIGHT(CONCAT("         ", _w), GREATEST(9, LENGTH(_w))), ""),
+        CASE(_show_m, RIGHT(CONCAT("         ", _c), GREATEST(9, LENGTH(_c))), ""),
+        CASE(_show_c, RIGHT(CONCAT("         ", _b), GREATEST(9, LENGTH(_b))), ""),
+        CASE(_show_x, RIGHT(CONCAT("         ", _x), GREATEST(9, LENGTH(_x))), ""),
+        "  ", file.path)
+
+    // A tab separates the sort key from the visible line so the key can be
+    // stripped back off after the MV_CONCAT below. The line is padded with
+    // spaces and never contains a tab, so the strip can't eat into it.
+    | EVAL pair = CONCAT(_key, "\t", _line)
+
+    // Collapse each commit's files into one ordered list, and total the counts
+    // across them - the row wc prints last when it's given more than one file.
+    // The longest line is a maximum rather than a sum, since totalling the
+    // longest lines of different files would mean nothing.
+    | STATS pairs = MV_SORT(VALUES(pair)),
+        total_lines = SUM(lines),
+        total_words = SUM(words),
+        total_chars = SUM(chars),
+        total_bytes = SUM(bytes),
+        total_longest = MAX(longest),
+        files = COUNT(*)
+        BY git.host, git.org, git.repo, git.commit, _show_l, _show_w, _show_m, _show_c, _show_x
+
+    // Join the lines with newlines, then strip each line back to its visible
+    // part. The greedy [^\n]* runs to the last tab on the line, which is the
+    // separator, so the whole sort key goes with it.
+    | EVAL wc = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(pairs, "\n")), "\n[^\n]*\t", "\n"), 2)
+
+    // Head the block with column labels, since five unlabelled count columns
+    // are not the three an agent would recognize from wc, and close it with the
+    // total row in the same alignment
+    | EVAL _tl = TO_STRING(total_lines), _tw = TO_STRING(total_words),
+        _tc = TO_STRING(total_chars), _tb = TO_STRING(total_bytes),
+        _tx = TO_STRING(total_longest)
+    // wc only prints a total when it was given more than one file, and a total
+    // that restates the single row above it is noise. Nothing matching produces
+    // no row at all, so the empty case needs no guard.
+    | EVAL _total = CASE(files > 1, CONCAT(
+        "\n",
+        CASE(_show_l, RIGHT(CONCAT("         ", _tl), GREATEST(9, LENGTH(_tl))), ""),
+        CASE(_show_w, RIGHT(CONCAT("         ", _tw), GREATEST(9, LENGTH(_tw))), ""),
+        CASE(_show_m, RIGHT(CONCAT("         ", _tc), GREATEST(9, LENGTH(_tc))), ""),
+        CASE(_show_c, RIGHT(CONCAT("         ", _tb), GREATEST(9, LENGTH(_tb))), ""),
+        CASE(_show_x, RIGHT(CONCAT("         ", _tx), GREATEST(9, LENGTH(_tx))), ""),
+        "  total (", TO_STRING(files), " files)"), "")
+    | EVAL wc = CONCAT(
+        CASE(_show_l, "    lines", ""),
+        CASE(_show_w, "    words", ""),
+        CASE(_show_m, "    chars", ""),
+        CASE(_show_c, "    bytes", ""),
+        CASE(_show_x, "  longest", ""),
+        "  file\n",
+        wc,
+        _total)
+
+    // Format the response
+    | SORT git.host, git.org, git.repo, git.commit
+    | KEEP git.host, git.org, git.repo, git.commit, wc
+  params:
+    git_host:
+      type: string
+      description: Filter by git host(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_org:
+      type: string
+      description: Filter by git org(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_repo:
+      type: string
+      description: Filter by git repo(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_commit:
+      type: string
+      description: Filter by git commit(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    file_path:
+      type: string
+      description: File path(s) to count (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)
+      optional: true
+      defaultValue: "**"
+    l:
+      type: boolean
+      description: Print the line count (wc -l)
+      optional: true
+      defaultValue: false
+    w:
+      type: boolean
+      description: Print the word count (wc -w)
+      optional: true
+      defaultValue: false
+    m:
+      type: boolean
+      description: Print the character count (wc -m). Differs from bytes only for files with multi-byte characters.
+      optional: true
+      defaultValue: false
+    c:
+      type: boolean
+      description: Print the byte count (wc -c)
+      optional: true
+      defaultValue: false
+    L:
+      type: boolean
+      description: Print the length of the longest line (wc -L). The cheapest way to spot minified or generated files before cat'ing them.
+      optional: true
+      defaultValue: false
+    sort_by:
+      type: string
+      description: Order of the results. "path" lists files alphabetically. "lines", "words", "chars", "bytes" or "longest" list the largest files first by that count. Anything else falls back to "path".
+      optional: true
+      defaultValue: "path"
+    limit:
+      type: integer
+      description: Maximum number of files to report. The total row counts only the files returned.
+      optional: true
+      defaultValue: 100
