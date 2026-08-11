@@ -1,8 +1,10 @@
-"""Unit tests for the pure id-hashing helper in sourcerer.utils. make_client/is_serverless
-are ES-facing and out of scope here."""
+"""Unit tests for the pure id-hashing helper in sourcerer.utils, plus make_client TLS options."""
+
+# Standard packages
+from unittest.mock import MagicMock, patch
 
 # App packages
-from sourcerer.utils import make_doc_id
+from sourcerer.utils import make_doc_id, make_client
 
 
 class TestMakeDocId:
@@ -29,3 +31,30 @@ class TestMakeDocId:
         # with surrogateescape, must still produce a stable id rather than raising.
         weird = b"\xff\xfe".decode("utf-8", errors="surrogateescape")
         assert make_doc_id("acme", "widgets", weird) == make_doc_id("acme", "widgets", weird)
+
+
+class TestMakeClient:
+    """make_client TLS behaviour — Elasticsearch constructor is patched, no real connection."""
+
+    def _make(self, **kwargs):
+        with patch("sourcerer.utils.Elasticsearch") as mock_es:
+            make_client("https://es.example.com", "mykey", None, None, **kwargs)
+            return mock_es
+
+    def test_default_does_not_set_verify_certs(self):
+        """Without --insecure, verify_certs is not passed so the ES client uses its default (True)."""
+        mock_es = self._make()
+        _, call_kwargs = mock_es.call_args
+        assert "verify_certs" not in call_kwargs
+
+    def test_insecure_passes_verify_certs_false(self):
+        """With insecure=True, verify_certs=False is forwarded to the ES constructor."""
+        mock_es = self._make(insecure=True)
+        _, call_kwargs = mock_es.call_args
+        assert call_kwargs.get("verify_certs") is False
+
+    def test_insecure_false_does_not_set_verify_certs(self):
+        """Explicitly passing insecure=False is the same as the default."""
+        mock_es = self._make(insecure=False)
+        _, call_kwargs = mock_es.call_args
+        assert "verify_certs" not in call_kwargs

@@ -58,6 +58,7 @@ def index(
     ephemeral: bool,
     prune: bool,
     dry_run: bool,
+    insecure: bool = False,
 ) -> None:
     """Index a benchmark's commits via the packaged repos.yml (config-driven)."""
     _ensure_ready(name)
@@ -67,6 +68,7 @@ def index(
         index_cmd.run_config(
             str(repos_yml), url, api_key, username, password,
             force, quiet, cache_dir, ephemeral, prune, dry_run,
+            insecure=insecure,
         )
 
 
@@ -77,6 +79,7 @@ def run(
     concurrency: int,
     connector_id: str | None,
     resume: bool,
+    insecure: bool = False,
 ) -> None:
     """Run a benchmark's eval, lazily building its dataset first if needed."""
     dest = _ensure_ready(name)
@@ -87,4 +90,5 @@ def run(
         concurrency=concurrency,
         connector_id=connector_id,
         resume=resume,
+        insecure=insecure,
     )

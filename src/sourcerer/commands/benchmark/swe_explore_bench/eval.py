@@ -58,6 +58,7 @@ def run(
     concurrency: int = 1,
     connector_id: str | None = None,
     resume: bool = False,
+    insecure: bool = False,
 ) -> None:
     console = Console()
 
@@ -146,6 +147,7 @@ def run(
         connector_id=connector_id,
         console=(console if concurrency == 1 else None),
         trace_log=trace_log,
+        insecure=insecure,
     )
 
     per_k_totals: dict[int, dict[str, float]] = {k: {m: 0.0 for m in METRICS} for k in top_k_list}

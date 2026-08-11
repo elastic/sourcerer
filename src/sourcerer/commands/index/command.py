@@ -207,6 +207,7 @@ def run(
     cache_dir: str | None = None,
     ephemeral: bool = False,
     retry_window: datetime.timedelta | None = None,
+    insecure: bool = False,
 ) -> None:
     parts = repo_spec.split("/", 2)
     if len(parts) != 3 or not all(parts):
@@ -227,7 +228,7 @@ def run(
         sys.exit(1)
     clone_url = hosts[host].clone_url(org, repo)
 
-    es = make_client(url, api_key, username, password)
+    es = make_client(url, api_key, username, password, insecure=insecure)
     cache_root = None if ephemeral else resolve_cache_root(cache_dir)
 
     kind = "branch" if branch else "tag" if tag else "commit" if commit else "default"
@@ -268,6 +269,7 @@ def run_config(
     prune: bool = False,
     dry_run: bool = False,
     retry_window: datetime.timedelta | None = None,
+    insecure: bool = False,
 ) -> None:
     """
     Index every (repo, ref) the config selects. First list the remote branches and tags for
@@ -290,7 +292,7 @@ def run_config(
         sys.exit(1)
 
     hosts = config.hosts
-    es = make_client(url, api_key, username, password)
+    es = make_client(url, api_key, username, password, insecure=insecure)
     cache_root = None if ephemeral else resolve_cache_root(cache_dir)
 
     # Schedule gate: determine which sources are due for indexing based on their configured
@@ -576,7 +578,7 @@ def run_config(
     # supersedes an older sibling). Skipped on abort: the plan is incomplete, so its retention
     # cohorts would be too.
     if prune and not _aborted.is_set():
-        prune_cmd.run(config_path, url, api_key, username, password, quiet=quiet)
+        prune_cmd.run(config_path, url, api_key, username, password, quiet=quiet, insecure=insecure)
 
     if failures:
         click.echo(f"Completed with {failures} failure(s)", err=True)

@@ -159,3 +159,38 @@ class TestRun:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "[ERROR]" in captured.err
+
+    def _run_with_mocks(self, insecure: bool):
+        """Helper: run() with all fastmcp internals mocked; return the transport call kwargs."""
+        import types
+        mock_fastmcp, mock_mcp = self._mock_fastmcp()
+        mock_transport_cls = MagicMock()
+        mock_proxy_client_cls = MagicMock()
+
+        fake_fastmcp_mod = types.ModuleType("fastmcp")
+        fake_fastmcp_mod.FastMCP = mock_fastmcp
+        fake_transport_mod = types.ModuleType("fastmcp.client.transports")
+        fake_transport_mod.StreamableHttpTransport = mock_transport_cls
+        fake_proxy_mod = types.ModuleType("fastmcp.server.proxy")
+        fake_proxy_mod.ProxyClient = mock_proxy_client_cls
+
+        with patch.dict(sys.modules, {
+            "fastmcp": fake_fastmcp_mod,
+            "fastmcp.client.transports": fake_transport_mod,
+            "fastmcp.server.proxy": fake_proxy_mod,
+        }):
+            proxy.run("https://kb.example.com", "mykey", None, None, insecure=insecure)
+
+        _, call_kwargs = mock_transport_cls.call_args
+        return call_kwargs
+
+    def test_insecure_false_omits_httpx_client_factory(self):
+        """Without --insecure, no httpx_client_factory is passed to StreamableHttpTransport."""
+        call_kwargs = self._run_with_mocks(insecure=False)
+        assert "httpx_client_factory" not in call_kwargs
+
+    def test_insecure_true_passes_httpx_client_factory(self):
+        """With insecure=True, an httpx_client_factory is passed to StreamableHttpTransport."""
+        call_kwargs = self._run_with_mocks(insecure=True)
+        assert "httpx_client_factory" in call_kwargs
+        assert callable(call_kwargs["httpx_client_factory"])

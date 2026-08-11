@@ -11,6 +11,7 @@ from sourcerer.commands.setup.command import (
     build_host_citation_referenced_content,
     load_index_templates,
     load_kibana_workflows,
+    make_kb_session,
     VALID_CATEGORIES,
 )
 from sourcerer.hosts import resolve_hosts
@@ -333,3 +334,28 @@ class TestSetupCLICategories:
         assert result.exit_code == 0
         assert "--include-experimental" in result.output
         assert "CATEGORIES" in result.output or "categories" in result.output.lower()
+
+    def test_help_shows_insecure_flag(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["setup", "--help"])
+        assert result.exit_code == 0
+        assert "--insecure" in result.output
+
+
+class TestMakeKbSession:
+    """make_kb_session TLS behaviour."""
+
+    def test_default_verify_is_true(self):
+        """Without insecure, session.verify stays at the requests default (True)."""
+        session = make_kb_session(api_key="k")
+        assert session.verify is True
+
+    def test_insecure_sets_verify_false(self):
+        """insecure=True sets session.verify = False."""
+        session = make_kb_session(api_key="k", insecure=True)
+        assert session.verify is False
+
+    def test_insecure_false_leaves_verify_true(self):
+        """Explicitly passing insecure=False is the same as the default."""
+        session = make_kb_session(api_key="k", insecure=False)
+        assert session.verify is True

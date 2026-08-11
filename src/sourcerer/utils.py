@@ -1,5 +1,6 @@
 # Standard packages
 import hashlib
+import warnings
 
 # Elastic packages
 from elasticsearch import Elasticsearch, ApiError, TransportError
@@ -38,12 +39,23 @@ CLIENT_OPTS = {"request_timeout": 120, "max_retries": 3, "retry_on_timeout": Tru
 ES_ERRORS = (ApiError, TransportError, BulkIndexError)
 
 
-def make_client(url: str, api_key: str | None, username: str | None, password: str | None) -> Elasticsearch:
+def make_client(
+    url: str,
+    api_key: str | None,
+    username: str | None,
+    password: str | None,
+    insecure: bool = False,
+) -> Elasticsearch:
+    opts = {**CLIENT_OPTS}
+    if insecure:
+        opts["verify_certs"] = False
+        # Suppress the per-request InsecureRequestWarning that urllib3 would otherwise spam.
+        warnings.filterwarnings("ignore", message="Unverified HTTPS request", category=Warning)
     if api_key:
-        return Elasticsearch(url, api_key=api_key, **CLIENT_OPTS)
+        return Elasticsearch(url, api_key=api_key, **opts)
     if username and password:
-        return Elasticsearch(url, basic_auth=(username, password), **CLIENT_OPTS)
-    return Elasticsearch(url, **CLIENT_OPTS)
+        return Elasticsearch(url, basic_auth=(username, password), **opts)
+    return Elasticsearch(url, **opts)
 
 
 def is_serverless(es: Elasticsearch) -> bool:

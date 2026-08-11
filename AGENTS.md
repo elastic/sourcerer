@@ -19,6 +19,12 @@ Commands:
   Agent Builder MCP endpoint; intended to be launched by Claude Desktop via `mcpServers`)
 - `sourcerer help`
 
+All commands that communicate with Elasticsearch or Kibana accept `--insecure` (flag, default
+off). When set, TLS certificate verification is disabled — useful for locally-hosted clusters
+with self-signed certificates that are trusted in your environment. Also configurable via the
+`ALLOW_INSECURE_TLS` environment variable (set to `1` or `true`); the env var is read by all
+commands including `mcp-proxy` when launched by Claude Desktop via its `env` block.
+
 The `--config` file is `sourcerer.yml` (see `specs/sourcerer-yml.md` and `sourcerer.example.yml`
 for the authoritative schema). Two optional top-level sections: `hosts:` (override/extend the
 built-in git-host defaults) and `sources:` (what to index).

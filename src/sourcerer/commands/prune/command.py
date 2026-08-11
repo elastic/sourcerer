@@ -57,7 +57,7 @@ def _apply_orphan_plan(es, orphan_plan, failures_ref: list[int]) -> tuple[int, i
 
 
 def run(config_path=None, url=None, api_key=None, username=None, password=None,
-        dry_run=False, quiet=False) -> None:
+        dry_run=False, quiet=False, insecure=False) -> None:
     """--config is optional: the retention pass has nothing to plan without one, but the
     orphan sweep below doesn't depend on any config and always runs."""
     entries = []
@@ -68,7 +68,7 @@ def run(config_path=None, url=None, api_key=None, username=None, password=None,
             click.echo(f"Error: invalid config: {e}", err=True)
             sys.exit(1)
 
-    es = make_client(url, api_key, username, password)
+    es = make_client(url, api_key, username, password, insecure=insecure)
     # refs is tiny; refresh once so planning sees the latest markers.
     es.indices.refresh(index=REFS_INDEX, ignore_unavailable=True)
     now = datetime.now(timezone.utc)
@@ -140,6 +140,7 @@ def run_ref(
     password=None,
     dry_run: bool = False,
     quiet: bool = False,
+    insecure: bool = False,
 ) -> None:
     """Prune a single, explicitly-named ref (branch/tag/commit) from the index. Fetches ALL
     markers for the repo so the commit-safety guard (content_delete_set) sees every surviving
@@ -159,7 +160,7 @@ def run_ref(
     else:
         ref_type, ref = "commit", commit
 
-    es = make_client(url, api_key, username, password)
+    es = make_client(url, api_key, username, password, insecure=insecure)
     es.indices.refresh(index=REFS_INDEX, ignore_unavailable=True)
 
     try:

@@ -2,6 +2,7 @@
 
 # Standard packages
 import datetime
+from unittest.mock import patch
 
 # Third-party packages
 import pytest
@@ -49,3 +50,49 @@ class TestRetryWindowOption:
     def test_valid_duration_days(self):
         result = self._invoke("--retry-window", "1d", "--help")
         assert result.exit_code == 0
+
+
+class TestInsecureOption:
+    """Tests for the --insecure / ALLOW_INSECURE_TLS CLI option on the index command."""
+
+    def test_help_shows_insecure_flag(self):
+        runner = CliRunner()
+        result = runner.invoke(index, ["--help"])
+        assert result.exit_code == 0
+        assert "--insecure" in result.output
+
+    def test_insecure_env_var_true_resolves_to_true(self):
+        """ALLOW_INSECURE_TLS=true in the environment sets insecure=True."""
+        runner = CliRunner()
+        captured = {}
+
+        def fake_run(repo_spec, branch, tag, commit, url, api_key, username, password,
+                     force=False, quiet=False, cache_dir=None, ephemeral=False,
+                     retry_window=None, insecure=False):
+            captured["insecure"] = insecure
+
+        with patch("sourcerer.commands.index.command.run", side_effect=fake_run):
+            result = runner.invoke(index, [
+                "--url", "http://es:9200",
+                "github/org/repo",
+            ], env={"ALLOW_INSECURE_TLS": "true"}, catch_exceptions=False)
+
+        assert captured.get("insecure") is True
+
+    def test_insecure_env_var_absent_resolves_to_false(self):
+        """Without ALLOW_INSECURE_TLS, insecure defaults to False."""
+        runner = CliRunner()
+        captured = {}
+
+        def fake_run(repo_spec, branch, tag, commit, url, api_key, username, password,
+                     force=False, quiet=False, cache_dir=None, ephemeral=False,
+                     retry_window=None, insecure=False):
+            captured["insecure"] = insecure
+
+        with patch("sourcerer.commands.index.command.run", side_effect=fake_run):
+            result = runner.invoke(index, [
+                "--url", "http://es:9200",
+                "github/org/repo",
+            ], env={}, catch_exceptions=False)
+
+        assert captured.get("insecure") is False

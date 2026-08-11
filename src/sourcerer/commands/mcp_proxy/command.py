@@ -49,6 +49,7 @@ def run(
     api_key: str | None,
     username: str | None,
     password: str | None,
+    insecure: bool = False,
 ) -> None:
     """Validate inputs, build the proxy, and run it over stdio."""
     if not kb_url:
@@ -74,6 +75,23 @@ def run(
     from fastmcp.server.proxy import ProxyClient  # noqa: PLC0415
 
     url = _endpoint(kb_url)
-    transport = StreamableHttpTransport(url, headers={"Authorization": auth})
+
+    httpx_client_factory = None
+    if insecure:
+        import warnings  # noqa: PLC0415
+        import httpx  # noqa: PLC0415
+        warnings.filterwarnings("ignore", message="Unverified HTTPS request", category=Warning)
+
+        def httpx_client_factory(
+            headers=None,
+            timeout=None,
+            auth=None,
+        ):
+            return httpx.AsyncClient(headers=headers, timeout=timeout, auth=auth, verify=False)
+
+    transport_kwargs = {"headers": {"Authorization": auth}}
+    if httpx_client_factory is not None:
+        transport_kwargs["httpx_client_factory"] = httpx_client_factory
+    transport = StreamableHttpTransport(url, **transport_kwargs)
     mcp = FastMCP.as_proxy(ProxyClient(transport), name="Sourcerer")
     mcp.run()

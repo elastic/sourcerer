@@ -81,7 +81,9 @@ def make_kb_session(
     api_key: str | None = None,
     username: str | None = None,
     password: str | None = None,
+    insecure: bool = False,
 ) -> requests.Session:
+    import warnings  # noqa: PLC0415 - keep import local to avoid top-level side effects
     session = requests.Session()
     session.headers.update({
         "Content-Type": "application/json",
@@ -91,6 +93,9 @@ def make_kb_session(
         session.headers["Authorization"] = f"ApiKey {api_key}"
     elif username and password:
         session.auth = (username, password)
+    if insecure:
+        session.verify = False
+        warnings.filterwarnings("ignore", message="Unverified HTTPS request", category=Warning)
     return session
 
 
@@ -513,13 +518,14 @@ def run(
     config_path: str | None = None,
     categories: tuple[str, ...] | None = None,
     include_experimental: bool = False,
+    insecure: bool = False,
 ) -> None:
     failed = False
     selected = _normalize_categories(categories)
 
     # --- Elasticsearch: index templates ---
     if "templates" in selected:
-        es = make_client(url, api_key, username, password)
+        es = make_client(url, api_key, username, password, insecure=insecure)
         try:
             loaded = load_index_templates(es, include_experimental=include_experimental)
             if loaded:
@@ -559,7 +565,7 @@ def run(
         click.echo(f"[ERROR] Invalid config: {e}", err=True)
         sys.exit(1)
 
-    session = make_kb_session(api_key, username, password)
+    session = make_kb_session(api_key, username, password, insecure=insecure)
 
     if "tools" in kibana_selected:
         try:

@@ -65,6 +65,18 @@ def auth_options(f):
     return f
 
 
+def insecure_option(f):
+    return click.option(
+        "--insecure",
+        is_flag=True,
+        default=False,
+        envvar="ALLOW_INSECURE_TLS",
+        help="Skip TLS certificate verification when connecting to Elasticsearch or Kibana "
+        "(useful for locally-hosted clusters with self-signed certificates). "
+        "Can also be set via the ALLOW_INSECURE_TLS environment variable. Off by default.",
+    )(f)
+
+
 @click.group()
 def cli():
     """Sourcerer - index and search source code in Elasticsearch."""
@@ -79,6 +91,7 @@ def help_cmd(ctx):
 
 @cli.command()
 @env_option
+@insecure_option
 @auth_options
 @click.option("--kb-url", envvar="KIBANA_URL", default=None, help="Kibana URL for agent builder setup.")
 @click.option(
@@ -96,7 +109,7 @@ def help_cmd(ctx):
     help="Also set up experimental resources (those under elastic/*/experimental/).",
 )
 @click.argument("categories", nargs=-1)
-def setup(url, api_key, username, password, kb_url, config_path, include_experimental, categories):
+def setup(url, api_key, username, password, kb_url, config_path, include_experimental, categories, insecure):
     """Idempotently load index templates and Kibana agent builder objects.
 
     Generates one citation skill per known/configured git host (built-in defaults merged with
@@ -123,7 +136,8 @@ def setup(url, api_key, username, password, kb_url, config_path, include_experim
             f"Valid categories: {', '.join(sorted(VALID_CATEGORIES))}."
         )
     setup_cmd.run(url, api_key, username, password, kb_url, config_path,
-                  categories=categories, include_experimental=include_experimental)
+                  categories=categories, include_experimental=include_experimental,
+                  insecure=insecure)
 
 
 @cli.command()
@@ -177,8 +191,9 @@ def setup(url, api_key, username, password, kb_url, config_path, include_experim
     "drives the schedule gate's stuck-run detection. Duration like 30m, 1h, 6h, 1d. Default 1h.",
 )
 @env_option
+@insecure_option
 @auth_options
-def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window, url, api_key, username, password):
+def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window, url, api_key, username, password, insecure):
     """Index a remote GitHub repo's git-tracked files into Elasticsearch.
 
     Provide a REPO_SPEC ('<host>/<org>/<repo>') for a single repo, or --config to index multiple
@@ -191,7 +206,7 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
     if config_path:
         if repo_spec or branch or tag or commit:
             raise click.UsageError("--config cannot be combined with REPO_SPEC or -b/-t/-c")
-        index_cmd.run_config(config_path, url, api_key, username, password, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window=retry_window)
+        index_cmd.run_config(config_path, url, api_key, username, password, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window=retry_window, insecure=insecure)
     else:
         if prune:
             raise click.UsageError("--prune requires --config (there is no retention policy for a single ref)")
@@ -199,7 +214,7 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
             raise click.UsageError("--dry-run requires --config")
         if not repo_spec:
             raise click.UsageError("provide a REPO_SPEC ('<host>/<org>/<repo>') or --config")
-        index_cmd.run(repo_spec, branch, tag, commit, url, api_key, username, password, force, quiet, cache_dir, ephemeral, retry_window=retry_window)
+        index_cmd.run(repo_spec, branch, tag, commit, url, api_key, username, password, force, quiet, cache_dir, ephemeral, retry_window=retry_window, insecure=insecure)
 
 
 @cli.command()
@@ -223,8 +238,9 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
 )
 @click.option("-q", "--quiet", is_flag=True, default=False, help="Suppress output for repos with nothing to prune.")
 @env_option
+@insecure_option
 @auth_options
-def prune(repo_spec, branch, tag, commit, config_path, dry_run, quiet, url, api_key, username, password):
+def prune(repo_spec, branch, tag, commit, config_path, dry_run, quiet, url, api_key, username, password, insecure):
     """Delete indexed refs that fall outside their sourcerer.yml retention policies, then sweep
     for orphans.
 
@@ -243,28 +259,29 @@ def prune(repo_spec, branch, tag, commit, config_path, dry_run, quiet, url, api_
     if config_path:
         if repo_spec or branch or tag or commit:
             raise click.UsageError("--config cannot be combined with REPO_SPEC or -b/-t/-c")
-        prune_cmd.run(config_path, url, api_key, username, password, dry_run, quiet)
+        prune_cmd.run(config_path, url, api_key, username, password, dry_run, quiet, insecure=insecure)
     elif repo_spec:
         refs = {k: v for k, v in [("branch", branch), ("tag", tag), ("commit", commit)] if v}
         if not refs:
             raise click.UsageError("provide exactly one of -b/--branch, -t/--tag, -c/--commit with REPO_SPEC")
         if len(refs) > 1:
             raise click.UsageError("specify at most one of -b/--branch, -t/--tag, -c/--commit")
-        prune_cmd.run_ref(repo_spec, branch, tag, commit, url, api_key, username, password, dry_run, quiet)
+        prune_cmd.run_ref(repo_spec, branch, tag, commit, url, api_key, username, password, dry_run, quiet, insecure=insecure)
     else:
         if branch or tag or commit:
             raise click.UsageError("-b/-t/-c require a REPO_SPEC ('<host>/<org>/<repo>')")
-        prune_cmd.run(None, url, api_key, username, password, dry_run, quiet)
+        prune_cmd.run(None, url, api_key, username, password, dry_run, quiet, insecure=insecure)
 
 
 
 @cli.command(name="mcp-proxy")
 @env_option
+@insecure_option
 @click.option("--kb-url", envvar="KIBANA_URL", default=None, help="Kibana URL. The proxy forwards to {kb-url}/api/agent_builder/mcp. Required.")
 @click.option("--api-key", envvar="ELASTICSEARCH_API_KEY", default=None, help="Elasticsearch API key (ApiKey auth).")
 @click.option("--username", envvar="ELASTICSEARCH_USERNAME", default=None, help="Elasticsearch username (Basic auth).")
 @click.option("--password", envvar="ELASTICSEARCH_PASSWORD", default=None, help="Elasticsearch password (Basic auth).")
-def mcp_proxy(kb_url, api_key, username, password):
+def mcp_proxy(kb_url, api_key, username, password, insecure):
     """Run a stdio MCP proxy that forwards to the Kibana Agent Builder MCP endpoint.
 
     Intended to be launched by Claude Desktop via the mcpServers section of
@@ -273,7 +290,7 @@ def mcp_proxy(kb_url, api_key, username, password):
     (ELASTICSEARCH_USERNAME + ELASTICSEARCH_PASSWORD). All diagnostic output goes
     to stderr; stdout carries the JSON-RPC stream.
     """
-    mcp_proxy_cmd.run(kb_url, api_key, username, password)
+    mcp_proxy_cmd.run(kb_url, api_key, username, password, insecure=insecure)
 
 
 @cli.group()
@@ -329,8 +346,9 @@ def benchmark_get(benchmark_name):
     "without writing to Elasticsearch.",
 )
 @env_option
+@insecure_option
 @auth_options
-def benchmark_index(benchmark_name, force, quiet, cache_dir, ephemeral, prune, dry_run, url, api_key, username, password):
+def benchmark_index(benchmark_name, force, quiet, cache_dir, ephemeral, prune, dry_run, url, api_key, username, password, insecure):
     """Index BENCHMARK_NAME's commits into Elasticsearch using its packaged repos.yml.
 
     Runs the equivalent of `sourcerer index --config <benchmark>/repos.yml`; the config
@@ -339,6 +357,7 @@ def benchmark_index(benchmark_name, force, quiet, cache_dir, ephemeral, prune, d
     benchmark_cmd.index(
         benchmark_name, url, api_key, username, password,
         force, quiet, cache_dir, ephemeral, prune, dry_run,
+        insecure=insecure,
     )
 
 
@@ -349,7 +368,8 @@ def benchmark_index(benchmark_name, force, quiet, cache_dir, ephemeral, prune, d
 @click.option("--connector-id", default=None, help="Agent Builder connector_id selecting the LLM (default: deployment default).")
 @click.option("--resume", is_flag=True, default=False, help="Skip instances already completed in the output files.")
 @env_option
-def benchmark_run(benchmark_name, top_k, concurrency, connector_id, resume):
+@insecure_option
+def benchmark_run(benchmark_name, top_k, concurrency, connector_id, resume, insecure):
     """Run BENCHMARK_NAME's eval, writing results under ./benchmarks/<name>/results/.
 
     Lazily downloads and builds the dataset first if it isn't present. Reads
@@ -361,6 +381,7 @@ def benchmark_run(benchmark_name, top_k, concurrency, connector_id, resume):
         concurrency=concurrency,
         connector_id=connector_id,
         resume=resume,
+        insecure=insecure,
     )
 
 

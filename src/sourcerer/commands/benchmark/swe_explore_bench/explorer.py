@@ -108,15 +108,20 @@ class SourcererExplorer(Explorer):
     max_retries: int = 0
     console: object = None
     trace_log: object = None  # str | Path | None
+    insecure: bool = False
     _trace_lock: object = field(default_factory=threading.Lock, repr=False)
 
     def _session(self) -> requests.Session:
+        import warnings  # noqa: PLC0415
         s = requests.Session()
         s.headers.update({
             "Content-Type": "application/json",
             "kbn-xsrf": "true",
             "Authorization": f"ApiKey {self.api_key}",
         })
+        if self.insecure:
+            s.verify = False
+            warnings.filterwarnings("ignore", message="Unverified HTTPS request", category=Warning)
         return s
 
     def _write_trace(self, record: dict) -> None:
