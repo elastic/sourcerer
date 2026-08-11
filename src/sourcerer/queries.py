@@ -13,7 +13,7 @@ from elasticsearch import Elasticsearch, NotFoundError
 from elasticsearch.helpers import scan
 
 # App packages
-from .indices import FILES_ALIAS, LINES_ALIAS, REFS_ALIAS
+from .indices import FILES_ALIAS, LINES_ALIAS, REFS_ALIAS, files_index, lines_index
 from .planner import Marker
 
 _COMPOSITE_PAGE_SIZE = 1000
@@ -136,3 +136,67 @@ def gather_content_commit_tuples(es: Elasticsearch) -> set[tuple[str, str, str, 
         enumerate_content_commits(es, FILES_ALIAS)
         | enumerate_content_commits(es, LINES_ALIAS)
     )
+
+
+_FULL_SHA_LEN = 40
+_MIN_PREFIX_LEN = 7
+
+
+def resolve_content_commit(
+    es: Elasticsearch, host: str, org: str, repo: str, prefix: str,
+) -> set[str]:
+    """Resolve a commit hash (full 40-char SHA or ≥7-char prefix) to the set of distinct
+    ``git.commit`` values that actually have content docs in the repo's files or lines index.
+
+    Returns an empty set if nothing matches or the index does not exist. The caller is
+    responsible for rejecting an ambiguous result (>1 element) and the no-content case (0
+    elements).
+
+    Uses a composite aggregation on the per-repo physical indices rather than the read aliases
+    so that a prefix query can be issued without scanning the entire cluster-wide alias.  For a
+    full 40-char SHA a ``term`` filter is used instead of ``prefix``; otherwise a ``prefix``
+    query is added alongside the host/org/repo filter."""
+    # Build query: host/org/repo scoped, plus a prefix or term filter on git.commit.
+    if len(prefix) == _FULL_SHA_LEN:
+        commit_clause: dict = {"term": {"git.commit": prefix}}
+    else:
+        commit_clause = {"prefix": {"git.commit": prefix}}
+
+    query = {"bool": {"filter": [
+        {"term": {"git.host": host}},
+        {"term": {"git.org": org}},
+        {"term": {"git.repo": repo}},
+        commit_clause,
+    ]}}
+
+    found: set[str] = set()
+    for idx in (lines_index(host, org, repo), files_index(host, org, repo)):
+        if found:
+            # Already resolved from the first index; no need to scan the second.
+            break
+        after: dict | None = None
+        while True:
+            composite: dict = {
+                "size": _COMPOSITE_PAGE_SIZE,
+                "sources": [{"commit": {"terms": {"field": "git.commit"}}}],
+            }
+            if after is not None:
+                composite["after"] = after
+            try:
+                resp = es.search(
+                    index=idx, size=0,
+                    query=query,
+                    aggs={"commits": {"composite": composite}},
+                )
+            except NotFoundError:
+                break
+            agg = resp["aggregations"]["commits"]
+            buckets = agg["buckets"]
+            if not buckets:
+                break
+            for b in buckets:
+                found.add(b["key"]["commit"])
+            after = agg.get("after_key")
+            if after is None:
+                break
+    return found

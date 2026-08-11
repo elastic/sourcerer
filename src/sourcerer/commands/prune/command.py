@@ -20,9 +20,9 @@ import yaml
 from ...config import load_config
 from ...indices import REFS_INDEX
 from ...planner import Decision, Marker, plan_repo
-from ...queries import fetch_markers
+from ...queries import fetch_markers, resolve_content_commit
 from ...utils import ES_ERRORS, make_client
-from .execute import execute_deletions, execute_orphan_deletions, plan_orphans_now
+from .execute import delete_commit_content, execute_deletions, execute_orphan_deletions, plan_orphans_now
 from .report import _Row, _orphan_rows, _print, _ref_rows, _retention_rows
 
 
@@ -171,10 +171,13 @@ def run_ref(
         sys.exit(1)
 
     # Build decisions: mark only the targeted ref as delete; keep everything else.
-    # For commit refs, match by prefix (>=7 hex chars) against the stored full SHA -- mirrors
-    # how `index -c` accepts short hashes. Reject if the prefix is ambiguous (>1 match).
+    # For commit refs, match by prefix (>=7 hex chars) against the stored full marker.commit
+    # value -- across ALL ref types (branch/tag/commit).  This lets `-c <sha>` target any
+    # marker (regardless of how it was indexed) that sits on that commit.  Reject if the prefix
+    # resolves to >1 distinct SHA (ambiguous), counting distinct commit SHAs rather than marker
+    # count so that a branch + tag legitimately sharing one SHA doesn't false-trigger.
     def _matches_commit(marker: Marker, target: str) -> bool:
-        return marker.ref_type == "commit" and marker.ref.startswith(target)
+        return marker.commit.startswith(target)
 
     decisions = []
     for m in markers:
@@ -185,26 +188,78 @@ def run_ref(
         decisions.append(Decision(m, "delete" if hit else "keep", "explicit" if hit else "not targeted"))
 
     target_decisions = [d for d in decisions if d.action == "delete"]
-    if ref_type == "commit" and len(target_decisions) > 1:
-        matches = ", ".join(d.marker.ref for d in target_decisions)
-        click.echo(
-            f"Error: ambiguous commit prefix {ref!r} matches {len(target_decisions)} indexed commits "
-            f"({matches}); use the full SHA.", err=True
-        )
-        sys.exit(1)
-    if not target_decisions:
-        if not quiet:
-            click.echo(f"{host}/{org}/{repo}@{ref} (ref_type={ref_type}): not indexed, nothing to prune.")
-        return
+    if ref_type == "commit" and target_decisions:
+        distinct_shas = {d.marker.commit for d in target_decisions}
+        if len(distinct_shas) > 1:
+            matches = ", ".join(sorted(distinct_shas))
+            click.echo(
+                f"Error: ambiguous commit prefix {ref!r} matches {len(distinct_shas)} distinct commits "
+                f"({matches}); use the full SHA.", err=True
+            )
+            sys.exit(1)
 
     rows: list[_Row] = []
-    rows.extend(_ref_rows(host, org, repo, decisions))
     failures = [0]
+    total_markers = total_commits = 0
+
+    if not target_decisions:
+        if ref_type != "commit":
+            # Branch/tag not found in index — nothing to do.
+            if not quiet:
+                click.echo(f"{host}/{org}/{repo}@{ref} (ref_type={ref_type}): not indexed, nothing to prune.")
+            return
+
+        # -c <sha> with no matching marker: the commit may still have content docs (e.g. an old
+        # commit a branch has moved past).  Resolve the prefix to a concrete SHA via the content
+        # indices, then delete the content directly if found.
+        try:
+            resolved = resolve_content_commit(es, host, org, repo, ref)
+        except ES_ERRORS as e:
+            click.echo(f"{host}/{org}/{repo}: error resolving commit in content indices: {e}", err=True)
+            sys.exit(1)
+
+        if not resolved:
+            if not quiet:
+                click.echo(f"{host}/{org}/{repo}@{ref}: not indexed, nothing to prune.")
+            return
+
+        if len(resolved) > 1:
+            matches = ", ".join(sorted(resolved))
+            click.echo(
+                f"Error: ambiguous commit prefix {ref!r} matches {len(resolved)} distinct commits "
+                f"in content indices ({matches}); use the full SHA.", err=True
+            )
+            sys.exit(1)
+
+        # Exactly one content commit matches — content-only path (no marker to delete).
+        (sha,) = resolved
+        rows.append(_Row(f"{host}/{org}/{repo}@{sha}", "content-only"))
+
+        if not quiet or dry_run:
+            _print(rows)
+
+        if not dry_run:
+            try:
+                delete_commit_content(es, host, org, repo, sha)
+                total_commits = 1
+            except ES_ERRORS as e:
+                failures[0] += 1
+                click.echo(f"{host}/{org}/{repo}: error deleting content: {e}", err=True)
+
+        if dry_run:
+            click.echo("Dry run: no changes made.")
+        elif not quiet:
+            click.echo(f"Pruned 0 marker(s) and {total_commits} commit(s) of content.")
+        if failures[0]:
+            click.echo(f"Completed with {failures[0]} failure(s)", err=True)
+            sys.exit(1)
+        return
+
+    rows.extend(_ref_rows(host, org, repo, decisions))
 
     if not quiet or dry_run:
         _print(rows)
 
-    total_markers = total_commits = 0
     if not dry_run:
         try:
             total_markers, total_commits = execute_deletions(es, host, org, repo, decisions)

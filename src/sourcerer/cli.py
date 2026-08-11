@@ -221,7 +221,14 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
 @click.argument("repo_spec", required=False)
 @click.option("-b", "--branch", default=None, help="Branch to prune.")
 @click.option("-t", "--tag", default=None, help="Tag to prune.")
-@click.option("-c", "--commit", default=None, help="Commit hash to prune (full SHA or unambiguous prefix ≥7 chars).")
+@click.option(
+    "-c", "--commit", default=None,
+    help="Commit hash to prune (full SHA or unambiguous prefix ≥7 chars). Deletes every ref "
+    "marker pinned to that commit (branch, tag, or commit-pin) and any content exclusively "
+    "owned by it, regardless of how the commit was originally indexed. If no marker exists for "
+    "the commit (e.g. an old commit a branch has moved past), the content docs are deleted "
+    "directly.",
+)
 @click.option(
     "--config",
     "config_path",

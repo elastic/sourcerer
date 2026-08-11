@@ -13,6 +13,31 @@ from ...planner import OrphanPlan, content_delete_set, plan_orphans
 from ...queries import enumerate_ref_tuples, gather_content_commit_tuples, list_sourcerer_indices
 
 
+def delete_commit_content(
+    es: Elasticsearch, host: str, org: str, repo: str, sha: str,
+) -> None:
+    """Fire an async delete-by-query for all content docs (lines + files) belonging to one
+    commit SHA in a repo. No-op if the index doesn't exist yet. Called both from
+    execute_deletions (marker-driven path) and from run_ref's no-marker content-only fallback."""
+    for idx in (lines_index(host, org, repo), files_index(host, org, repo)):
+        try:
+            es.delete_by_query(
+                index=idx,
+                query={"bool": {"filter": [
+                    {"term": {"git.host": host}},
+                    {"term": {"git.org": org}},
+                    {"term": {"git.repo": repo}},
+                    {"term": {"git.commit": sha}},
+                ]}},
+                conflicts="proceed",
+                refresh=False,
+                scroll_size=5000,
+                wait_for_completion=False,
+            )
+        except NotFoundError:
+            pass
+
+
 def execute_deletions(
     es: Elasticsearch, host: str, org: str, repo: str, decisions,
 ) -> tuple[int, int]:
@@ -33,23 +58,7 @@ def execute_deletions(
     )
 
     for sha in drop_commits:
-        for idx in (lines_index(host, org, repo), files_index(host, org, repo)):
-            try:
-                es.delete_by_query(
-                    index=idx,
-                    query={"bool": {"filter": [
-                        {"term": {"git.host": host}},
-                        {"term": {"git.org": org}},
-                        {"term": {"git.repo": repo}},
-                        {"term": {"git.commit": sha}},
-                    ]}},
-                    conflicts="proceed",
-                    refresh=False,
-                    scroll_size=5000,
-                    wait_for_completion=False,
-                )
-            except NotFoundError:
-                pass
+        delete_commit_content(es, host, org, repo, sha)
     return (len(deletes), len(drop_commits))
 
 

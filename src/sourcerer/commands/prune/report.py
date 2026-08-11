@@ -25,6 +25,8 @@ class _Row:
       - "policy:<criteria>" -- a retain-policy deletion, where <criteria> is a comma-joined
         subset of "age", "count", "version", "prerelease" (that fixed order) naming exactly
         which criteria excluded this marker -- e.g. "policy:count" or "policy:age,count".
+      - "content-only"      -- a commit targeted by -c with no ref marker; only its content
+        docs (lines/files) are deleted.
       - "orphan:index"      -- a whole physical index with no matching refs entry (Class A).
       - "orphan:content"    -- a commit's content docs with no surviving marker (Class B).
       - "orphan:marker"     -- a commit's marker doc with no content at all (Class C).
@@ -91,7 +93,7 @@ def _print(rows: list[_Row]) -> None:
     w_why = max(len(r.why) for r in rows)
 
     for r in rows:
-        style = "yellow" if r.why.startswith("policy:") else "red"
+        style = "yellow" if r.why.startswith("policy:") or r.why == "content-only" else "red"
         line = Text()
         line.append(f"{r.why:<{w_why}} ", style=style)
         line.append(r.what)
