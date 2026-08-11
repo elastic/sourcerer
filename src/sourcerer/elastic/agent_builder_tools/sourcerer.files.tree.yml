@@ -1,0 +1,232 @@
+id: sourcerer.files.tree
+type: esql
+description: list contents of directories in repo(s) in a tree-like format
+tags: []
+configuration:
+  query: |-
+    // Scope the search
+    FROM sourcerer-files
+    | WHERE git.host LIKE ?git_host
+        AND git.org LIKE ?git_org
+        AND git.repo LIKE ?git_repo
+        AND git.commit LIKE ?git_commit
+
+    // Split each file path into its segments
+    | EVAL _segs = SPLIT(file.path, "/")
+    | EVAL _file_segs = MV_COUNT(_segs)
+
+    // Re-root the tree at the literal head of file_path, the way tree roots at
+    // the directory you hand it: "src" and "src/" and "src/**" all root at
+    // "src", "src/*/resources" roots at "src", "*" and "**" root at the repo
+    // root. Everything from the first wildcard onward is dropped. The appended
+    // "/*" makes a pattern with no wildcard at all behave the same way, so its
+    // last segment is kept as the root rather than being mistaken for a
+    // partial segment.
+    //
+    // Depth is -L's job alone, so the pattern only ever roots and filters - it
+    // never confines how deep the listing goes. A pattern with no wildcard is
+    // just a directory, so it roots there and filters nothing; a glob roots at
+    // its literal head and filters by the whole pattern, which is what lets
+    // "src/**/*.xml" match at any depth below src.
+    | EVAL _fp = CASE(ENDS_WITH(?file_path, "/"), LEFT(?file_path, LENGTH(?file_path) - 1), ?file_path)
+    | EVAL _globs = _fp != REPLACE(_fp, "[*]", "")
+    | EVAL _head = REPLACE(CONCAT(_fp, "/*"), "[*].*", "")
+    | EVAL _head_segs = SPLIT(_head, "/")
+    | EVAL _base = MV_COUNT(_head_segs) - 1
+    | EVAL _root = CASE(_base == 0, ".", CONCAT(MV_CONCAT(MV_SLICE(_head_segs, 0, _base - 1), "/"), "/"))
+    | WHERE STARTS_WITH(file.path, _head) AND (NOT _globs OR file.path LIKE ?file_path)
+
+    // Explode each file into one row per node on its path: every ancestor
+    // directory plus the file itself. "a/b/Job.java" becomes three rows:
+    // "a", "a/b", "a/b/Job.java". This is what turns a flat list of file
+    // paths into a set of tree nodes.
+    //
+    // ES|QL has no number range generator, so we cross join against a fixed
+    // list of depths and keep only the ones this file actually reaches.
+    // 32 is therefore the deepest path this tool can render - extend the
+    // list if a repo ever nests deeper than that.
+    | EVAL _depths = SPLIT("1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32", ",")
+    | MV_EXPAND _depths
+    | EVAL _depth = TO_INTEGER(_depths)
+    // -L: max display depth, counted from the root rather than the repo root,
+    // and drop the root's own ancestors so the listing starts there
+    | WHERE _depth > _base AND _depth <= _file_segs AND _depth - _base <= ?L
+
+    // A node is a directory when the file's path keeps going below it.
+    // -L truncation doesn't change that: a directory cut off at the depth
+    // limit is still a directory, it just doesn't get to show its children.
+    | EVAL _path = MV_CONCAT(MV_SLICE(_segs, 0, _depth - 1), "/")
+    | EVAL _is_dir = _depth < _file_segs
+
+    // -d: list directories only
+    | WHERE ?d == false OR _is_dir
+
+    // Collapse to one row per unique node - many files share the same ancestors.
+    // Every file contributed its size to each of its ancestors above, so a
+    // directory ends up with a cumulative (du style) size. The files index has
+    // no size of its own for a directory, so this is the useful number to show.
+    | STATS bytes = SUM(file.size)
+        BY git.host, git.org, git.repo, git.commit, _root, _base, _path, _depth, _is_dir
+
+    // -s / -h: the size prefix. tree right-aligns it in a fixed width field so
+    // the names line up - 11 wide for raw bytes, 4 wide for human readable.
+    // -h wins if both are set. _div and _unit pick the largest 1024-based unit
+    // that fits.
+    | EVAL _div = CASE(
+        bytes >= 1152921504606846976, 1152921504606846976.0,
+        bytes >= 1125899906842624, 1125899906842624.0,
+        bytes >= 1099511627776, 1099511627776.0,
+        bytes >= 1073741824, 1073741824.0,
+        bytes >= 1048576, 1048576.0,
+        bytes >= 1024, 1024.0,
+        1.0)
+    | EVAL _unit = CASE(
+        bytes >= 1152921504606846976, "E",
+        bytes >= 1125899906842624, "P",
+        bytes >= 1099511627776, "T",
+        bytes >= 1073741824, "G",
+        bytes >= 1048576, "M",
+        bytes >= 1024, "K",
+        "")
+
+    // tree's human readable rule: under 1024 bytes, print the count with no
+    // unit; otherwise scale it and keep a decimal place only while the result
+    // is still under 10, so every value fits the 4 wide field - "5.8K", but
+    // " 17K" rather than "17.4K" and "244K" rather than "244.0K". The scaling
+    // is done in tenths as integers so the decimal place is exact.
+    | EVAL _tenths = TO_LONG(ROUND(bytes * 10.0 / _div, 0))
+    | EVAL _human = CASE(
+        bytes < 1024, TO_STRING(bytes),
+        _tenths < 100, CONCAT(TO_STRING(_tenths / 10), ".", TO_STRING(_tenths % 10), _unit),
+        CONCAT(TO_STRING(TO_LONG(ROUND(bytes / _div, 0))), _unit))
+    | EVAL _bytes = TO_STRING(bytes)
+
+    // Right-align by left-padding with blanks and taking the last N characters.
+    // GREATEST keeps a value that already overflows the field intact rather
+    // than letting RIGHT chop its leading digits off.
+    | EVAL _size = CASE(
+        ?h == true, CONCAT("[", RIGHT(CONCAT("    ", _human), GREATEST(4, LENGTH(_human))), "]  "),
+        ?s == true, CONCAT("[", RIGHT(CONCAT("           ", _bytes), GREATEST(11, LENGTH(_bytes))), "]  "),
+        "")
+
+    // -f: print each node's whole path instead of just its own name. Paths are
+    // already relative to the repo root, so they only need a "./" when the tree
+    // is rooted there; a tree rooted at "src/" already carries that prefix.
+    | EVAL _name = MV_LAST(SPLIT(_path, "/"))
+    | EVAL _label = CASE(?f == true, CONCAT(CASE(_base == 0, "./", ""), _path), _name)
+
+    // -i: drop the indentation and branches entirely. Combined with -f this
+    // turns the tree into a flat listing, which is what -i is for; on its own
+    // it flattens the hierarchy into an unordered list of bare names.
+    //
+    // Otherwise: a continuation column for each level between the root and this
+    // node, then the node's branch. Every branch is a tee. Drawing the corner
+    // instead would need to know whether a node is the last entry in its
+    // parent, which no row can see for itself - that costs an extra aggregation
+    // round over the whole tree. The tee is correct everywhere except the last
+    // entry of each directory, where the bar simply doesn't terminate; the
+    // corner would be wrong everywhere else.
+    | EVAL _indent = CASE(?i == true, "", CONCAT(REPEAT("│   ", _depth - _base - 1), "├── "))
+
+    // The size prefix sits between the branch and the name, and directories
+    // keep their trailing "/" - under -i it's the only thing marking them.
+    | EVAL _line = CONCAT(_indent, _size, _label, CASE(_is_dir, "/", ""))
+
+    // _sortkey: the node path with "/" swapped for a carriage return, then
+    // lowercased. "\r" sorts below every printable character, so a directory
+    // always lands directly above its own children instead of interleaving with
+    // its siblings - "src/main", "src/main/java", "src/main.txt" rather than
+    // "src/main", "src/main.txt", "src/main/java". Lowercasing matches how tree
+    // sorts in a UTF-8 locale, where "__pycache__" comes before "AGENTS.md".
+    // A tab then separates the key from the visible line so the key can be
+    // stripped back off after the STATS/MV_CONCAT below.
+    | EVAL pair = CONCAT(TO_LOWER(REPLACE(_path, "/", "\r")), "\t", _line)
+
+    // Collapse each repo's nodes into one ordered list, and count what's in it
+    // for the summary line (the sort key prefix keeps identical lines distinct,
+    // so VALUES can't drop a repeated file name from a different directory)
+    | STATS pairs = MV_SORT(VALUES(pair)),
+        dirs = SUM(TO_INTEGER(_is_dir)),
+        nodes = COUNT(*)
+        BY git.host, git.org, git.repo, git.commit, _root
+
+    // Join the lines with newlines, then strip each line back to its visible
+    // part. The greedy [^\n]* runs to the last tab on the line, which is the
+    // separator, so the whole sort key goes with it.
+    | EVAL tree = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(pairs, "\n")), "\n[^\n]*\t", "\n"), 2)
+
+    // Top the tree with its root and, unless --noreport, close it with tree's
+    // summary line
+    | EVAL _report = CASE(?noreport == true, "", CONCAT("\n\n", TO_STRING(dirs), " directories, ", TO_STRING(nodes - dirs), " files"))
+    | EVAL tree = CONCAT(_root, "\n", tree, _report)
+
+    // Format the response
+    | SORT git.host, git.org, git.repo, git.commit
+    | KEEP git.host, git.org, git.repo, git.commit, tree
+    | LIMIT ?n
+  params:
+    git_host:
+      type: string
+      description: Filter by git host(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_org:
+      type: string
+      description: Filter by git org(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_repo:
+      type: string
+      description: Filter by git repo(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_commit:
+      type: string
+      description: Filter by git commit(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    file_path:
+      type: string
+      description: Directory to tree, e.g. src or src/sourcerer. The tree is rooted there and recurses; depth is controlled by L, not by this pattern. May also be a glob to filter what is listed (e.g. src/*.xml lists only XML files under src, at any depth). A single * already matches across directories, so ** is never required.
+      optional: true
+      defaultValue: "**"
+    d:
+      type: boolean
+      description: List directories only
+      optional: true
+      defaultValue: false
+    s:
+      type: boolean
+      description: Include the size of each file in bytes. Directory sizes are cumulative (the total of everything beneath them).
+      optional: true
+      defaultValue: false
+    h:
+      type: boolean
+      description: Include the size of each file but in a more human readable way, e.g. appending a size letter for kilobytes (K), megabytes (M), gigabytes (G), terrabytes (T), petabytes (P) and exabytes (E). Takes precedence over s.
+      optional: true
+      defaultValue: false
+    i:
+      type: boolean
+      description: Do not print the indentation lines or branches. Intended to be combined with f, which together produce a flat listing of full paths.
+      optional: true
+      defaultValue: false
+    f:
+      type: boolean
+      description: Print the full path prefix for each file rather than just its name
+      optional: true
+      defaultValue: false
+    L:
+      type: integer
+      description: Max display depth of the directory tree, counted from the root of file_path rather than the repo root. Max supported path depth is 32.
+      optional: true
+      defaultValue: 1000000
+    noreport:
+      type: boolean
+      description: Omit the trailing report of how many directories and files were listed
+      optional: true
+      defaultValue: false
+    n:
+      type: integer
+      description: Number of search results (one result is the whole tree for one repo)
+      optional: true
+      defaultValue: 1000

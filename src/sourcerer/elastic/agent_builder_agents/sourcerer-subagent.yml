@@ -34,6 +34,7 @@ configuration:
     - sourcerer.files.ls
     - sourcerer.files.read_lines
     - sourcerer.files.tail
+    - sourcerer.files.tree
   enable_elastic_capabilities: false
   workflow_ids: []
   plugin_ids: []

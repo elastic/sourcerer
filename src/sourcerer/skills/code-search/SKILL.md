@@ -25,7 +25,7 @@ Use when you know the exact identifier or pattern:
 
 Returns all matching lines up to n. Default n=100; lower for focused lookups, raise if you expect many matches. Results are in file/line order.
 
-### `files.ls` - directory listing
+### `files.ls` and `files.tree` - file and directory listings
 Use to orient yourself or confirm a path before reading:
 - Explore an unfamiliar repo's top-level structure
 - Find which subdirectory contains a feature (e.g. `src/main/java/org/elasticsearch/*/`)
