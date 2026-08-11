@@ -24,6 +24,13 @@ AGENT_BUILDER_WORKFLOWS_DIR = _ELASTIC / "workflows"
 KIBANA_SAVED_OBJECTS_DIR = _ELASTIC / "kibana_saved_objects"
 SKILLS_DIR = resources.files("sourcerer") / "skills"
 
+# All valid setup category names (positional arg to `sourcerer setup`).
+VALID_CATEGORIES = {"all", "agents", "skills", "tools", "templates", "dashboards", "workflows"}
+
+# Categories that require a Kibana URL + auth.
+KIBANA_CATEGORIES = {"agents", "skills", "tools", "dashboards", "workflows"}
+
+
 def _parse_skillmd(text: str) -> tuple[dict, str]:
     """Parse a SKILL.md into (frontmatter_dict, body). Returns ({}, text) if no frontmatter."""
     if not text.startswith("---"):
@@ -87,9 +94,22 @@ def make_kb_session(
     return session
 
 
-def load_yaml_dir(directory: pathlib.Path) -> list[dict]:
+def _yaml_files(
+    directory: pathlib.Path, include_experimental: bool = False
+) -> list[pathlib.Path]:
+    """Return sorted YAML files from *directory*, optionally including its experimental/ subdir."""
     files = sorted(directory.glob("*.yml")) + sorted(directory.glob("*.yaml"))
-    return [yaml.safe_load(f.read_text()) for f in files]
+    if include_experimental:
+        exp = directory / "experimental"
+        if exp.is_dir():
+            files += sorted(exp.glob("*.yml")) + sorted(exp.glob("*.yaml"))
+    return files
+
+
+def load_yaml_dir(
+    directory: pathlib.Path, include_experimental: bool = False
+) -> list[dict]:
+    return [yaml.safe_load(f.read_text()) for f in _yaml_files(directory, include_experimental)]
 
 
 # Backwards-compatible alias: this loader used to be setup-private (`_load_yaml_dir`). The
@@ -97,7 +117,10 @@ def load_yaml_dir(directory: pathlib.Path) -> list[dict]:
 _load_yaml_dir = load_yaml_dir
 
 
-def load_skills(skills_dir: pathlib.Path = AGENT_BUILDER_SKILLS_DIR) -> list[dict]:
+def load_skills(
+    skills_dir: pathlib.Path = AGENT_BUILDER_SKILLS_DIR,
+    include_experimental: bool = False,
+) -> list[dict]:
     """Load Agent Builder skill templates from `skills_dir`, injecting id, name, description,
     and content from the corresponding SKILL.md in SKILLS_DIR. Returns fully-populated dicts.
 
@@ -106,9 +129,7 @@ def load_skills(skills_dir: pathlib.Path = AGENT_BUILDER_SKILLS_DIR) -> list[dic
     ``skill_dir:`` field pointing at it. The SKILL.md ``name:`` is also unprefixed; Agent
     Builder gets the ``sourcerer-`` prefixed form via the YAML stem so its global namespace
     stays unambiguous."""
-    skill_files = sorted(skills_dir.glob("*.yml")) + sorted(skills_dir.glob("*.yaml"))
-    if not skill_files:
-        raise FileNotFoundError(f"No skill definitions found in {skills_dir}")
+    skill_files = _yaml_files(skills_dir, include_experimental)
     skills = []
     for path in skill_files:
         template = yaml.safe_load(path.read_text()) or {}
@@ -144,10 +165,18 @@ def _skill_put_body(skill: dict) -> dict:
     return {k: v for k, v in skill.items() if k not in ("id", "skill_dir")}
 
 
-def load_index_templates(es, templates_dir: pathlib.Path = ELASTICSEARCH_INDEX_TEMPLATES_DIR) -> list[str]:
+def load_index_templates(
+    es,
+    templates_dir: pathlib.Path = ELASTICSEARCH_INDEX_TEMPLATES_DIR,
+    include_experimental: bool = False,
+) -> list[str]:
     template_files = sorted(templates_dir.glob("*.json"))
+    if include_experimental:
+        exp = templates_dir / "experimental"
+        if exp.is_dir():
+            template_files += sorted(exp.glob("*.json"))
     if not template_files:
-        raise FileNotFoundError(f"No index templates found in {templates_dir}")
+        return []
 
     loaded = []
     for path in template_files:
@@ -175,11 +204,13 @@ def load_index_templates(es, templates_dir: pathlib.Path = ELASTICSEARCH_INDEX_T
 
 
 def load_agent_builder_tools(
-    session: requests.Session, kb_url: str, tools_dir: pathlib.Path = AGENT_BUILDER_TOOLS_DIR
+    session: requests.Session, kb_url: str,
+    tools_dir: pathlib.Path = AGENT_BUILDER_TOOLS_DIR,
+    include_experimental: bool = False,
 ) -> list[str]:
-    tools = _load_yaml_dir(tools_dir)
+    tools = _load_yaml_dir(tools_dir, include_experimental)
     if not tools:
-        raise FileNotFoundError(f"No tool definitions found in {tools_dir}")
+        return []
     base = kb_url.rstrip("/")
     loaded = []
     for tool in tools:
@@ -198,13 +229,14 @@ def load_agent_builder_tools(
 def load_agent_builder_agents(
     session: requests.Session, kb_url: str,
     agents_dir: pathlib.Path = AGENT_BUILDER_AGENTS_DIR,
+    include_experimental: bool = False,
 ) -> list[str]:
     """Upsert each agent. The agent's skill_ids are defined statically in the YAML and upserted
     as-is; per-host citation data is now embedded as referenced_content on the citations skill
     rather than as separate skills, so no dynamic patching is needed."""
-    agents = _load_yaml_dir(agents_dir)
+    agents = _load_yaml_dir(agents_dir, include_experimental)
     if not agents:
-        raise FileNotFoundError(f"No agent definitions found in {agents_dir}")
+        return []
     base = kb_url.rstrip("/")
     loaded = []
     for agent in agents:
@@ -236,12 +268,15 @@ def _upsert_skill(session: requests.Session, base: str, skill: dict) -> str:
 def load_agent_builder_skills(
     session: requests.Session, kb_url: str, hosts: dict[str, Host],
     skills_dir: pathlib.Path = AGENT_BUILDER_SKILLS_DIR,
+    include_experimental: bool = False,
 ) -> list[str]:
     """Upsert the on-disk base skills. For the sourcerer-code-citations skill, attach
     per-host URL templates as referenced_content items (one per auto_skill=True host) so
     the agent can look up the right URL scheme from the skill's embedded reference data.
     Returns the upserted skill ids."""
-    skills = load_skills(skills_dir)
+    skills = load_skills(skills_dir, include_experimental)
+    if not skills:
+        return []
     rc_items = [
         build_host_citation_referenced_content(hosts[h])
         for h in sorted(hosts) if hosts[h].auto_skill
@@ -258,15 +293,16 @@ def load_agent_builder_skills(
 def load_kibana_workflows(
     session: requests.Session, kb_url: str,
     workflows_dir: pathlib.Path = AGENT_BUILDER_WORKFLOWS_DIR,
+    include_experimental: bool = False,
 ) -> list[str]:
     """Idempotently create-or-update each Kibana workflow from every .yml/.yaml file in
     `workflows_dir`. Workflows are identified by their YAML `name:` field; Kibana assigns an
     opaque id on creation, so we resolve name→id via a search before deciding PUT vs POST.
 
     Returns the list of upserted workflow names."""
-    workflow_files = sorted(workflows_dir.glob("*.yml")) + sorted(workflows_dir.glob("*.yaml"))
+    workflow_files = _yaml_files(workflows_dir, include_experimental)
     if not workflow_files:
-        raise FileNotFoundError(f"No workflow definitions found in {workflows_dir}")
+        return []
     base = kb_url.rstrip("/")
     loaded = []
     for path in workflow_files:
@@ -292,6 +328,7 @@ def load_kibana_workflows(
 def load_kibana_saved_objects(
     session: requests.Session, kb_url: str,
     saved_objects_dir: pathlib.Path = KIBANA_SAVED_OBJECTS_DIR,
+    include_experimental: bool = False,
 ) -> list[str]:
     """Idempotently import Kibana saved objects (index patterns, dashboards, lenses, tags, etc.)
     from every .ndjson file in `saved_objects_dir`.
@@ -302,8 +339,12 @@ def load_kibana_saved_objects(
 
     Returns (imported_ids, errors) where errors is a list of (object_id, message) tuples."""
     ndjson_files = sorted(saved_objects_dir.glob("*.ndjson"))
+    if include_experimental:
+        exp = saved_objects_dir / "experimental"
+        if exp.is_dir():
+            ndjson_files += sorted(exp.glob("*.ndjson"))
     if not ndjson_files:
-        raise FileNotFoundError(f"No saved-objects .ndjson files found in {saved_objects_dir}")
+        return [], []
     base = kb_url.rstrip("/")
     url = f"{base}/api/saved_objects/_import?overwrite=true"
     imported: list[str] = []
@@ -346,20 +387,50 @@ def load_kibana_saved_objects(
     return imported, errors
 
 
-def run(url: str, api_key: str | None, username: str | None, password: str | None,
-        kb_url: str | None, config_path: str | None = None) -> None:
+def _normalize_categories(categories: tuple[str, ...] | None) -> set[str]:
+    """Expand a tuple of category names into the set to actually run.
+
+    - None or empty tuple → all categories.
+    - Any element equal to 'all' (alone or mixed) → all categories.
+    - Otherwise the set is the named categories verbatim (validation already done by the CLI).
+    """
+    all_cats = VALID_CATEGORIES - {"all"}
+    if not categories or "all" in categories:
+        return all_cats
+    return set(categories)
+
+
+def run(
+    url: str,
+    api_key: str | None,
+    username: str | None,
+    password: str | None,
+    kb_url: str | None,
+    config_path: str | None = None,
+    categories: tuple[str, ...] | None = None,
+    include_experimental: bool = False,
+) -> None:
     failed = False
-    es = make_client(url, api_key, username, password)
-    try:
-        loaded = load_index_templates(es)
-        for name in loaded:
-            click.echo(f"Loaded index template: {name}")
-    except FileNotFoundError as e:
-        click.echo(f"[ERROR] {e}", err=True)
-        failed = True
-    except Exception as e:
-        click.echo(f"[ERROR] Failed to load index templates: {e}", err=True)
-        failed = True
+    selected = _normalize_categories(categories)
+
+    # --- Elasticsearch: index templates ---
+    if "templates" in selected:
+        es = make_client(url, api_key, username, password)
+        try:
+            loaded = load_index_templates(es, include_experimental=include_experimental)
+            if loaded:
+                for name in loaded:
+                    click.echo(f"Loaded index template: {name}")
+            else:
+                click.echo("No index templates to load.")
+        except Exception as e:
+            click.echo(f"[ERROR] Failed to load index templates: {e}", err=True)
+            failed = True
+
+    # --- Kibana-backed categories ---
+    kibana_selected = selected & KIBANA_CATEGORIES
+    if not kibana_selected:
+        sys.exit(1 if failed else 0)
 
     if not kb_url:
         click.echo("Skipping Kibana setup (KIBANA_URL not set).")
@@ -386,68 +457,78 @@ def run(url: str, api_key: str | None, username: str | None, password: str | Non
 
     session = make_kb_session(api_key, username, password)
 
-    try:
-        tool_ids = load_agent_builder_tools(session, kb_url)
-        for tid in tool_ids:
-            click.echo(f"Upserted tool: {tid}")
-    except FileNotFoundError as e:
-        click.echo(f"[ERROR] {e}", err=True)
-        failed = True
-    except requests.HTTPError as e:
-        body = e.response.text if e.response is not None else ""
-        click.echo(f"[ERROR] Failed to upsert tools: {e}\n{body}", err=True)
-        failed = True
-
-    try:
-        skill_ids = load_agent_builder_skills(session, kb_url, hosts)
-        for sid in skill_ids:
-            click.echo(f"Upserted skill: {sid}")
-    except FileNotFoundError as e:
-        click.echo(f"[ERROR] {e}", err=True)
-        failed = True
-    except requests.HTTPError as e:
-        body = e.response.text if e.response is not None else ""
-        click.echo(f"[ERROR] Failed to upsert skills: {e}\n{body}", err=True)
-        failed = True
-
-    try:
-        agent_ids = load_agent_builder_agents(session, kb_url)
-        for aid in agent_ids:
-            click.echo(f"Upserted agent: {aid}")
-    except FileNotFoundError as e:
-        click.echo(f"[ERROR] {e}", err=True)
-        failed = True
-    except requests.HTTPError as e:
-        body = e.response.text if e.response is not None else ""
-        click.echo(f"[ERROR] Failed to upsert agents: {e}\n{body}", err=True)
-        failed = True
-
-    try:
-        workflow_names = load_kibana_workflows(session, kb_url)
-        for wname in workflow_names:
-            click.echo(f"Upserted workflow: {wname}")
-    except FileNotFoundError as e:
-        click.echo(f"[ERROR] {e}", err=True)
-        failed = True
-    except requests.HTTPError as e:
-        body = e.response.text if e.response is not None else ""
-        click.echo(f"[ERROR] Failed to upsert workflows: {e}\n{body}", err=True)
-        failed = True
-
-    try:
-        imported_ids, so_errors = load_kibana_saved_objects(session, kb_url)
-        for oid in imported_ids:
-            click.echo(f"Imported saved object: {oid}")
-        for oid, msg in so_errors:
-            click.echo(f"[ERROR] Failed to import saved object {oid!r}: {msg}", err=True)
+    if "tools" in kibana_selected:
+        try:
+            tool_ids = load_agent_builder_tools(session, kb_url,
+                                                include_experimental=include_experimental)
+            if tool_ids:
+                for tid in tool_ids:
+                    click.echo(f"Upserted tool: {tid}")
+            else:
+                click.echo("No tools to load.")
+        except requests.HTTPError as e:
+            body = e.response.text if e.response is not None else ""
+            click.echo(f"[ERROR] Failed to upsert tools: {e}\n{body}", err=True)
             failed = True
-    except FileNotFoundError as e:
-        click.echo(f"[ERROR] {e}", err=True)
-        failed = True
-    except requests.HTTPError as e:
-        body = e.response.text if e.response is not None else ""
-        click.echo(f"[ERROR] Failed to import saved objects: {e}\n{body}", err=True)
-        failed = True
+
+    if "skills" in kibana_selected:
+        try:
+            skill_ids = load_agent_builder_skills(session, kb_url, hosts,
+                                                  include_experimental=include_experimental)
+            if skill_ids:
+                for sid in skill_ids:
+                    click.echo(f"Upserted skill: {sid}")
+            else:
+                click.echo("No skills to load.")
+        except requests.HTTPError as e:
+            body = e.response.text if e.response is not None else ""
+            click.echo(f"[ERROR] Failed to upsert skills: {e}\n{body}", err=True)
+            failed = True
+
+    if "agents" in kibana_selected:
+        try:
+            agent_ids = load_agent_builder_agents(session, kb_url,
+                                                  include_experimental=include_experimental)
+            if agent_ids:
+                for aid in agent_ids:
+                    click.echo(f"Upserted agent: {aid}")
+            else:
+                click.echo("No agents to load.")
+        except requests.HTTPError as e:
+            body = e.response.text if e.response is not None else ""
+            click.echo(f"[ERROR] Failed to upsert agents: {e}\n{body}", err=True)
+            failed = True
+
+    if "workflows" in kibana_selected:
+        try:
+            workflow_names = load_kibana_workflows(session, kb_url,
+                                                   include_experimental=include_experimental)
+            if workflow_names:
+                for wname in workflow_names:
+                    click.echo(f"Upserted workflow: {wname}")
+            else:
+                click.echo("No workflows to load.")
+        except requests.HTTPError as e:
+            body = e.response.text if e.response is not None else ""
+            click.echo(f"[ERROR] Failed to upsert workflows: {e}\n{body}", err=True)
+            failed = True
+
+    if "dashboards" in kibana_selected:
+        try:
+            imported_ids, so_errors = load_kibana_saved_objects(session, kb_url,
+                                                                 include_experimental=include_experimental)
+            if imported_ids:
+                for oid in imported_ids:
+                    click.echo(f"Imported saved object: {oid}")
+            for oid, msg in so_errors:
+                click.echo(f"[ERROR] Failed to import saved object {oid!r}: {msg}", err=True)
+                failed = True
+            if not imported_ids and not so_errors:
+                click.echo("No dashboards to load.")
+        except requests.HTTPError as e:
+            body = e.response.text if e.response is not None else ""
+            click.echo(f"[ERROR] Failed to import saved objects: {e}\n{body}", err=True)
+            failed = True
 
     if failed:
         sys.exit(1)

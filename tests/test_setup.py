@@ -2,18 +2,44 @@ import json
 from unittest.mock import MagicMock, call
 
 import pytest
+from click.testing import CliRunner
 from elasticsearch import NotFoundError
 
+from sourcerer.cli import cli
 from sourcerer.commands.setup.command import (
+    _normalize_categories,
     build_host_citation_referenced_content,
     load_index_templates,
     load_kibana_workflows,
+    VALID_CATEGORIES,
 )
 from sourcerer.hosts import resolve_hosts
 
 
 def _not_found() -> NotFoundError:
     return NotFoundError("no matching indices", MagicMock(), {})
+
+
+class TestNormalizeCategories:
+    ALL = VALID_CATEGORIES - {"all"}
+
+    def test_none_expands_to_all(self):
+        assert _normalize_categories(None) == self.ALL
+
+    def test_empty_tuple_expands_to_all(self):
+        assert _normalize_categories(()) == self.ALL
+
+    def test_all_alone_expands_to_all(self):
+        assert _normalize_categories(("all",)) == self.ALL
+
+    def test_all_mixed_with_others_expands_to_all(self):
+        assert _normalize_categories(("all", "agents")) == self.ALL
+
+    def test_single_category_returned_as_set(self):
+        assert _normalize_categories(("agents",)) == {"agents"}
+
+    def test_multiple_categories_returned_as_set(self):
+        assert _normalize_categories(("agents", "skills", "tools")) == {"agents", "skills", "tools"}
 
 
 class TestLoadIndexTemplates:
@@ -63,6 +89,46 @@ class TestLoadIndexTemplates:
                 },
             }]),
         ]
+
+    def test_returns_empty_list_when_no_templates(self, tmp_path):
+        """Empty dir → empty list, no error (no-op)."""
+        es = MagicMock()
+        assert load_index_templates(es, tmp_path) == []
+        es.indices.put_index_template.assert_not_called()
+
+    def test_excludes_experimental_by_default(self, tmp_path):
+        (tmp_path / "stable.json").write_text(json.dumps({
+            "index_patterns": ["stable*"],
+            "template": {},
+        }))
+        exp = tmp_path / "experimental"
+        exp.mkdir()
+        (exp / "exp.json").write_text(json.dumps({
+            "index_patterns": ["exp*"],
+            "template": {},
+        }))
+        es = MagicMock()
+
+        loaded = load_index_templates(es, tmp_path)
+        assert loaded == ["stable"]
+        assert es.indices.put_index_template.call_count == 1
+
+    def test_includes_experimental_when_flag_set(self, tmp_path):
+        (tmp_path / "stable.json").write_text(json.dumps({
+            "index_patterns": ["stable*"],
+            "template": {},
+        }))
+        exp = tmp_path / "experimental"
+        exp.mkdir()
+        (exp / "exp.json").write_text(json.dumps({
+            "index_patterns": ["exp*"],
+            "template": {},
+        }))
+        es = MagicMock()
+
+        loaded = load_index_templates(es, tmp_path, include_experimental=True)
+        assert set(loaded) == {"stable", "exp"}
+        assert es.indices.put_index_template.call_count == 2
 
 
 class TestBuildHostCitationReferencedContent:
@@ -136,6 +202,7 @@ def _ok_response(body: dict) -> MagicMock:
 
 class TestLoadKibanaWorkflows:
     WORKFLOW_YAML = "version: \"1\"\nname: sourcerer-x\ndescription: test\n"
+    EXP_WORKFLOW_YAML = "version: \"1\"\nname: sourcerer-exp\ndescription: experimental\n"
 
     def _make_session(self, search_results: list[dict]) -> MagicMock:
         session = MagicMock()
@@ -192,13 +259,77 @@ class TestLoadKibanaWorkflows:
             json={"yaml": self.WORKFLOW_YAML},
         )
 
-    def test_raises_when_no_workflow_files_found(self, tmp_path):
+    def test_returns_empty_list_when_no_workflow_files(self, tmp_path):
+        """Empty dir → empty list, no error (no-op)."""
         session = MagicMock()
-        with pytest.raises(FileNotFoundError, match="No workflow definitions"):
-            load_kibana_workflows(session, "http://kb:5601", tmp_path)
+        loaded = load_kibana_workflows(session, "http://kb:5601", tmp_path)
+        assert loaded == []
+        session.get.assert_not_called()
 
     def test_raises_when_yaml_missing_name(self, tmp_path):
         (tmp_path / "no-name.yml").write_text("version: \"1\"\ndescription: oops\n", encoding="utf-8")
         session = MagicMock()
         with pytest.raises(ValueError, match="missing a 'name:' field"):
             load_kibana_workflows(session, "http://kb:5601", tmp_path)
+
+    def test_excludes_experimental_by_default(self, tmp_path):
+        (tmp_path / "sourcerer-x.yml").write_text(self.WORKFLOW_YAML, encoding="utf-8")
+        exp = tmp_path / "experimental"
+        exp.mkdir()
+        (exp / "sourcerer-exp.yml").write_text(self.EXP_WORKFLOW_YAML, encoding="utf-8")
+        session = self._make_session(search_results=[])
+
+        loaded = load_kibana_workflows(session, "http://kb:5601", tmp_path)
+
+        assert loaded == ["sourcerer-x"]
+
+    def test_includes_experimental_when_flag_set(self, tmp_path):
+        (tmp_path / "sourcerer-x.yml").write_text(self.WORKFLOW_YAML, encoding="utf-8")
+        exp = tmp_path / "experimental"
+        exp.mkdir()
+        (exp / "sourcerer-exp.yml").write_text(self.EXP_WORKFLOW_YAML, encoding="utf-8")
+        session = self._make_session(search_results=[])
+
+        loaded = load_kibana_workflows(session, "http://kb:5601", tmp_path,
+                                       include_experimental=True)
+
+        assert set(loaded) == {"sourcerer-x", "sourcerer-exp"}
+
+    def test_experimental_only_dir_without_flag_returns_empty(self, tmp_path):
+        """Like the real workflows/ dir: only experimental content, no flag → empty."""
+        exp = tmp_path / "experimental"
+        exp.mkdir()
+        (exp / "sourcerer-exp.yml").write_text(self.EXP_WORKFLOW_YAML, encoding="utf-8")
+        session = MagicMock()
+
+        loaded = load_kibana_workflows(session, "http://kb:5601", tmp_path)
+
+        assert loaded == []
+        session.get.assert_not_called()
+
+
+class TestSetupCLICategories:
+    """Tests for category arg validation and Kibana gating via the Click CLI."""
+
+    def _runner_invoke(self, args):
+        """Invoke the setup command with enough env overrides to avoid real network calls."""
+        runner = CliRunner()
+        return runner.invoke(cli, [
+            "--url", "http://es:9200",  # fake, avoids ELASTICSEARCH_URL envvar requirement
+            "setup",
+        ] + args, catch_exceptions=False)
+
+    def test_unknown_category_exits_with_error(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, [
+            "setup", "--url", "http://es:9200", "bogus",
+        ])
+        assert result.exit_code != 0
+        assert "Unknown category" in result.output
+
+    def test_help_shows_categories_and_flag(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["setup", "--help"])
+        assert result.exit_code == 0
+        assert "--include-experimental" in result.output
+        assert "CATEGORIES" in result.output or "categories" in result.output.lower()

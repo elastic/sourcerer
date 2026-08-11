@@ -89,13 +89,41 @@ def help_cmd(ctx):
     help="sourcerer.yml whose 'hosts:' section customizes/extends the built-in git-host defaults "
     "used to generate per-host citation skills. Omit to use only the built-in host defaults.",
 )
-def setup(url, api_key, username, password, kb_url, config_path):
+@click.option(
+    "--include-experimental",
+    is_flag=True,
+    default=False,
+    help="Also set up experimental resources (those under elastic/*/experimental/).",
+)
+@click.argument("categories", nargs=-1)
+def setup(url, api_key, username, password, kb_url, config_path, include_experimental, categories):
     """Idempotently load index templates and Kibana agent builder objects.
 
     Generates one citation skill per known/configured git host (built-in defaults merged with
     the config's 'hosts:' overrides) and pushes them alongside the base tools/skills/agent.
+
+    CATEGORIES controls which resource groups to set up (default: all stable resources):
+
+    \b
+      all        All categories (default when none specified)
+      agents     Agent Builder agents
+      skills     Agent Builder skills
+      tools      Agent Builder tools
+      templates  Elasticsearch index templates
+      dashboards Kibana saved objects (dashboards, lenses, etc.)
+      workflows  Kibana workflows
+
+    Pass --include-experimental to also set up resources under elastic/*/experimental/.
     """
-    setup_cmd.run(url, api_key, username, password, kb_url, config_path)
+    from .commands.setup.command import VALID_CATEGORIES
+    unknown = [c for c in categories if c not in VALID_CATEGORIES]
+    if unknown:
+        raise click.BadArgumentUsage(
+            f"Unknown category {unknown[0]!r}. "
+            f"Valid categories: {', '.join(sorted(VALID_CATEGORIES))}."
+        )
+    setup_cmd.run(url, api_key, username, password, kb_url, config_path,
+                  categories=categories, include_experimental=include_experimental)
 
 
 @cli.command()

@@ -4,8 +4,12 @@
 
 Commands:
 
-- `sourcerer setup [--config <file>]` (reads the config's `hosts:` to generate per-host
-  citation skills; without `--config`, uses only the built-in host defaults)
+- `sourcerer setup [--config <file>] [--include-experimental] [CATEGORIES...]`
+  (reads the config's `hosts:` to generate per-host citation skills; without `--config`, uses
+  only the built-in host defaults). Valid categories: `all` (default), `agents`, `skills`,
+  `tools`, `templates`, `dashboards`, `workflows`. Experimental resources live under
+  `elastic/*/experimental/` and are excluded by default; pass `--include-experimental` to
+  include them.
 - `sourcerer index <org>/<repo> [-b <branch>] [-t <tag>] [-c <commit>]` (single-repo path
   defaults to `git.host` = `github`)
 - `sourcerer index --config <file> [--prune] [--dry-run]`
