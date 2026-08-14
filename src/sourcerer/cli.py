@@ -109,6 +109,12 @@ class _FlushDescriptionGroup(click.Group):
                     line = click.style(line, dim=True)
                 formatter.write_text(line)
 
+    def format_epilog(self, ctx, formatter):
+        if self.epilog:
+            formatter.write_paragraph()
+            for line in self.epilog.split("\n"):
+                formatter.write_text(line.rstrip())
+
     def format_commands(self, ctx, formatter):
         commands = {name: self.get_command(ctx, name) for name in self.list_commands(ctx)}
         commands = {name: cmd for name, cmd in commands.items()
@@ -139,7 +145,15 @@ class _FlushDescriptionGroup(click.Group):
                 formatter.write_dl(entries)
 
 
-@click.group(cls=_FlushDescriptionGroup)
+@click.group(
+    cls=_FlushDescriptionGroup,
+    epilog=(
+        "Usage:\n"
+        "  sourcerer <command> [options]\n"
+        "\n"
+        'Use "sourcerer <command> --help" for more information about a given command.'
+    ),
+)
 @click.version_option(package_name="sourcerer", message="%(version)s")
 def cli():
     """Sourcerer - Ask the source.
