@@ -105,6 +105,21 @@ def execute_deletions(
         locations_by_commit[m.commit].add(files_index(host, org, repo, m.commit, level, suffix))
         locations_by_commit[m.commit].add(lines_index(host, org, repo, m.commit, level, suffix))
 
+    # Partition drop_commits by whether every deleted marker for the commit used level="commit".
+    # A commit-level index is guaranteed to hold exactly that one commit's content, so a whole-
+    # index DELETE is safe and near-instant. Any commit that has even one non-commit-level marker
+    # falls back to delete_by_query (it shares its index with other commits).
+    commit_level_indices: dict[str, set[str]] = {}   # sha -> physical index names (files + lines)
+    dbq_commits: set[str] = set()
+    for sha in drop_commits:
+        markers_for_sha = [m for m in deletes if m.commit == sha]
+        level_values = {getattr(m, "index_level", "repo") for m in markers_for_sha}
+        if level_values == {"commit"}:
+            # All deleted markers agree: this commit lives in its own index/indices.
+            commit_level_indices[sha] = locations_by_commit.get(sha, set())
+        else:
+            dbq_commits.add(sha)
+
     bulk(
         es,
         ({"_op_type": "delete", "_index": REFS_INDEX, "_id": m.id} for m in deletes),
@@ -112,7 +127,10 @@ def execute_deletions(
         refresh=False,
     )
 
-    for sha in drop_commits:
+    # Whole-index DELETEs first (near-instant); then async delete_by_query for shared indices.
+    for index_name in sorted({n for names in commit_level_indices.values() for n in names}):
+        delete_index(es, index_name)
+    for sha in dbq_commits:
         delete_commit_content(es, host, org, repo, sha, index_names=locations_by_commit.get(sha))
     return (len(deletes), len(drop_commits))
 
