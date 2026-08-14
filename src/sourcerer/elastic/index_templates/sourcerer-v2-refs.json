@@ -77,6 +77,12 @@
         },
         "indexing_started_at": {
           "type": "date"
+        },
+        "index_level": {
+          "type": "keyword"
+        },
+        "index_suffix": {
+          "type": "keyword"
         }
       }
     }

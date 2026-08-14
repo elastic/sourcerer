@@ -30,7 +30,12 @@ class _Row:
       - "orphan:index"      -- a whole physical index with no matching refs entry (Class A).
       - "orphan:content"    -- a commit's content docs with no surviving marker (Class B).
       - "orphan:marker"     -- a commit's marker doc with no content at all (Class C).
-    (See planner.OrphanPlan for the three orphan classes.)
+      - "orphan:stale-location" -- content docs in an index none of their commit's markers point
+        at, left by an index.level/suffix migration whose old-copy delete never completed (Class D).
+      - "orphan:empty-index" -- a sourcerer content index drained to zero docs (a fully-pruned
+        repo, or a suffix a->b migration that emptied ~repo^a while its identity still has markers
+        at ~repo^b) (Class E).
+    (See planner.OrphanPlan for the orphan classes.)
 
     WHAT names the actual object being deleted, which differs by tag rather than forcing one
     shape:
@@ -40,7 +45,9 @@ class _Row:
       - orphan:content, orphan:marker   -> "host/org/repo@commit" -- no ref exists for either case.
       - orphan:index                    -> the index's own name (e.g.
         "sourcerer-v2-files~host~org~repo") -- not commit- or even repo-addressable, since a
-        host~org-level orphan index spans every repo under that host+org."""
+        host~org-level orphan index spans every repo under that host+org.
+      - orphan:stale-location           -> "<index name>@<commit>" -- location-specific, since the
+        same commit may legitimately have content in another index; only this stale copy is deleted."""
 
     what: str
     why: str
@@ -75,6 +82,11 @@ def _orphan_rows(plan: OrphanPlan) -> list[_Row]:
     for (host, org, repo), commits in sorted(plan.orphan_marker_commits.items()):
         for commit in sorted(commits):
             rows.append(_Row(f"{host}/{org}/{repo}@{commit}", "orphan:marker"))
+    for index_name, commits in sorted(plan.orphan_stale.items()):
+        for commit in sorted(commits):
+            rows.append(_Row(f"{index_name}@{commit}", "orphan:stale-location"))
+    for name in sorted(plan.empty_index_names):
+        rows.append(_Row(name, "orphan:empty-index"))
     return rows
 
 

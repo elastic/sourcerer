@@ -25,8 +25,10 @@ from elasticsearch import Elasticsearch
 from ...hosts import resolve_hosts
 from ...planner import Marker, plan_repo
 from ...progress import ProgressReporter, Unit, make_reporter
+from ...indices import files_index, lines_index
 from ...utils import ES_ERRORS, make_client
 from ..prune import command as prune_cmd
+from ..prune.execute import delete_commit_from_indices
 from .documents import index_repo
 from .git import (
     checkout_branch,
@@ -43,8 +45,8 @@ from .git import (
 )
 from .markers import (
     build_ref_id, commits_with_content, content_present, fully_indexed_counts,
-    markers_status_by_id, _needs_index, pre_clone_skip, should_index,
-    write_indexing_marker, write_ref_marker,
+    markers_status_by_id, _needs_index, pre_clone_skip, recorded_routing,
+    should_index, write_indexing_marker, write_ref_marker,
 )
 from .report import dry_run_config
 from .schedule import filter_config_by_schedule
@@ -83,6 +85,8 @@ def index_ref_in_dir(
     unit: Unit | None = None,
     retry_window: datetime.timedelta | None = None,
     at_commit: str | None = None,
+    index_level: str | None = None,
+    index_suffix: str | None = None,
 ) -> None:
     """
     Index a single ref of one repo into an already-cloned `repo_dir`. Checks out the ref
@@ -94,12 +98,21 @@ def index_ref_in_dir(
     branch tip, but record the ref marker as `ref_type=branch, ref=<branch>`. Used by the
     branch history walk (`since` on a branch) to index each historical commit while keeping
     it associated with the branch so `resolve_head`/`retain.count`-per-branch work correctly.
+
+    `index_level`/`index_suffix`: this source's index.* routing (see specs/sourcerer-yml.md),
+    determining the physical files/lines index the content is written to. When None, they fall
+    back to the unit's routing (or the repo-level default). If a prior complete marker for this
+    exact ref recorded a DIFFERENT routing, this is a migration: content is re-ingested at the new
+    index, the marker is flipped to point there, and only then is the old copy deleted.
     """
     if reporter is None:
         reporter = ProgressReporter()
     if unit is None:
         kind = "branch" if branch else "tag" if tag else "commit" if commit else "default"
         unit = Unit(host=host, org=org, repo=repo, ref=branch or tag or commit, kind=kind)
+    # Effective routing: explicit args win, else the unit carries it from its selector.
+    level = index_level if index_level is not None else unit.index_level
+    suffix = index_suffix if index_suffix is not None else unit.index_suffix
 
     # The repo is already cloned/fetched (callers clone once, then reuse this dir for every ref);
     # this only checks out the ref, so the stage is "checkout", not "cloning". Branches (and the
@@ -135,17 +148,32 @@ def index_ref_in_dir(
     if not at_commit:
         unit.ref = ref_for_id
 
-    # Post-clone guard: authoritative SHA check (covers -c and any ls-remote
-    # peeling mismatch).
+    # The physical files/lines index this ref's content should live in, given the source's routing.
+    expected_routing = (level, suffix)
+    new_f = files_index(host, org, repo, commit_sha, level, suffix)
+    new_l = lines_index(host, org, repo, commit_sha, level, suffix)
+
+    # Where this ref's content CURRENTLY lives, per its prior complete marker (None if never
+    # indexed / no complete marker). A recorded routing that differs from `expected_routing` means
+    # the source's index.level/suffix changed since the last run -> migrate to the new index and
+    # clean up the old copy afterwards.
+    old_routing = None if force else recorded_routing(es, host, org, repo, ref_type, ref_for_id, commit_sha)
+    migrating = old_routing is not None and old_routing != expected_routing
+
+    # Post-clone guard: authoritative, location-aware SHA check (covers -c, any ls-remote
+    # peeling mismatch, AND a routing change -- see should_index's expected_routing).
     if not force and not should_index(
-        es, host, org, repo, ref_type, ref_for_id, commit_sha, retry_window=retry_window
+        es, host, org, repo, ref_type, ref_for_id, commit_sha,
+        retry_window=retry_window, expected_routing=expected_routing,
     ):
         reporter.finish(unit, "skipped")
         return
 
     # Content is keyed by commit, so another ref may already have fully indexed this exact
-    # snapshot. If a complete sibling marker exists AND its content is still present, reuse that
-    # marker's counts and record this ref without rewriting the (large) content docs.
+    # snapshot. If a complete sibling marker exists AND its content is still present AT THE TARGET
+    # index, reuse that marker's counts and record this ref without rewriting the (large) content
+    # docs. The location guard matters once routing is per-source: a sibling's content sitting at a
+    # DIFFERENT index must not let us record a marker pointing at `new_f` while no docs exist there.
     #
     # Counts come from the sibling marker (fully_indexed_counts), NOT an es.count over the content
     # indices: refresh is disabled during the bulk phase (runtime.bulk_indexing_settings), so a
@@ -159,7 +187,7 @@ def index_ref_in_dir(
     reuse_counts = None
     if not force:
         marker_counts = fully_indexed_counts(es, host, org, repo, commit_sha)
-        if marker_counts is not None and content_present(es, host, org, repo, commit_sha):
+        if marker_counts is not None and content_present(es, host, org, repo, commit_sha, at_index=new_f):
             reuse_counts = marker_counts
 
     if reuse_counts is not None:
@@ -171,13 +199,29 @@ def index_ref_in_dir(
         # Mark the ref as in-progress before ingest so the schedule gate can detect
         # that this scope is currently being indexed by another run and skip it.
         # The terminal write_ref_marker (status:'complete') overwrites this doc in place.
-        write_indexing_marker(es, host, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso)
+        write_indexing_marker(es, host, org, repo, ref_type, ref_for_id, commit_sha,
+                              commit_date_iso, index_level=level, index_suffix=suffix)
         files_count, lines_count = index_repo(
             es, host, org, repo, repo_dir, commit_sha,
             on_progress=lambda f, l: reporter.update_counts(unit, f, l),
+            index_level=level, index_suffix=suffix,
         )
         status = "indexed"
-    write_ref_marker(es, host, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso, files_count, lines_count)
+    # write-new -> FLIP MARKER -> delete-old: the marker now points at the new location before any
+    # old copy is deleted, so a crash between here and the delete below leaves stale (not missing)
+    # data that the prune stale-location sweep reclaims.
+    write_ref_marker(es, host, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso,
+                     files_count, lines_count, index_level=level, index_suffix=suffix)
+    if migrating:
+        # Reconstruct the OLD index name from the prior marker's routing and drop this commit's
+        # stale copy there. Commit-safety (another surviving ref sharing the commit) is respected
+        # because this is a commit-scoped delete-by-query, not a whole-index DELETE; an emptied
+        # old index is later reclaimed by the prune orphan sweep.
+        old_level, old_suffix = old_routing  # type: ignore[misc]
+        old_f = files_index(host, org, repo, commit_sha, old_level, old_suffix)
+        old_l = lines_index(host, org, repo, commit_sha, old_level, old_suffix)
+        if {old_f, old_l} != {new_f, new_l}:
+            delete_commit_from_indices(es, host, org, repo, commit_sha, (old_l, old_f))
     reporter.finish(unit, status, files_count, lines_count)
 
 
@@ -221,7 +265,8 @@ def index_one(
     # Pre-clone skip: if the ref is already fully indexed (or another run is actively
     # indexing it within the retry window), skip before paying the clone cost.
     skip, ref_for_id, _ = pre_clone_skip(
-        es, host, org, repo, branch, tag, commit, clone_url, force, retry_window=retry_window
+        es, host, org, repo, branch, tag, commit, clone_url, force, retry_window=retry_window,
+        expected_routing=(unit.index_level, unit.index_suffix),
     )
     if skip:
         unit.ref = ref_for_id
@@ -508,7 +553,11 @@ def run_config(
                         pending.append((unit, branch, tag, None))
                         continue
                     ref_id = build_ref_id(host, org, repo, unit.kind, unit.ref or "", sha)
-                    if _needs_index(ref_id, sha, status_map, content_commits, indexing_cutoff):
+                    # Pass the unit's routing so a source whose index.level/suffix changed since the
+                    # last run is treated as needing (re)index (migration) instead of being
+                    # pre-clone skipped on the strength of its now-stale-location content.
+                    if _needs_index(ref_id, sha, status_map, content_commits, indexing_cutoff,
+                                    expected_routing=(unit.index_level, unit.index_suffix)):
                         pending.append((unit, branch, tag, None))
                     else:
                         reporter.finish(unit, "skipped")
@@ -529,6 +578,7 @@ def run_config(
                         skip, ref_for_id, _ = pre_clone_skip(
                             es, host, org, repo, branch, tag, commit, clone_url, force,
                             retry_window=retry_window,
+                            expected_routing=(unit.index_level, unit.index_suffix),
                         )
                     except ES_ERRORS as e:
                         with failures_lock:
@@ -610,6 +660,7 @@ def run_config(
                                     hist_unit = Unit(
                                         host=host, org=org, repo=repo,
                                         ref=f"{branch}@{sha[:8]}", kind="branch",
+                                        index_level=unit.index_level, index_suffix=unit.index_suffix,
                                     )
                                     extra_units.append(hist_unit)
                                     prospective.append((hist_unit, branch, None, None, sha, Marker(

@@ -11,9 +11,21 @@ import datetime
 from elasticsearch import Elasticsearch, NotFoundError
 
 # App packages
-from ...indices import FILES_ALIAS, REFS_ALIAS, REFS_INDEX
+from ...indices import FILES_ALIAS, REFS_ALIAS, REFS_INDEX, files_index
 from ...utils import make_doc_id
 from .git import resolve_remote
+
+
+def marker_routing(marker: dict) -> tuple[str, str | None]:
+    """The (index_level, index_suffix) a ref marker recorded, defaulting to the historical
+    repo-level routing ("repo"/None) for legacy markers that predate the index.* feature.
+
+    `marker` is a ref doc `_source` (or the subset returned by markers_status_by_id). Centralizing
+    the legacy fallback here keeps every reader (skip, migration, prune) agreeing on where a
+    pre-feature marker's content lives -- the repo-level default, which is exactly correct."""
+    level = marker.get("index_level") or "repo"
+    suffix = marker.get("index_suffix")  # None or "" both mean "no suffix"
+    return level, (suffix or None)
 
 
 def build_ref_id(host: str, org: str, repo: str, ref_type: str, ref: str, commit_sha: str) -> str:
@@ -26,6 +38,28 @@ def build_ref_id(host: str, org: str, repo: str, ref_type: str, ref: str, commit
     moving branch append a new marker per commit (the append-only history that count/age
     pruning needs), while an immutable tag re-hashes to the same id and stays idempotent."""
     return make_doc_id(host, org, repo, ref_type, ref, commit_sha)
+
+
+def recorded_routing(
+    es: Elasticsearch, host: str, org: str, repo: str, ref_type: str, ref: str, commit_sha: str,
+) -> tuple[str, str | None] | None:
+    """The (index_level, index_suffix) recorded by the complete marker for this exact ref-at-commit,
+    or None if there is no such marker. Used by the migration path to reconstruct where the ref's
+    content CURRENTLY lives (the OLD index) so it can be cleaned up after re-ingest at the NEW
+    index. A legacy marker with no routing fields resolves to the repo-level default via
+    marker_routing -- exactly where its pre-feature content sits."""
+    ref_id = build_ref_id(host, org, repo, ref_type, ref, commit_sha)
+    try:
+        resp = es.search(
+            index=REFS_ALIAS, size=1, query={"ids": {"values": [ref_id]}},
+            source_includes=["status", "index_level", "index_suffix"],
+        )
+    except NotFoundError:
+        return None
+    hits = resp["hits"]["hits"]
+    if not hits or hits[0]["_source"].get("status") != "complete":
+        return None
+    return marker_routing(hits[0]["_source"])
 
 
 def markers_status_by_id(es: Elasticsearch, ref_ids: list[str]) -> dict[str, dict]:
@@ -46,7 +80,9 @@ def markers_status_by_id(es: Elasticsearch, ref_ids: list[str]) -> dict[str, dic
             index=REFS_ALIAS,
             size=len(ref_ids),
             query={"ids": {"values": ref_ids}},
-            source_includes=["status", "git.commit", "indexing_started_at"],
+            source_includes=[
+                "status", "git.commit", "indexing_started_at", "index_level", "index_suffix",
+            ],
         )
     except NotFoundError:
         return {}
@@ -57,6 +93,9 @@ def markers_status_by_id(es: Elasticsearch, ref_ids: list[str]) -> dict[str, dic
             "status": src.get("status"),
             "commit": src.get("git", {}).get("commit"),
             "indexing_started_at": src.get("indexing_started_at"),
+            # Recorded index.* routing (legacy fallback handled by marker_routing).
+            "index_level": src.get("index_level"),
+            "index_suffix": src.get("index_suffix"),
         }
     return out
 
@@ -123,6 +162,7 @@ def _needs_index(
     status_map: dict[str, dict],
     content_commits: set[str],
     indexing_cutoff: datetime.datetime | None = None,
+    expected_routing: tuple[str, str | None] | None = None,
 ) -> bool:
     """Pure (no ES) per-ref skip decision -- the decision port of `should_index`.
 
@@ -133,12 +173,17 @@ def _needs_index(
       indexing this ref -> skip (return False). If indexing_cutoff is None the active-run check
       is bypassed (back-compat default).
     - status != 'complete' (stuck/abandoned marker, or no cutoff given): must index.
+    - complete marker whose recorded index.* routing != expected_routing: the source now routes to
+      a different physical index -> must (re)index at the new location, i.e. migrate. Checked
+      before content presence, because the alias-wide content_commits probe is location-blind and
+      would otherwise wrongly report the OLD-location content as "present" and skip the migration.
     - commit in content_commits: complete marker AND content still present -> skip.
     - complete marker but content absent (GC'd): must index.
 
     `status_map` is the result of `markers_status_by_id` and `content_commits` is the result of
     `commits_with_content` over the set of complete-marker commits. Both are computed once per
-    repo group before the per-ref loop.
+    repo group before the per-ref loop. `expected_routing` is the (index_level, index_suffix) the
+    current source config routes this ref to; None disables the routing-mismatch check.
     """
     marker = status_map.get(ref_id)
     if marker is None:
@@ -153,6 +198,8 @@ def _needs_index(
             if started is not None and started >= indexing_cutoff:
                 return False  # another run is actively indexing this ref
         return True
+    if expected_routing is not None and marker_routing(marker) != expected_routing:
+        return True  # routing changed -> migrate to the new physical index
     commit = marker.get("commit") or remote_sha
     return commit not in content_commits
 
@@ -179,12 +226,20 @@ def count_commit_docs(es: Elasticsearch, index: str, host: str, org: str, repo: 
         return 0
 
 
-def content_present(es: Elasticsearch, host: str, org: str, repo: str, commit_sha: str) -> bool:
+def content_present(
+    es: Elasticsearch, host: str, org: str, repo: str, commit_sha: str, at_index: str | None = None,
+) -> bool:
     """True if ANY content doc exists for this commit. A cheap presence probe -- NOT proof of a
     complete snapshot, since an interrupted run (Ctrl-C) leaves a partial set of docs behind with
     no marker (see commit_fully_indexed). Used only to detect content GC'd out from under a
-    surviving complete marker."""
-    return count_commit_docs(es, FILES_ALIAS, host, org, repo, commit_sha) > 0
+    surviving complete marker.
+
+    `at_index` scopes the probe to one physical files index (the source's expected target) instead
+    of the whole alias. This makes presence *location-aware*: content sitting only in an OLD index
+    after an index.level/suffix change reads as absent at the new target, so the caller re-indexes
+    (migrates) rather than wrongly skipping and leaving alias duplicates. A not-yet-created target
+    index yields 0 (NotFound), i.e. absent -> index."""
+    return count_commit_docs(es, at_index or FILES_ALIAS, host, org, repo, commit_sha) > 0
 
 
 def commit_fully_indexed(es: Elasticsearch, host: str, org: str, repo: str, commit_sha: str) -> bool:
@@ -291,6 +346,7 @@ def should_index(
     ref: str,
     commit_sha: str,
     retry_window: datetime.timedelta | None = None,
+    expected_routing: tuple[str, str | None] | None = None,
 ) -> bool:
     """
     True if this exact (ref_type, ref, commit) needs (re)indexing. The id now encodes the
@@ -301,6 +357,12 @@ def should_index(
     With `retry_window` set, an `indexing` marker whose `indexing_started_at` is within the
     window is treated as an active concurrent run and returns False (skip). Without it (default),
     any non-complete marker triggers re-indexing (previous behavior).
+
+    `expected_routing` is the (index_level, index_suffix) the current source config routes this
+    ref to. When given, this is the authoritative, location-aware post-clone guard: a complete
+    marker whose recorded routing differs means the source now targets a different physical index,
+    so we must (re)index there (migrate); and the content-presence check is scoped to that target
+    index rather than the whole alias, so an old-location copy doesn't mask the need to migrate.
     """
     ref_id = build_ref_id(host, org, repo, ref_type, ref, commit_sha)
     try:
@@ -319,7 +381,13 @@ def should_index(
             if started is not None and started >= cutoff:
                 return False  # another run is actively indexing this ref
         return True
-    return not content_present(es, host, org, repo, commit_sha)
+    at_index = None
+    if expected_routing is not None:
+        if marker_routing(marker) != expected_routing:
+            return True  # routing changed -> migrate to the new physical index
+        level, suffix = expected_routing
+        at_index = files_index(host, org, repo, commit_sha, level, suffix)
+    return not content_present(es, host, org, repo, commit_sha, at_index=at_index)
 
 
 def write_indexing_marker(
@@ -331,6 +399,8 @@ def write_indexing_marker(
     ref: str,
     commit_sha: str,
     commit_date_iso: str | None,
+    index_level: str = "repo",
+    index_suffix: str | None = None,
 ) -> None:
     """Write a status:'indexing' marker for a ref that is about to be ingested.
 
@@ -342,6 +412,9 @@ def write_indexing_marker(
     If the run dies before calling write_ref_marker, the indexing marker stays behind; the gate
     retries the source after the retry window elapses (default 1h, configurable via
     --retry-window).
+
+    `index_level`/`index_suffix` record this source's index.* routing so prune/migration can
+    reconstruct where the content physically lives (see write_ref_marker).
     """
     ref_id = build_ref_id(host, org, repo, ref_type, ref, commit_sha)
     doc = {
@@ -358,6 +431,8 @@ def write_indexing_marker(
         "indexing_started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "files_count": 0,
         "lines_count": 0,
+        "index_level": index_level,
+        "index_suffix": index_suffix,
     }
     es.index(index=REFS_INDEX, id=ref_id, document=doc)
 
@@ -373,11 +448,20 @@ def write_ref_marker(
     commit_date_iso: str | None,
     files_count: int,
     lines_count: int,
+    index_level: str = "repo",
+    index_suffix: str | None = None,
 ) -> None:
     # (ref, ref_type) replaces the old git.branch/git.tag fields: those were write-only and
     # fully reconstructable as `git.ref filtered by git.ref_type`. git.tag was an array that
     # per the id scheme never held more than one element, so a single git.ref keyword is more
     # honest. git.ref is intentionally un-normalized -- git ref names are case-sensitive.
+    #
+    # index_level/index_suffix record this source's index.* routing (semantic, not the resolved
+    # index name). The physical files/lines index is reconstructed on demand from git.host/org/
+    # repo/commit + these two fields via indices.files_index/lines_index, so a v2->v3 prefix bump
+    # stays correct and prune/migration can find (and clean up) exactly where content lives.
+    # Legacy markers written before this feature omit both; readers fall back to the "repo"/None
+    # defaults, which reconstruct to the historical repo-level name where that content actually is.
     ref_id = build_ref_id(host, org, repo, ref_type, ref, commit_sha)
     doc = {
         "git": {
@@ -393,6 +477,8 @@ def write_ref_marker(
         "files_count": files_count,
         "lines_count": lines_count,
         "indexed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "index_level": index_level,
+        "index_suffix": index_suffix,
     }
     es.index(index=REFS_INDEX, id=ref_id, document=doc)
 
@@ -408,6 +494,7 @@ def pre_clone_skip(
     clone_url: str,
     force: bool,
     retry_window: datetime.timedelta | None = None,
+    expected_routing: tuple[str, str | None] | None = None,
 ) -> tuple[bool, str | None, str | None]:
     """
     Cheap pre-clone decision -- no clone needed either way. Returns
@@ -427,6 +514,13 @@ def pre_clone_skip(
     if commit:
         full_sha = commit_prefix_indexed(es, host, org, repo, commit.lower())
         if full_sha:
+            # A routing change (index.level/suffix) must not be pre-clone skipped: the pinned
+            # commit needs re-indexing at the new location. commit_prefix_indexed found a complete
+            # marker for this commit; only skip if its recorded routing still matches.
+            if expected_routing is not None and (
+                recorded_routing(es, host, org, repo, "commit", full_sha, full_sha) != expected_routing
+            ):
+                return False, None, None
             return True, full_sha, full_sha
         return False, None, None
     remote_sha, resolved_default_branch = resolve_remote(clone_url, branch, tag)
@@ -435,7 +529,8 @@ def pre_clone_skip(
     ref_type = "tag" if tag else "branch"  # branch, or the resolved remote HEAD (a branch)
     ref_for_id = branch or tag or resolved_default_branch
     if ref_for_id and not should_index(
-        es, host, org, repo, ref_type, ref_for_id, remote_sha, retry_window=retry_window
+        es, host, org, repo, ref_type, ref_for_id, remote_sha,
+        retry_window=retry_window, expected_routing=expected_routing,
     ):
         return True, ref_for_id, remote_sha
     return False, ref_for_id, remote_sha

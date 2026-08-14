@@ -14,7 +14,7 @@ from elasticsearch.helpers import scan
 
 # App packages
 from .indices import FILES_ALIAS, LINES_ALIAS, REFS_ALIAS, files_index, lines_index
-from .planner import Marker
+from .planner import Marker, parse_index_name
 
 _COMPOSITE_PAGE_SIZE = 1000
 
@@ -56,6 +56,9 @@ def fetch_markers(
                 commit=g.get("commit"),
                 commit_date=_parse_dt(g.get("commit_date")),
                 indexed_at=_parse_dt(src.get("indexed_at")),
+                # Legacy markers omit these -> repo-level default (where their content lives).
+                index_level=src.get("index_level") or "repo",
+                index_suffix=(src.get("index_suffix") or None),
             ))
     except NotFoundError:
         return []
@@ -83,6 +86,31 @@ def list_sourcerer_indices(es: Elasticsearch) -> list[str]:
         except NotFoundError:
             pass
     return sorted(names)
+
+
+def empty_content_indices(es: Elasticsearch, index_names: list[str]) -> list[str]:
+    """The subset of `index_names` that are sourcerer content indices with ZERO docs.
+
+    Feeds the empty-index sweep: an index drained to nothing (every commit pruned, or an
+    index.suffix change that moved all content to a sibling index whose git identity still has
+    markers -- so orphan_indices' identity test doesn't flag it) is safe to DELETE outright,
+    since there is nothing to lose. Guarded by parse_index_name so only real sourcerer
+    files/lines indices are ever considered -- an unrelated empty index in the cluster (or the
+    refs index) is never touched. es.count over refs-settled state is reliable here because prune
+    reads after its own async deletes are a separate concern from the write path.
+
+    Returns the names in the given order; an index that vanished between listing and counting
+    (NotFound) is simply skipped."""
+    out: list[str] = []
+    for name in index_names:
+        if parse_index_name(name) is None:
+            continue
+        try:
+            if int(es.count(index=name)["count"]) == 0:
+                out.append(name)
+        except NotFoundError:
+            continue
+    return out
 
 
 def enumerate_ref_tuples(es: Elasticsearch) -> set[tuple[str, str, str, str]]:
@@ -138,8 +166,82 @@ def gather_content_commit_tuples(es: Elasticsearch) -> set[tuple[str, str, str, 
     )
 
 
+def gather_content_by_index(
+    es: Elasticsearch, index_names: list[str],
+) -> dict[str, set[tuple[str, str, str, str]]]:
+    """Per physical index, the distinct (host, org, repo, commit) tuples with content docs in it.
+
+    Feeds Class-D stale-location detection (planner.orphan_stale_content): to decide a doc is
+    stale we must know WHICH physical index holds it, so this enumerates each backing index by name
+    rather than through the union alias. Empty/missing indices contribute nothing."""
+    out: dict[str, set[tuple[str, str, str, str]]] = {}
+    for name in index_names:
+        tuples = enumerate_content_commits(es, name)
+        if tuples:
+            out[name] = tuples
+    return out
+
+
+def gather_intended_index_by_commit(
+    es: Elasticsearch,
+) -> dict[tuple[str, str, str, str], set[str]]:
+    """For every (host, org, repo, commit) with a ref marker, the set of physical content index
+    names its markers intend -- reconstructed from each marker's index_level/index_suffix via
+    files_index/lines_index (both prefixes, since a commit's content spans a files and a lines
+    index). Multiple markers for one commit (e.g. two refs) union their intended locations, which
+    is exactly right: content at any of them is legitimate, content anywhere else is stale.
+
+    Reconstruction (not stored names) keeps this correct across an index-prefix version bump and
+    matches wherever indexing actually wrote. Returns {} if the refs index doesn't exist."""
+    out: dict[tuple[str, str, str, str], set[str]] = {}
+    body = {"query": {"match_all": {}}}
+    src_fields = ["git.host", "git.org", "git.repo", "git.commit", "index_level", "index_suffix"]
+    try:
+        for hit in scan(es, index=REFS_ALIAS, query=body, _source=src_fields, preserve_order=False):
+            src = hit["_source"]
+            g = src.get("git", {})
+            host, org, repo, commit = g.get("host"), g.get("org"), g.get("repo"), g.get("commit")
+            if not (host and org and repo and commit):
+                continue
+            level = src.get("index_level") or "repo"
+            suffix = src.get("index_suffix") or None
+            key = (host, org, repo, commit)
+            intended = out.setdefault(key, set())
+            intended.add(files_index(host, org, repo, commit, level, suffix))
+            intended.add(lines_index(host, org, repo, commit, level, suffix))
+    except NotFoundError:
+        return {}
+    return out
+
+
 _FULL_SHA_LEN = 40
 _MIN_PREFIX_LEN = 7
+
+
+def content_indices_for_commit(
+    es: Elasticsearch, host: str, org: str, repo: str, sha: str,
+) -> list[str]:
+    """The physical content index names (files and/or lines) that actually hold docs for one
+    commit, discovered via the read aliases. Used by the single-commit content-only prune path,
+    which has no marker to reconstruct routing from -- so it discovers the real location instead of
+    assuming the repo-level name (which would miss a commit-level or suffixed index). Returns [] if
+    nothing matches or the aliases don't exist."""
+    names: set[str] = set()
+    query = {"bool": {"filter": [
+        {"term": {"git.host": host}},
+        {"term": {"git.org": org}},
+        {"term": {"git.repo": repo}},
+        {"term": {"git.commit": sha}},
+    ]}}
+    for alias in (FILES_ALIAS, LINES_ALIAS):
+        try:
+            resp = es.search(index=alias, size=0, query=query,
+                             aggs={"idx": {"terms": {"field": "_index", "size": 1000}}})
+        except NotFoundError:
+            continue
+        for b in resp["aggregations"]["idx"]["buckets"]:
+            names.add(b["key"])
+    return sorted(names)
 
 
 def resolve_content_commit(
@@ -152,10 +254,12 @@ def resolve_content_commit(
     responsible for rejecting an ambiguous result (>1 element) and the no-content case (0
     elements).
 
-    Uses a composite aggregation on the per-repo physical indices rather than the read aliases
-    so that a prefix query can be issued without scanning the entire cluster-wide alias.  For a
-    full 40-char SHA a ``term`` filter is used instead of ``prefix``; otherwise a ``prefix``
-    query is added alongside the host/org/repo filter."""
+    Uses a composite aggregation over the read aliases (host/org/repo-scoped, so the fan-out only
+    touches this repo's backing indices) rather than a single per-repo physical name. This is what
+    makes it index.level/suffix-aware: a commit's content may live in a commit-level or suffixed
+    index whose exact name isn't derivable here, but it is always under the alias. For a full
+    40-char SHA a ``term`` filter is used instead of ``prefix``; otherwise a ``prefix`` query is
+    added alongside the host/org/repo filter."""
     # Build query: host/org/repo scoped, plus a prefix or term filter on git.commit.
     if len(prefix) == _FULL_SHA_LEN:
         commit_clause: dict = {"term": {"git.commit": prefix}}
@@ -170,7 +274,7 @@ def resolve_content_commit(
     ]}}
 
     found: set[str] = set()
-    for idx in (lines_index(host, org, repo), files_index(host, org, repo)):
+    for idx in (LINES_ALIAS, FILES_ALIAS):
         if found:
             # Already resolved from the first index; no need to scan the second.
             break

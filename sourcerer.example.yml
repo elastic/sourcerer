@@ -211,6 +211,22 @@ sources:
   retain:
     age: 2y
 
+# Route this source's content to a different physical index (per-source), so it lives
+# alongside — but separate from — the same repo's default-routed content. `level` sets the
+# name granularity (host/org/repo (default)/commit); `suffix` appends `^{suffix}`. Agents
+# query the read aliases, which span every leveled/suffixed index, so this is transparent
+# to search. Changing level/suffix on an already-indexed source migrates its content to the
+# new index on the next `index` run (run `prune` afterward to clean up the old copy).
+- git:
+    host: github
+    org: elastic
+    repo: elasticsearch
+    ref_type: tag
+  match: deploy@{major}
+  index:
+    level: repo                   # host | org | repo (default) | commit
+    suffix: deploy                # -> sourcerer-v2-*~github~elastic~elasticsearch^deploy
+
 # A second host hosting a same-named org/repo is a distinct instance:
 - git:
     host: my_gitea

@@ -47,8 +47,9 @@ performs its `setup`, `index`, and `prune` commands.
 |`sources[i].retain.version.prereleases`|Integer              |No      ||
 |`sources[i].retain.prerelease`         |String               |No      ||
 |`sources[i].schedule`                  |String               |No      ||
-|`sources[i].index.level`               |String               |No      |NOT IMPLEMENTED|
-|`sources[i].index.suffix`              |String               |No      |NOT IMPLEMENTED|
+|`sources[i].index`                     |Object               |No      ||
+|`sources[i].index.level`               |String               |No      ||
+|`sources[i].index.suffix`              |String               |No      ||
 
 Notes:
 - Fields can be expressed either in nested format or flat dotted format.
@@ -614,18 +615,45 @@ If a run was interrupted and left a ref with `status: indexing` older than
 
 ### `sources[i].index`
 
-NOT IMPLEMENTED
-
 Configures the name of the `files` and `lines` indices that this source will be
 indexed to.
+
+Routing is **per-source**: two sources that share the same `(git.host, git.org,
+git.repo)` may specify different `index.level`/`index.suffix` and are indexed to
+different physical indices. For example, a repo's release tags can go to the
+default repo-level index while its deploy tags go to a `^deploy`-suffixed index:
+
+```yaml
+sources:
+- git: { host: github, org: elastic, repo: kibana, ref_type: tag }
+  match: "v{major}.{minor}.{patch}"       # -> sourcerer-v2-*~github~elastic~kibana
+- git: { host: github, org: elastic, repo: kibana, ref_type: tag }
+  match: "deploy@{major}"
+  index: { suffix: deploy }               # -> sourcerer-v2-*~github~elastic~kibana^deploy
+```
+
+Agents are unaffected by routing: they query the `sourcerer-files` / `sourcerer-lines`
+read aliases, which span every `sourcerer-v2-files*` / `sourcerer-v2-lines*` index
+regardless of its level or suffix.
+
+**Changing routing on an already-indexed source (migration).** Because content
+docs are addressed by `(git.host, git.org, git.repo, git.commit, file.path)` — not
+by index name — content written to a new index is a *separate* physical copy. When
+a source's `index.level`/`index.suffix` changes from a prior run, `sourcerer index`
+migrates each affected commit: it re-ingests the content at the new index, flips the
+ref marker to record the new routing, and then deletes the old copy (in that order,
+so a crash never removes live data). If a migration is interrupted after the marker
+flip but before the old copy is deleted, `sourcerer prune`'s orphan sweep reclaims
+the leftover as *stale-location* content (`orphan:stale-location`). Run `prune` after
+a routing change to guarantee the alias returns each doc exactly once. `prune` also deletes any
+sourcerer content index left with **zero docs** (e.g. `~repo^a` after an `index.suffix: a` → `b`
+change moved all of its content to `~repo^b`), so emptied indices don't linger.
 
 - Required: No
 - Type: Object
 - Default: `null` (omitted)
 
 ### `sources[i].index.level`
-
-NOT IMPLEMENTED
 
 Defines the namespacing level for the names of the `files` and `lines` indices.
 
@@ -643,6 +671,13 @@ Values of `level` and their effects on index names:
 |`"repo"`  |`sourcerer-v2-*~{git.host}~{git.org}~{git.repo}`             |
 |`"commit"`|`sourcerer-v2-*~{git.host}~{git.org}~{git.repo}~{git.commit}`|
 
+**Caveat — `"commit"`:** a commit-level index creates one physical index (and at
+least one shard) *per indexed commit*. On a repo/branch with many indexed commits
+this can produce a large number of tiny indices and add shard pressure to the
+cluster. Prefer `"repo"` (the default) or a coarser level unless you specifically
+need per-commit index isolation; `sourcerer prune` reclaims a commit-level index
+with a whole-index delete once its commit is pruned.
+
 - Required: No
 - Type: String
 - Default: `"repo"`
@@ -650,8 +685,6 @@ Values of `level` and their effects on index names:
   - Must be one of: `"host"`, `"org"`, `"repo"`, or `"commit"`
 
 ### `sources[i].index.suffix`
-
-NOT IMPLEMENTED
 
 If not `null`, this suffix is appended to the end of the index name separated by
 a caret (`^`).

@@ -62,6 +62,11 @@ class Unit:
     # the post-clone should_index guard is authoritative -- a stale SHA can only cause a
     # redundant clone, never an incorrect skip.
     remote_sha: str | None = None
+    # sources[i].index routing carried from the selector that emitted this unit (see
+    # config.Selector / specs/sourcerer-yml.md). Determines the physical files/lines index this
+    # unit's content docs are written to; defaults reproduce the historical repo-level name.
+    index_level: str = "repo"
+    index_suffix: str | None = None
 
     @property
     def label(self) -> str:

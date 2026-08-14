@@ -42,8 +42,8 @@ class TestExecuteOrphanDeletions:
             orphan_content={},
             orphan_marker_commits={},
         )
-        indices_deleted, content_dropped, markers_dropped = execute_orphan_deletions(es, plan)
-        assert (indices_deleted, content_dropped, markers_dropped) == (1, 0, 0)
+        indices_deleted, content_dropped, markers_dropped, stale_dropped, empty_deleted = execute_orphan_deletions(es, plan)
+        assert (indices_deleted, content_dropped, markers_dropped, stale_dropped, empty_deleted) == (1, 0, 0, 0, 0)
         es.indices.delete.assert_called_once_with(index="sourcerer-v2-files~github~ghostorg")
         es.delete_by_query.assert_not_called()
 
@@ -54,7 +54,7 @@ class TestExecuteOrphanDeletions:
             orphan_content={("github", "acme", "widgets"): {"aaa", "bbb"}},
             orphan_marker_commits={},
         )
-        _, content_dropped, _ = execute_orphan_deletions(es, plan)
+        _, content_dropped, _, _, _ = execute_orphan_deletions(es, plan)
         assert content_dropped == 2
         called_indices = {c.kwargs["index"] for c in es.delete_by_query.call_args_list}
         assert called_indices == {lines_index("github", "acme", "widgets"), files_index("github", "acme", "widgets")}
@@ -75,7 +75,7 @@ class TestExecuteOrphanDeletions:
                 ("gitlab", "globex", "gadgets"): {"bbb", "ccc"},
             },
         )
-        _, _, markers_dropped = execute_orphan_deletions(es, plan)
+        _, _, markers_dropped, _, _ = execute_orphan_deletions(es, plan)
         assert markers_dropped == 3
         es.delete_by_query.assert_called_once()
         kwargs = es.delete_by_query.call_args.kwargs
@@ -90,8 +90,20 @@ class TestExecuteOrphanDeletions:
     def test_no_orphans_makes_no_calls(self):
         es = MagicMock()
         plan = OrphanPlan(orphan_index_names=[], orphan_content={}, orphan_marker_commits={})
-        assert execute_orphan_deletions(es, plan) == (0, 0, 0)
+        assert execute_orphan_deletions(es, plan) == (0, 0, 0, 0, 0)
         es.indices.delete.assert_not_called()
+        es.delete_by_query.assert_not_called()
+
+    def test_empty_indices_deleted_whole(self):
+        es = MagicMock()
+        plan = OrphanPlan(
+            orphan_index_names=[], orphan_content={}, orphan_marker_commits={},
+            empty_index_names=["sourcerer-v2-files~github~acme~widgets^olddeploy"],
+        )
+        _, _, _, _, empty_deleted = execute_orphan_deletions(es, plan)
+        assert empty_deleted == 1
+        es.indices.delete.assert_called_once_with(
+            index="sourcerer-v2-files~github~acme~widgets^olddeploy")
         es.delete_by_query.assert_not_called()
 
 

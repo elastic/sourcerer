@@ -20,7 +20,7 @@ import yaml
 from ...config import load_config
 from ...indices import REFS_INDEX
 from ...planner import Decision, Marker, plan_repo
-from ...queries import fetch_markers, resolve_content_commit
+from ...queries import content_indices_for_commit, fetch_markers, resolve_content_commit
 from ...utils import ES_ERRORS, make_client
 from .execute import delete_commit_content, execute_deletions, execute_orphan_deletions, plan_orphans_now
 from .report import _Row, _orphan_rows, _print, _ref_rows, _retention_rows
@@ -40,20 +40,22 @@ def _plan_orphans(es, rows: list[_Row], failures_ref: list[int]):
     return orphan_plan
 
 
-def _apply_orphan_plan(es, orphan_plan, failures_ref: list[int]) -> tuple[int, int, int]:
-    """Apply an OrphanPlan returned by _plan_orphans. Returns (indices, content, markers)
-    counts. No-op if the plan has nothing to delete."""
+def _apply_orphan_plan(es, orphan_plan, failures_ref: list[int]) -> tuple[int, int, int, int, int]:
+    """Apply an OrphanPlan returned by _plan_orphans. Returns (indices, content, markers, stale,
+    empty) counts. No-op if the plan has nothing to delete."""
     has_orphans = bool(
-        orphan_plan.orphan_index_names or orphan_plan.orphan_content or orphan_plan.orphan_marker_commits
+        orphan_plan.orphan_index_names or orphan_plan.orphan_content
+        or orphan_plan.orphan_marker_commits or orphan_plan.orphan_stale
+        or orphan_plan.empty_index_names
     )
     if not has_orphans:
-        return (0, 0, 0)
+        return (0, 0, 0, 0, 0)
     try:
         return execute_orphan_deletions(es, orphan_plan)
     except ES_ERRORS as e:
         failures_ref[0] += 1
         click.echo(f"error deleting orphans: {e}", err=True)
-        return (0, 0, 0)
+        return (0, 0, 0, 0, 0)
 
 
 def run(config_path=None, url=None, api_key=None, username=None, password=None,
@@ -99,6 +101,7 @@ def run(config_path=None, url=None, api_key=None, username=None, password=None,
         _print(rows)
 
     total_orphan_indices = total_orphan_content = total_orphan_markers = 0
+    total_orphan_stale = total_empty_indices = 0
     if not dry_run:
         for cfg, decisions in repo_decisions:
             if any(d.action == "delete" for d in decisions):
@@ -111,9 +114,8 @@ def run(config_path=None, url=None, api_key=None, username=None, password=None,
                     click.echo(f"{cfg.host}/{cfg.org}/{cfg.repo}: error deleting: {e}", err=True)
 
         if orphan_plan is not None:
-            total_orphan_indices, total_orphan_content, total_orphan_markers = _apply_orphan_plan(
-                es, orphan_plan, failures
-            )
+            (total_orphan_indices, total_orphan_content, total_orphan_markers,
+             total_orphan_stale, total_empty_indices) = _apply_orphan_plan(es, orphan_plan, failures)
 
     if dry_run:
         click.echo("Dry run: no changes made.")
@@ -122,7 +124,9 @@ def run(config_path=None, url=None, api_key=None, username=None, password=None,
             f"Pruned {total_markers} marker(s) and {total_commits} commit(s) of content; "
             f"removed {total_orphan_indices} orphaned index(es), "
             f"{total_orphan_content} orphaned content commit(s), "
-            f"{total_orphan_markers} orphaned marker commit(s)."
+            f"{total_orphan_markers} orphaned marker commit(s), "
+            f"{total_orphan_stale} stale-location content commit(s), "
+            f"{total_empty_indices} empty index(es)."
         )
     if failures[0]:
         click.echo(f"Completed with {failures[0]} failure(s)", err=True)
@@ -240,7 +244,10 @@ def run_ref(
 
         if not dry_run:
             try:
-                delete_commit_content(es, host, org, repo, sha)
+                # No marker to reconstruct routing from -> discover the actual index(es) holding
+                # this commit's content (may be a commit-level or suffixed index, not repo-level).
+                located = content_indices_for_commit(es, host, org, repo, sha)
+                delete_commit_content(es, host, org, repo, sha, index_names=located or None)
                 total_commits = 1
             except ES_ERRORS as e:
                 failures[0] += 1

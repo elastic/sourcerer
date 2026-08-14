@@ -152,7 +152,8 @@ _WORKER_CTX: dict = {}
 
 
 def _init_worker(
-    host: str, org: str, repo: str, commit_sha: str, repo_dir: str, symlink_paths: frozenset[str] = frozenset()
+    host: str, org: str, repo: str, commit_sha: str, repo_dir: str, symlink_paths: frozenset[str] = frozenset(),
+    index_level: str = "repo", index_suffix: str | None = None,
 ) -> None:
     # Ignore Ctrl-C in the worker processes. The terminal delivers SIGINT to the whole process
     # group, so without this every worker dumps its own KeyboardInterrupt traceback -- and, worse,
@@ -162,7 +163,7 @@ def _init_worker(
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _WORKER_CTX.update(
         host=host, org=org, repo=repo, commit_sha=commit_sha, repo_dir=pathlib.Path(repo_dir),
-        symlink_paths=symlink_paths,
+        symlink_paths=symlink_paths, index_level=index_level, index_suffix=index_suffix,
     )
 
 
@@ -184,9 +185,10 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
     inline generator -- a binary file or one that can't be read yields only its file doc."""
     ctx = _WORKER_CTX
     host, org, repo, commit_sha = ctx["host"], ctx["org"], ctx["repo"], ctx["commit_sha"]
+    level, suffix = ctx.get("index_level", "repo"), ctx.get("index_suffix")
     abs_path = ctx["repo_dir"] / rel_path
-    f_index = files_index(host, org, repo)
-    l_index = lines_index(host, org, repo)
+    f_index = files_index(host, org, repo, commit_sha, level, suffix)
+    l_index = lines_index(host, org, repo, commit_sha, level, suffix)
     # Read the file's bytes once: detect binary from the first 8 KB, and (if text) decode the
     # same buffer for line splitting -- no second read of the file. Binary flag must be computed
     # before build_file_doc so it reaches file.attributes.
@@ -256,12 +258,15 @@ def index_repo(
     repo_dir: pathlib.Path,
     commit_sha: str,
     on_progress: Callable[[int, int], None] | None = None,
+    index_level: str = "repo",
+    index_suffix: str | None = None,
 ) -> tuple[int, int]:
     files_count = 0
     lines_count = 0
-    # Compute the per-repo files index name once so we can distinguish file vs line docs
-    # in the response metadata without relying on a fixed constant.
-    f_index = files_index(host, org, repo)
+    # Compute the files index name once (matching this source's index.level/suffix, and the
+    # commit for commit-level names) so we can distinguish file vs line docs in the response
+    # metadata without relying on a fixed constant.
+    f_index = files_index(host, org, repo, commit_sha, index_level, index_suffix)
 
     # Generation (read + decode + per-line dict build + id hashing) is the throughput ceiling,
     # so fan it out across worker processes; each returns one batch's actions, which we flatten
@@ -272,7 +277,8 @@ def index_repo(
     with ProcessPoolExecutor(
         max_workers=max(1, t.index_workers),
         initializer=_init_worker,
-        initargs=(host, org, repo, commit_sha, str(repo_dir), symlink_paths),
+        initargs=(host, org, repo, commit_sha, str(repo_dir), symlink_paths,
+                  index_level, index_suffix),
     ) as executor:
         def _batched(paths: Iterator[str], n: int) -> Iterator[list[str]]:
             it = iter(paths)

@@ -324,6 +324,20 @@ template's mappings and index sort. Backing indices are `sourcerer-v2-refs`,
 `sourcerer-v2-lines~{git.host}~{git.org}~{git.repo}` (read via the unchanged `sourcerer-refs` /
 `sourcerer-files` / `sourcerer-lines` aliases).
 
+**Index routing (`sources[i].index.level` / `index.suffix`).** A source can override the content
+index name: `level` (`host`/`org`/`repo` (default)/`commit`) chooses the granularity
+(`sourcerer-v2-*~{host}` … `~{host}~{org}~{repo}~{commit}`), and `suffix` appends `^{suffix}`
+(e.g. `~{host}~{org}~{repo}^deploy`). Routing is **per-source**, so two sources of the same
+`(host, org, repo)` may target different indices; the read aliases match `sourcerer-v2-files*` /
+`sourcerer-v2-lines*`, so every leveled/suffixed index auto-joins them and agents are unaffected.
+The name is built by `files_index`/`lines_index` in `src/sourcerer/indices.py`; each ref marker in
+`sourcerer-v2-refs` records the source's `index_level`/`index_suffix` (semantic, not the resolved
+name — so a future prefix bump stays correct). Changing a source's routing between runs triggers a
+**migration** (`sourcerer index` re-ingests at the new index, flips the marker, then deletes the old
+copy; `sourcerer prune` sweeps any crash-leftover as `orphan:stale-location`, and deletes any
+sourcerer content index drained to zero docs as `orphan:empty-index`). Commit-level indexing
+creates one index/shard per commit — see `specs/sourcerer-yml.md` for the caveat.
+
 - **Tags** are *not* stored on content docs. Each tag is one tiny doc in `sourcerer-refs`
   mapping the tag to its commit. To search a tagged release, resolve it to a commit via the
   refs index (the `sourcerer.refs.list` tool), then filter content by `git.host` + `git.commit`.

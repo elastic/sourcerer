@@ -180,3 +180,91 @@ class TestPlanOrphans:
         assert plan.orphan_index_names == ["sourcerer-v2-files~gitlab~acme~widgets"]
         assert plan.orphan_content == {}  # gitlab content subsumed by the Class-A index DELETE
         assert plan.orphan_marker_commits == {("github", "acme", "widgets"): {"aaa"}}
+
+
+class TestOrphanStaleContent:
+    """Class D: content in an index none of its commit's markers point at (the index.level/suffix
+    migration backstop). intended_index_by_commit is the reconstructed marker-intended locations."""
+
+    def test_content_at_unintended_index_is_stale(self):
+        from sourcerer.planner import orphan_stale_content
+        ct = ("github", "acme", "widgets", "abc")
+        content_by_index = {
+            "sourcerer-v2-files~github~acme~widgets": {ct},          # old copy, left by a migration
+            "sourcerer-v2-files~github~acme~widgets^deploy": {ct},   # new (intended) copy
+        }
+        intended = {ct: {"sourcerer-v2-files~github~acme~widgets^deploy"}}
+        stale = orphan_stale_content(content_by_index, intended, skip_indices=set())
+        assert stale == {"sourcerer-v2-files~github~acme~widgets": {"abc"}}
+
+    def test_intended_index_not_flagged(self):
+        from sourcerer.planner import orphan_stale_content
+        ct = ("github", "acme", "widgets", "abc")
+        content_by_index = {"sourcerer-v2-files~github~acme~widgets^deploy": {ct}}
+        intended = {ct: {"sourcerer-v2-files~github~acme~widgets^deploy"}}
+        assert orphan_stale_content(content_by_index, intended, set()) == {}
+
+    def test_commit_without_marker_is_not_class_d(self):
+        """No marker at all -> Class B territory (orphan_content), not stale-location."""
+        from sourcerer.planner import orphan_stale_content
+        ct = ("github", "acme", "widgets", "abc")
+        content_by_index = {"sourcerer-v2-files~github~acme~widgets": {ct}}
+        assert orphan_stale_content(content_by_index, {}, set()) == {}
+
+    def test_skip_indices_excluded(self):
+        from sourcerer.planner import orphan_stale_content
+        ct = ("github", "acme", "widgets", "abc")
+        content_by_index = {"sourcerer-v2-files~github~acme~widgets": {ct}}
+        intended = {ct: {"sourcerer-v2-files~github~acme~widgets^deploy"}}
+        # index is already going away via a Class-A whole-index DELETE
+        assert orphan_stale_content(content_by_index, intended,
+                                    {"sourcerer-v2-files~github~acme~widgets"}) == {}
+
+    def test_plan_orphans_wires_class_d(self):
+        ct = ("github", "acme", "widgets", "abc")
+        names = [
+            "sourcerer-v2-files~github~acme~widgets",
+            "sourcerer-v2-files~github~acme~widgets^deploy",
+        ]
+        ref_tuples = {ct}
+        content_tuples = {ct}
+        content_by_index = {
+            "sourcerer-v2-files~github~acme~widgets": {ct},
+            "sourcerer-v2-files~github~acme~widgets^deploy": {ct},
+        }
+        intended = {ct: {"sourcerer-v2-files~github~acme~widgets^deploy"}}
+        plan = plan_orphans(names, ref_tuples, content_tuples,
+                            content_by_index_commit=content_by_index,
+                            intended_index_by_commit=intended)
+        assert plan.orphan_stale == {"sourcerer-v2-files~github~acme~widgets": {"abc"}}
+
+
+class TestEmptyIndexSweep:
+    """Class E: an empty content index is deleted even when its git identity still has markers
+    (the suffix a->b migration case), and is de-duped against Class-A orphans."""
+
+    def test_empty_index_included_even_when_identity_has_markers(self):
+        ct = ("github", "acme", "widgets", "abc")
+        names = [
+            "sourcerer-v2-files~github~acme~widgets^a",  # drained by a suffix a->b migration
+            "sourcerer-v2-files~github~acme~widgets^b",  # now holds the content
+        ]
+        # Identity (github, acme, widgets) still has markers (they point at ^b), so ^a is NOT a
+        # Class-A orphan -- but it's empty, so Class E must catch it.
+        plan = plan_orphans(
+            names, ref_commit_tuples={ct}, content_commit_tuples={ct},
+            empty_index_names=["sourcerer-v2-files~github~acme~widgets^a"],
+        )
+        assert "sourcerer-v2-files~github~acme~widgets^a" in plan.empty_index_names
+        # ^a is not a Class-A orphan (identity is backed by refs).
+        assert "sourcerer-v2-files~github~acme~widgets^a" not in plan.orphan_index_names
+
+    def test_empty_index_deduped_against_class_a(self):
+        # An index that is BOTH empty AND identity-orphaned appears only under Class A (one DELETE).
+        names = ["sourcerer-v2-files~github~ghostorg~gone"]
+        plan = plan_orphans(
+            names, ref_commit_tuples=set(), content_commit_tuples=set(),
+            empty_index_names=["sourcerer-v2-files~github~ghostorg~gone"],
+        )
+        assert "sourcerer-v2-files~github~ghostorg~gone" in plan.orphan_index_names
+        assert plan.empty_index_names == []

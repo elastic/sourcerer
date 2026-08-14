@@ -9,7 +9,7 @@ from __future__ import annotations
 
 # Standard packages
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 # App packages
@@ -27,6 +27,11 @@ class Marker:
     commit: str
     commit_date: datetime | None
     indexed_at: datetime | None
+    # sources[i].index routing recorded by this marker (semantic, not a resolved index name); the
+    # physical files/lines index is reconstructed from git.* + these via indices.files_index. Legacy
+    # markers omit them -> the repo-level default, exactly where their pre-feature content lives.
+    index_level: str = "repo"
+    index_suffix: str | None = None
 
 
 @dataclass
@@ -189,6 +194,7 @@ class ParsedIndex:
     repo: str | None     # None for a host-only or host~org index
     commit: str | None   # set only for a host~org~repo~commit index
     name: str             # the original index name, for reporting/deletion
+    suffix: str | None = None  # the ^suffix (index.suffix), if any -- part of the physical name only
 
 
 def parse_index_name(
@@ -198,20 +204,32 @@ def parse_index_name(
 ) -> ParsedIndex | None:
     """Inverse of files_index()/lines_index() (sourcerer/indices.py), extended to also recognize
     the host-only, host~org, and host~org~repo~commit granularities those builders don't produce
-    today. Returns None for anything that doesn't fit the scheme (sourcerer-v2-refs, an unrelated
-    index, or a malformed/empty segment) so callers skip it rather than risk misclassifying it as
-    an orphan."""
+    today, plus an optional trailing `^{suffix}` (index.suffix). Returns None for anything that
+    doesn't fit the scheme (sourcerer-v2-refs, an unrelated index, or a malformed/empty segment) so
+    callers skip it rather than risk misclassifying it as an orphan.
+
+    The `^suffix` is split off BEFORE the `~` segments so it can't corrupt the last segment
+    (`repo^deploy` would otherwise parse as a repo named "repo^deploy"). The suffix is retained on
+    the ParsedIndex for reporting/deletion (the full physical name), but is NOT part of the git
+    identity: a `~repo` and a `~repo^deploy` index share the identity (host, org, repo) and are
+    judged for orphan-hood on that identity alone (see orphan_indices)."""
     for prefix, kind in ((files_prefix, "files"), (lines_prefix, "lines")):
         if not name.startswith(prefix + "~"):
             continue
-        parts = name[len(prefix) + 1:].split("~")
+        remainder = name[len(prefix) + 1:]
+        base, sep, suffix = remainder.partition("^")
+        # An empty suffix after a `^` (e.g. "...~repo^") is malformed; a normal name has no `^`.
+        if sep and not suffix:
+            return None
+        parts = base.split("~")
         if not (1 <= len(parts) <= 4) or not all(parts):
             return None
         host = parts[0]
         org = parts[1] if len(parts) >= 2 else None
         repo = parts[2] if len(parts) >= 3 else None
         commit = parts[3] if len(parts) == 4 else None
-        return ParsedIndex(kind=kind, host=host, org=org, repo=repo, commit=commit, name=name)
+        return ParsedIndex(kind=kind, host=host, org=org, repo=repo, commit=commit, name=name,
+                           suffix=(suffix or None))
     return None
 
 
@@ -307,23 +325,74 @@ def orphan_markers(
     return out
 
 
+def orphan_stale_content(
+    content_by_index_commit: dict[str, set[tuple[str, str, str, str]]],
+    intended_index_by_commit: dict[tuple[str, str, str, str], set[str]],
+    skip_indices: set[str],
+) -> dict[str, set[str]]:
+    """Class-D orphans: content docs sitting in a physical index that none of their commit's
+    markers point to. This is the migration backstop -- an index.level/suffix change re-homes a
+    commit's content to a new index and flips its marker there; if a crash happens before the old
+    copy is deleted, the old-location docs survive with no marker referencing that location. Every
+    marker for the commit reconstructs an *intended* index (via indices.files_index/lines_index);
+    content at any other index for that commit is stale.
+
+    `content_by_index_commit` maps a physical index name -> the set of (host, org, repo, commit)
+    tuples with content docs in it. `intended_index_by_commit` maps a commit tuple -> the set of
+    index names its markers intend (reconstructed by the caller for BOTH files and lines prefixes).
+    `skip_indices` excludes indices already going away via a Class-A whole-index DELETE (their
+    contents are dropped with the index, not a separate delete_by_query).
+
+    Returns {index_name -> set of commit shas to delete-by-query from that index}. A commit with no
+    marker at all is intentionally NOT reported here -- that is Class B (orphan_content); this class
+    is specifically 'has a marker, but content lives somewhere the marker doesn't intend'."""
+    out: dict[str, set[str]] = {}
+    for index_name, commit_tuples in content_by_index_commit.items():
+        if index_name in skip_indices:
+            continue
+        for (host, org, repo, commit) in commit_tuples:
+            intended = intended_index_by_commit.get((host, org, repo, commit))
+            # No marker for this commit at all -> Class B territory, leave it to orphan_content.
+            if not intended:
+                continue
+            if index_name not in intended:
+                out.setdefault(index_name, set()).add(commit)
+    return out
+
+
 @dataclass
 class OrphanPlan:
     orphan_index_names: list[str]                              # Class A -> DELETE {index}
     orphan_content: dict[tuple[str, str, str], set[str]]        # Class B -> delete_by_query on content
     orphan_marker_commits: dict[tuple[str, str, str], set[str]]  # Class C -> delete_by_query on refs
+    # Class D -> delete_by_query per index (stale-location content; index.level/suffix migration
+    # backstop). Defaults empty so callers/tests constructing an OrphanPlan without location data
+    # (or on a cluster with no migrations) don't need to supply it.
+    orphan_stale: dict[str, set[str]] = field(default_factory=dict)
+    # Class E -> whole-index DELETE for a sourcerer content index drained to zero docs whose git
+    # identity is NOT itself orphaned (e.g. a suffix a->b migration empties ~repo^a while its
+    # identity still has markers at ~repo^b). Disjoint from orphan_index_names (Class A). Defaults
+    # empty so callers/tests without empty-index data don't need to supply it.
+    empty_index_names: list[str] = field(default_factory=list)
 
 
 def plan_orphans(
     index_names: list[str],
     ref_commit_tuples: set[tuple[str, str, str, str]],
     content_commit_tuples: set[tuple[str, str, str, str]],
+    content_by_index_commit: dict[str, set[tuple[str, str, str, str]]] | None = None,
+    intended_index_by_commit: dict[tuple[str, str, str, str], set[str]] | None = None,
+    empty_index_names: list[str] | None = None,
 ) -> OrphanPlan:
-    """Combine the three orphan classes into one plan from three cheap snapshots: the physical
-    index names, the distinct (host, org, repo, commit) tuples in refs, and the distinct
-    (host, org, repo, commit) tuples with content docs (already unioned across the files and lines
-    indices present). Pure -- no ES calls -- so this is the one seam orphan-sweep tests need to
-    hit."""
+    """Combine the orphan classes into one plan from cheap snapshots: the physical index names, the
+    distinct (host, org, repo, commit) tuples in refs, and the distinct (host, org, repo, commit)
+    tuples with content docs (unioned across the files and lines indices present). Pure -- no ES
+    calls -- so this is the one seam orphan-sweep tests need to hit.
+
+    `content_by_index_commit` (index name -> content commit tuples in it) and
+    `intended_index_by_commit` (commit tuple -> index names its markers intend) enable Class-D
+    stale-location detection (the index.level/suffix migration backstop). When omitted, Class D is
+    empty -- back-compat for callers that don't supply per-index location data."""
     ref_orgs = {(host, org) for host, org, _, _ in ref_commit_tuples}
     ref_repos = {(host, org, repo) for host, org, repo, _ in ref_commit_tuples}
 
@@ -346,4 +415,15 @@ def plan_orphans(
     orphan_content = orphan_content_commits(content_by_repo, ref_by_repo, skip_repos)
     orphan_marker_commits = orphan_markers(ref_by_repo, content_by_repo, skip_repos)
 
-    return OrphanPlan(orphan_index_names, orphan_content, orphan_marker_commits)
+    orphan_stale: dict[str, set[str]] = {}
+    if content_by_index_commit is not None and intended_index_by_commit is not None:
+        # Class-A-orphaned indices are dropped whole; don't also delete-by-query from them.
+        orphan_stale = orphan_stale_content(
+            content_by_index_commit, intended_index_by_commit, skip_indices=orphaned_names,
+        )
+
+    # Class E: empty content indices. Exclude any already slated for a Class-A DELETE (an index
+    # that is both empty AND identity-orphaned only needs to be deleted once).
+    empty = [n for n in (empty_index_names or []) if n not in orphaned_names]
+
+    return OrphanPlan(orphan_index_names, orphan_content, orphan_marker_commits, orphan_stale, empty)

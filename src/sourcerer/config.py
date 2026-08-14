@@ -56,7 +56,7 @@ import yaml
 from croniter import croniter
 
 # App packages
-from .hosts import Host, resolve_hosts, validate_host_id
+from .hosts import _FORBIDDEN_HOST_CHARS, Host, resolve_hosts, validate_host_id
 from .version import CompiledPattern, Version, compile_pattern, match_version, parse_bound
 
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*(s|m|h|d|w|M|y)\s*$")
@@ -282,6 +282,11 @@ class Selector:
     retain: Retain | None
     levels: tuple[str, ...] = ()           # numeric levels shared by the versioned match patterns
     schedule: Schedule | None = None       # per-source schedule override (sources[i].schedule)
+    # sources[i].index routing (see specs/sourcerer-yml.md): which physical files/lines index this
+    # source's content docs land in. Per-source, so two sources sharing a (host, org, repo) may
+    # route to different indices (e.g. kibana release tags -> ~repo, deploy tags -> ~repo^deploy).
+    index_level: str = "repo"              # "host" | "org" | "repo" | "commit"
+    index_suffix: str | None = None        # appended as ^{suffix}; None == no suffix
 
     def matches(self, ref_type: str, ref: str) -> Version | None:
         if self.ref_type != ref_type:
@@ -402,6 +407,44 @@ def _parse_commit_match(raw: dict, ctx: str) -> list[str]:
 
 
 _GIT_KEYS = {"host", "org", "repo", "ref_type"}
+_INDEX_LEVELS = ("host", "org", "repo", "commit")
+# A suffix goes into a physical index name after a `^`, so it must be safe as an index-name
+# segment: the same characters forbidden in a host id, plus the `^` we use as the suffix delimiter.
+_FORBIDDEN_SUFFIX_CHARS = _FORBIDDEN_HOST_CHARS | {"^"}
+
+
+def _parse_index(raw: dict, ctx: str) -> tuple[str, str | None]:
+    """Validate a source's `index:` block and return (level, suffix). `level` defaults to "repo";
+    `suffix` defaults to None. An empty-string suffix is treated as omitted (per the spec). The
+    suffix charset mirrors the host-id rules (lowercase, no whitespace, no index-name-forbidden
+    chars) plus a ban on the `^` delimiter itself."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"{ctx} index: must be a mapping with 'level' and/or 'suffix'")
+    unknown = set(raw) - {"level", "suffix"}
+    if unknown:
+        raise ValueError(f"{ctx} index: unknown keys {sorted(unknown)} (use 'level', 'suffix')")
+
+    level = "repo"
+    if raw.get("level") is not None:
+        level = raw["level"]
+        if level not in _INDEX_LEVELS:
+            raise ValueError(f"{ctx} index.level: must be one of {list(_INDEX_LEVELS)} (got {level!r})")
+
+    suffix: str | None = None
+    if raw.get("suffix") is not None:
+        s = raw["suffix"]
+        if not isinstance(s, str):
+            raise ValueError(f"{ctx} index.suffix: must be a string")
+        if s != "":  # empty string == omitted
+            bad = sorted({c for c in s if c in _FORBIDDEN_SUFFIX_CHARS})
+            if bad:
+                raise ValueError(f"{ctx} index.suffix: {s!r} contains forbidden character(s) {bad}")
+            if any(c.isupper() for c in s):
+                raise ValueError(f"{ctx} index.suffix: {s!r} must not contain uppercase characters")
+            if any(c.isspace() for c in s):
+                raise ValueError(f"{ctx} index.suffix: {s!r} must not contain whitespace")
+            suffix = s
+    return level, suffix
 
 
 def _parse_git_scope(raw: dict, ctx: str) -> tuple[str, str, str, str]:
@@ -432,7 +475,7 @@ def _parse_git_scope(raw: dict, ctx: str) -> tuple[str, str, str, str]:
 def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
     """Parse one `sources[i]` entry into (host, org, repo, Selector). The ref_type comes from the
     `git` block; `match`/`since`/`retain` are top-level siblings."""
-    unknown = set(raw) - {"git", "match", "since", "retain", "schedule"}
+    unknown = set(raw) - {"git", "match", "since", "retain", "schedule", "index"}
     if unknown:
         raise ValueError(f"{ctx}: unknown keys {sorted(unknown)}")
     host, org, repo, ref_type = _parse_git_scope(raw, ctx)
@@ -482,8 +525,13 @@ def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
         except ValueError as e:
             raise ValueError(f"{ctx} schedule: {e}") from e
 
+    index_level, index_suffix = "repo", None
+    if raw.get("index") is not None:
+        index_level, index_suffix = _parse_index(raw["index"], ctx)
+
     selector = Selector(ref_type=ref_type, raw_patterns=patterns, compiled=compiled,
-                        since=since, retain=retain, levels=levels, schedule=schedule)
+                        since=since, retain=retain, levels=levels, schedule=schedule,
+                        index_level=index_level, index_suffix=index_suffix)
     return host, org, repo, selector
 
 

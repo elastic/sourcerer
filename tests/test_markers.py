@@ -165,7 +165,8 @@ class TestMarkersStatusById:
             ]}
         }
         result = markers_status_by_id(es, [ref_id])
-        assert result == {ref_id: {"status": "complete", "commit": FULL_SHA, "indexing_started_at": None}}
+        assert result == {ref_id: {"status": "complete", "commit": FULL_SHA, "indexing_started_at": None,
+                                   "index_level": None, "index_suffix": None}}
         call = es.search.call_args.kwargs
         assert call["index"] == REFS_ALIAS
         assert call["query"] == {"ids": {"values": [ref_id]}}
@@ -186,7 +187,8 @@ class TestMarkersStatusById:
             ]}
         }
         result = markers_status_by_id(es, [ref_id])
-        assert result == {ref_id: {"status": "indexing", "commit": FULL_SHA, "indexing_started_at": started}}
+        assert result == {ref_id: {"status": "indexing", "commit": FULL_SHA, "indexing_started_at": started,
+                                   "index_level": None, "index_suffix": None}}
 
     def test_missing_id_is_absent_from_result(self):
         es = MagicMock()

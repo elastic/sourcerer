@@ -17,7 +17,7 @@ from elasticsearch import Elasticsearch
 # App packages
 from ...config import RepoConfig
 from ...hosts import Host
-from ...indices import REFS_INDEX
+from ...indices import REFS_INDEX, files_index
 from ...planner import Marker, content_delete_set, plan_repo
 from ...progress import Unit
 from ...queries import fetch_markers
@@ -25,7 +25,7 @@ from ...utils import ES_ERRORS
 from .git import _rev_info, list_branch_commits, prepared_repo
 from .markers import (
     build_ref_id, commit_fully_indexed, commits_with_content,
-    markers_status_by_id, _needs_index,
+    marker_routing, markers_status_by_id, _needs_index,
 )
 from .runtime import _tuning
 from .schedule import ScheduleDecision
@@ -125,8 +125,27 @@ def _dry_run_repo(
         pending: list[tuple[Unit, str, str, datetime.datetime | None, str]] = []
         for unit, ref_type, sha, cd, marker_ref in resolved:
             ref_id = build_ref_id(host, org, repo, ref_type, marker_ref, sha)
-            if not force and not _needs_index(ref_id, sha, status_map, content_commits, indexing_cutoff):
+            expected_routing = (unit.index_level, unit.index_suffix)
+            if not force and not _needs_index(ref_id, sha, status_map, content_commits,
+                                              indexing_cutoff, expected_routing=expected_routing):
                 rows.append((unit, "up-to-date", "already indexed", sha, cd))
+                continue
+            # Distinguish a MIGRATION (source's index.level/suffix changed since it was indexed)
+            # from a fresh index: a complete marker whose recorded routing differs from the current
+            # config routes this commit to a new physical index. Surfaced as its own row so an
+            # operator sees the old->new move (and that the old copy will be cleaned up).
+            _mk = status_map.get(ref_id)
+            if (not force and _mk is not None and _mk.get("status") == "complete"
+                    and marker_routing(_mk) != expected_routing):
+                old_level, old_suffix = marker_routing(_mk)
+                old_name = files_index(host, org, repo, sha, old_level, old_suffix)
+                new_name = files_index(host, org, repo, sha, unit.index_level, unit.index_suffix)
+                rows.append((unit, "migrate", f"{old_name} -> {new_name}", sha, cd))
+                synth.append(Marker(
+                    id=ref_id, ref=marker_ref, ref_type=ref_type, commit=sha,
+                    commit_date=cd, indexed_at=now,
+                    index_level=unit.index_level, index_suffix=unit.index_suffix,
+                ))
                 continue
             # Since-floor gate for non-expanded refs (tags, commits, branches without `since` or
             # where the walk returned nothing). Expanded branch entries are already floor-filtered
@@ -184,6 +203,7 @@ def _dry_run_repo(
 _DRY_RUN_LABELS = {
     "index": "would index",
     "reuse": "reuse content",
+    "migrate": "would migrate",
     "up-to-date": "up to date",
     "skip": "skip",
     "error": "error",
@@ -202,7 +222,7 @@ def _print_dry_run_repo(result: dict, prune: bool) -> tuple[int, int, int]:
     click.echo("  index:")
     index_count = 0
     for unit, status, detail, sha, cd in result["rows"]:
-        if status in ("index", "reuse"):
+        if status in ("index", "reuse", "migrate"):
             index_count += 1
         label = _DRY_RUN_LABELS.get(status, status)
         short = sha[:10] if sha else "-"

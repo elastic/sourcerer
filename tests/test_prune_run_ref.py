@@ -473,11 +473,12 @@ class TestRunRefNoMarkerFallback:
         def fake_resolve(es, host, org, repo, prefix):
             return resolved_shas
 
-        def fake_delete_content(es, host, org, repo, sha):
+        def fake_delete_content(es, host, org, repo, sha, index_names=None):
             deleted.append(sha)
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
              patch("sourcerer.commands.prune.command.resolve_content_commit", fake_resolve), \
+             patch("sourcerer.commands.prune.command.content_indices_for_commit", return_value=[]), \
              patch("sourcerer.commands.prune.command.delete_commit_content", fake_delete_content), \
              patch("sourcerer.commands.prune.command.make_client", return_value=_make_es()):
             run_ref(

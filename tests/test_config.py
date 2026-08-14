@@ -326,3 +326,52 @@ class TestHostsMerge:
         cfg = parse_config({})
         for hid in ("github", "gitlab", "bitbucket", "azure-devops", "aws-codecommit"):
             assert hid in cfg.hosts
+
+
+class TestIndexRouting:
+    """sources[i].index.level / index.suffix parsing + validation (specs/sourcerer-yml.md)."""
+
+    def test_defaults_when_omitted(self):
+        sel = _cfg([_source()]).repos[0].selectors[0]
+        assert sel.index_level == "repo" and sel.index_suffix is None
+
+    def test_level_and_suffix_nested(self):
+        src = _source()
+        src["index"] = {"level": "commit", "suffix": "deploy"}
+        sel = _cfg([src]).repos[0].selectors[0]
+        assert sel.index_level == "commit" and sel.index_suffix == "deploy"
+
+    def test_dotted_form(self):
+        src = _source()
+        src["index.level"] = "org"
+        sel = _cfg([src]).repos[0].selectors[0]
+        assert sel.index_level == "org"
+
+    def test_empty_suffix_is_none(self):
+        src = _source()
+        src["index"] = {"suffix": ""}
+        assert _cfg([src]).repos[0].selectors[0].index_suffix is None
+
+    def test_invalid_level_rejected(self):
+        src = _source()
+        src["index"] = {"level": "bogus"}
+        with pytest.raises(ValueError, match="index.level"):
+            _cfg([src])
+
+    def test_bad_suffix_chars_rejected(self):
+        for bad in ("a~b", "a^b", "a/b", "a b", "Deploy"):
+            src = _source()
+            src["index"] = {"suffix": bad}
+            with pytest.raises(ValueError, match="index.suffix"):
+                _cfg([src])
+
+    def test_per_source_routing_allowed_within_a_repo(self):
+        """Two sources sharing (host, org, repo) may route to different indices (the kibana
+        release-vs-deploy case) -- no agreement rule. They group into one RepoConfig."""
+        release = _source(ref_type="tag", match="v{major}.{minor}.{patch}")
+        deploy = _source(ref_type="tag", match="deploy@{major}")
+        deploy["index"] = {"suffix": "deploy"}
+        cfg = _cfg([release, deploy])
+        assert len(cfg.repos) == 1
+        sels = cfg.repos[0].selectors
+        assert sels[0].index_suffix is None and sels[1].index_suffix == "deploy"

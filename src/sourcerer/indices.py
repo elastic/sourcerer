@@ -19,12 +19,51 @@ FILES_ALIAS = "sourcerer-files"
 LINES_ALIAS = "sourcerer-lines"
 REFS_ALIAS = "sourcerer-refs"
 
+# How many git-identity segments each index `level` keeps, in order host, org, repo, commit.
+# Governs sources[i].index.level (see specs/sourcerer-yml.md): "repo" is the historical default
+# (host~org~repo), "commit" adds the commit for a per-commit index, and the coarser "org"/"host"
+# levels collocate a whole org (or host) into one index to keep the shard count low.
+_LEVEL_SEGMENTS = {"host": 1, "org": 2, "repo": 3, "commit": 4}
 
-def files_index(host: str, org: str, repo: str) -> str:
-    """Per-repo files index name, e.g. sourcerer-v2-files~github~elastic~elasticsearch."""
-    return f"{FILES_INDEX_PREFIX}~{host.lower()}~{org.lower()}~{repo.lower()}"
+
+def _content_index(
+    prefix: str, host: str, org: str, repo: str,
+    commit: str | None = None, level: str = "repo", suffix: str | None = None,
+) -> str:
+    """Build a content (files/lines) index name at the given `level`, with an optional `^suffix`.
+
+    `level` picks how many git-identity segments are kept (see _LEVEL_SEGMENTS): "repo" reproduces
+    the historical `prefix~host~org~repo`; "commit" appends the commit for a per-commit index;
+    "org"/"host" drop the finer segments to collocate a whole org (or host) in one index. A
+    trailing `^{suffix}` further partitions a level into named siblings (e.g. `~repo^deploy`).
+
+    Segments are lowercased to match the git.host/org/repo normalizer in the index mappings and the
+    `_id` scheme, so the same identity always resolves to the same physical name. `suffix` is
+    assumed already validated (lowercase, no delimiter/forbidden chars, empty == None) by config
+    parsing; an empty string is treated as absent. A "commit" level requires a commit sha."""
+    n = _LEVEL_SEGMENTS[level]
+    segments = [host, org, repo, commit]
+    if n == 4 and not commit:
+        raise ValueError("commit-level index name requires a commit sha")
+    name = prefix + "~" + "~".join(s.lower() for s in segments[:n])  # type: ignore[union-attr]
+    if suffix:
+        name += "^" + suffix.lower()
+    return name
 
 
-def lines_index(host: str, org: str, repo: str) -> str:
-    """Per-repo lines index name, e.g. sourcerer-v2-lines~github~elastic~elasticsearch."""
-    return f"{LINES_INDEX_PREFIX}~{host.lower()}~{org.lower()}~{repo.lower()}"
+def files_index(
+    host: str, org: str, repo: str,
+    commit: str | None = None, level: str = "repo", suffix: str | None = None,
+) -> str:
+    """Files index name for a source's `index.level`/`index.suffix`. The 3-arg call reproduces the
+    historical repo-level name, e.g. sourcerer-v2-files~github~elastic~elasticsearch."""
+    return _content_index(FILES_INDEX_PREFIX, host, org, repo, commit, level, suffix)
+
+
+def lines_index(
+    host: str, org: str, repo: str,
+    commit: str | None = None, level: str = "repo", suffix: str | None = None,
+) -> str:
+    """Lines index name for a source's `index.level`/`index.suffix`. The 3-arg call reproduces the
+    historical repo-level name, e.g. sourcerer-v2-lines~github~elastic~elasticsearch."""
+    return _content_index(LINES_INDEX_PREFIX, host, org, repo, commit, level, suffix)

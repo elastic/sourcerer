@@ -44,7 +44,10 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
                 if (rt, prefix) in seen:
                     continue
                 seen.add((rt, prefix))
-                units.append(Unit(host=cfg.host, org=cfg.org, repo=cfg.repo, ref=prefix, kind=rt))
+                units.append(Unit(
+                    host=cfg.host, org=cfg.org, repo=cfg.repo, ref=prefix, kind=rt,
+                    index_level=sel.index_level, index_suffix=sel.index_suffix,
+                ))
             continue
         if rt not in fetched:
             fetched[rt] = list_remote_refs(clone_url, "heads" if rt == "branch" else "tags")
@@ -64,6 +67,7 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
             units.append(Unit(
                 host=cfg.host, org=cfg.org, repo=cfg.repo, ref=name, kind=rt,
                 remote_sha=ref_map[name],
+                index_level=sel.index_level, index_suffix=sel.index_suffix,
             ))
 
     failed_kinds = sorted(k for k, v in fetched.items() if v is None)

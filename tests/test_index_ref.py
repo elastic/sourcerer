@@ -49,6 +49,7 @@ class TestBranchBReusePath:
 
         with (
             patch(f"{_MOD}.should_index", return_value=True),
+            patch(f"{_MOD}.recorded_routing", return_value=None),
             patch(f"{_MOD}.fully_indexed_counts", return_value=(7, 900)) as mock_fic,
             patch(f"{_MOD}.content_present", return_value=True) as mock_cp,
             patch(f"{_MOD}.index_repo") as mock_index,
@@ -61,7 +62,12 @@ class TestBranchBReusePath:
             index_ref_in_dir(es, "github", "elastic", "myrepo", repo_dir, branch="main")
 
         mock_fic.assert_called_once_with(es, "github", "elastic", "myrepo", FULL_SHA)
-        mock_cp.assert_called_once_with(es, "github", "elastic", "myrepo", FULL_SHA)
+        # content_present is now location-aware: at_index is the repo-level default name (routing
+        # unchanged), so the reuse probe targets exactly where this commit's content lives.
+        mock_cp.assert_called_once_with(
+            es, "github", "elastic", "myrepo", FULL_SHA,
+            at_index="sourcerer-v2-files~github~elastic~myrepo",
+        )
         mock_index.assert_not_called()
         mock_wim.assert_not_called()  # indexing marker only written for fresh ingest
         mock_wrm.assert_called_once()
@@ -80,6 +86,7 @@ class TestBranchBReusePath:
 
         with (
             patch(f"{_MOD}.should_index", return_value=True),
+            patch(f"{_MOD}.recorded_routing", return_value=None),
             patch(f"{_MOD}.fully_indexed_counts", return_value=(3, 100)),
             patch(f"{_MOD}.content_present", return_value=True),
             patch(f"{_MOD}.index_repo"),
@@ -103,6 +110,7 @@ class TestBranchBReusePath:
 
         with (
             patch(f"{_MOD}.should_index", return_value=True),
+            patch(f"{_MOD}.recorded_routing", return_value=None),
             patch(f"{_MOD}.fully_indexed_counts", return_value=(7, 900)),
             patch(f"{_MOD}.content_present", return_value=True),
             patch(f"{_MOD}.index_repo"),
@@ -129,6 +137,7 @@ class TestBranchBGCPath:
 
         with (
             patch(f"{_MOD}.should_index", return_value=True),
+            patch(f"{_MOD}.recorded_routing", return_value=None),
             patch(f"{_MOD}.fully_indexed_counts", return_value=(7, 900)),
             patch(f"{_MOD}.content_present", return_value=False),  # GC'd
             patch(f"{_MOD}.index_repo", return_value=(7, 900)) as mock_index,
@@ -156,6 +165,7 @@ class TestBranchBNoSiblingMarker:
 
         with (
             patch(f"{_MOD}.should_index", return_value=True),
+            patch(f"{_MOD}.recorded_routing", return_value=None),
             patch(f"{_MOD}.fully_indexed_counts", return_value=None),
             patch(f"{_MOD}.content_present") as mock_cp,
             patch(f"{_MOD}.index_repo", return_value=(12, 1500)) as mock_index,
@@ -185,6 +195,7 @@ class TestBranchBForce:
 
         with (
             patch(f"{_MOD}.should_index", return_value=True),
+            patch(f"{_MOD}.recorded_routing", return_value=None),
             patch(f"{_MOD}.fully_indexed_counts") as mock_fic,
             patch(f"{_MOD}.content_present") as mock_cp,
             patch(f"{_MOD}.index_repo", return_value=(5, 600)) as mock_index,
@@ -202,3 +213,79 @@ class TestBranchBForce:
         mock_fic.assert_not_called()
         mock_cp.assert_not_called()
         mock_index.assert_called_once()
+
+
+class TestIndexLevelSuffixMigration:
+    """index.level/suffix change: a prior complete marker recorded a different routing, so the ref
+    is re-ingested at the new index, the marker is flipped, then the old copy is deleted (in that
+    order)."""
+
+    def test_suffix_added_migrates_and_cleans_old_copy(self):
+        es = _make_es()
+        repo_dir = _make_repo_dir()
+        call_order = []
+
+        def track_wrm(*a, **k):
+            call_order.append("flip-marker")
+
+        def track_delete(es_, host, org, repo, sha, index_names):
+            call_order.append(("delete-old", tuple(index_names)))
+
+        with (
+            # Prior marker recorded the default repo-level routing; the run now wants suffix "deploy".
+            patch(f"{_MOD}.should_index", return_value=True),
+            patch(f"{_MOD}.recorded_routing", return_value=("repo", None)),
+            patch(f"{_MOD}.fully_indexed_counts", return_value=None),
+            patch(f"{_MOD}.content_present", return_value=False),
+            patch(f"{_MOD}.index_repo", return_value=(4, 40)) as mock_index,
+            patch(f"{_MOD}.write_indexing_marker"),
+            patch(f"{_MOD}.write_ref_marker", side_effect=track_wrm) as mock_wrm,
+            patch(f"{_MOD}.delete_commit_from_indices", side_effect=track_delete) as mock_del,
+            patch(f"{_MOD}.checkout_branch"),
+            patch(f"{_MOD}.resolve_commit", return_value=FULL_SHA),
+            patch(f"{_MOD}.commit_date", return_value=COMMIT_DATE),
+            patch(f"{_MOD}.count_tracked_files", return_value=50),
+        ):
+            index_ref_in_dir(
+                es, "github", "elastic", "myrepo", repo_dir, branch="main",
+                index_level="repo", index_suffix="deploy",
+            )
+
+        # Re-ingest happened at the new location.
+        mock_index.assert_called_once()
+        _, ikwargs = mock_index.call_args
+        assert ikwargs["index_level"] == "repo" and ikwargs["index_suffix"] == "deploy"
+
+        # Marker flipped to the new routing.
+        _, wkwargs = mock_wrm.call_args
+        assert wkwargs["index_level"] == "repo" and wkwargs["index_suffix"] == "deploy"
+
+        # Old (unsuffixed) copy deleted, AFTER the marker flip.
+        mock_del.assert_called_once()
+        assert call_order.index("flip-marker") < next(
+            i for i, c in enumerate(call_order) if isinstance(c, tuple)
+        )
+        deleted_indices = mock_del.call_args.args[5]
+        assert "sourcerer-v2-files~github~elastic~myrepo" in deleted_indices
+        assert "sourcerer-v2-lines~github~elastic~myrepo" in deleted_indices
+
+    def test_unchanged_routing_does_not_delete(self):
+        """Same routing as recorded -> normal ingest, no migration delete."""
+        es = _make_es()
+        repo_dir = _make_repo_dir()
+        with (
+            patch(f"{_MOD}.should_index", return_value=True),
+            patch(f"{_MOD}.recorded_routing", return_value=("repo", None)),
+            patch(f"{_MOD}.fully_indexed_counts", return_value=None),
+            patch(f"{_MOD}.content_present", return_value=False),
+            patch(f"{_MOD}.index_repo", return_value=(4, 40)),
+            patch(f"{_MOD}.write_indexing_marker"),
+            patch(f"{_MOD}.write_ref_marker"),
+            patch(f"{_MOD}.delete_commit_from_indices") as mock_del,
+            patch(f"{_MOD}.checkout_branch"),
+            patch(f"{_MOD}.resolve_commit", return_value=FULL_SHA),
+            patch(f"{_MOD}.commit_date", return_value=COMMIT_DATE),
+            patch(f"{_MOD}.count_tracked_files", return_value=50),
+        ):
+            index_ref_in_dir(es, "github", "elastic", "myrepo", repo_dir, branch="main")
+        mock_del.assert_not_called()
