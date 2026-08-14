@@ -56,11 +56,26 @@ class TestAuthHeader:
 
 class TestRun:
     def _mock_fastmcp(self):
-        """Return (mock_FastMCP, mock_mcp_instance) with as_proxy wired up."""
+        """Return (mock_create_proxy, mock_mcp_instance) with create_proxy wired up."""
         mcp_instance = MagicMock()
-        mcp_class = MagicMock()
-        mcp_class.as_proxy.return_value = mcp_instance
-        return mcp_class, mcp_instance
+        create_proxy = MagicMock()
+        create_proxy.return_value = mcp_instance
+        return create_proxy, mcp_instance
+
+    def _fake_modules(self, mock_create_proxy, mock_transport_cls, mock_proxy_client_cls):
+        """Build fake fastmcp submodules matching the imports inside run()."""
+        import types
+        fake_transport_mod = types.ModuleType("fastmcp.client.transports")
+        fake_transport_mod.StreamableHttpTransport = mock_transport_cls
+        fake_server_mod = types.ModuleType("fastmcp.server")
+        fake_server_mod.create_proxy = mock_create_proxy
+        fake_proxy_mod = types.ModuleType("fastmcp.server.providers.proxy")
+        fake_proxy_mod.ProxyClient = mock_proxy_client_cls
+        return {
+            "fastmcp.client.transports": fake_transport_mod,
+            "fastmcp.server": fake_server_mod,
+            "fastmcp.server.providers.proxy": fake_proxy_mod,
+        }
 
     def test_exits_when_kb_url_missing(self):
         with pytest.raises(SystemExit) as exc_info:
@@ -73,43 +88,15 @@ class TestRun:
         assert exc_info.value.code == 1
 
     def test_proxy_built_with_api_key_auth(self):
-        mock_fastmcp, mock_mcp = self._mock_fastmcp()
+        mock_create_proxy, mock_mcp = self._mock_fastmcp()
         mock_transport_cls = MagicMock()
         mock_proxy_client_cls = MagicMock()
 
-        with (
-            patch("sourcerer.commands.mcp_proxy.command.FastMCP", mock_fastmcp, create=True),
-            patch("sourcerer.commands.mcp_proxy.command.StreamableHttpTransport", mock_transport_cls, create=True),
-            patch("sourcerer.commands.mcp_proxy.command.ProxyClient", mock_proxy_client_cls, create=True),
+        with patch.dict(
+            sys.modules,
+            self._fake_modules(mock_create_proxy, mock_transport_cls, mock_proxy_client_cls),
         ):
-            # Intercept the lazy import inside run() by pre-populating the module attributes
-            import sourcerer.commands.mcp_proxy.command as cmd_module
-            original = {}
-            for name, obj in [
-                ("FastMCP", mock_fastmcp),
-                ("StreamableHttpTransport", mock_transport_cls),
-                ("ProxyClient", mock_proxy_client_cls),
-            ]:
-                original[name] = getattr(cmd_module, name, None)
-
-            # We need to patch the imports as they happen inside run().
-            # Use importlib-level patching by injecting into sys.modules.
-            import types
-            fake_fastmcp_mod = types.ModuleType("fastmcp")
-            fake_fastmcp_mod.FastMCP = mock_fastmcp
-            fake_transport_mod = types.ModuleType("fastmcp.client.transports")
-            fake_transport_mod.StreamableHttpTransport = mock_transport_cls
-            fake_proxy_mod = types.ModuleType("fastmcp.server.proxy")
-            fake_proxy_mod.ProxyClient = mock_proxy_client_cls
-
-            with (
-                patch.dict(sys.modules, {
-                    "fastmcp": fake_fastmcp_mod,
-                    "fastmcp.client.transports": fake_transport_mod,
-                    "fastmcp.server.proxy": fake_proxy_mod,
-                }),
-            ):
-                proxy.run("https://kb.example.com", "mykey", None, None)
+            proxy.run("https://kb.example.com", "mykey", None, None)
 
         # Transport must be built with the resolved endpoint and ApiKey header
         mock_transport_cls.assert_called_once_with(
@@ -118,31 +105,23 @@ class TestRun:
         )
         # ProxyClient wraps the transport
         mock_proxy_client_cls.assert_called_once_with(mock_transport_cls.return_value)
-        # FastMCP.as_proxy is called with the proxy client and a name
-        mock_fastmcp.as_proxy.assert_called_once()
-        call_kwargs = mock_fastmcp.as_proxy.call_args
-        assert call_kwargs[1].get("name") == "Sourcerer" or call_kwargs[0][1] == "Sourcerer" or True  # name kwarg
+        # create_proxy is called with the proxy client and a name
+        mock_create_proxy.assert_called_once()
+        call_args = mock_create_proxy.call_args
+        assert call_args[0][0] is mock_proxy_client_cls.return_value
+        assert call_args[1].get("name") == "Sourcerer"
         # mcp.run() is called with no arguments (defaults to stdio)
         mock_mcp.run.assert_called_once_with()
 
     def test_proxy_built_with_basic_auth(self):
-        mock_fastmcp, mock_mcp = self._mock_fastmcp()
+        mock_create_proxy, mock_mcp = self._mock_fastmcp()
         mock_transport_cls = MagicMock()
         mock_proxy_client_cls = MagicMock()
 
-        import types
-        fake_fastmcp_mod = types.ModuleType("fastmcp")
-        fake_fastmcp_mod.FastMCP = mock_fastmcp
-        fake_transport_mod = types.ModuleType("fastmcp.client.transports")
-        fake_transport_mod.StreamableHttpTransport = mock_transport_cls
-        fake_proxy_mod = types.ModuleType("fastmcp.server.proxy")
-        fake_proxy_mod.ProxyClient = mock_proxy_client_cls
-
-        with patch.dict(sys.modules, {
-            "fastmcp": fake_fastmcp_mod,
-            "fastmcp.client.transports": fake_transport_mod,
-            "fastmcp.server.proxy": fake_proxy_mod,
-        }):
+        with patch.dict(
+            sys.modules,
+            self._fake_modules(mock_create_proxy, mock_transport_cls, mock_proxy_client_cls),
+        ):
             proxy.run("https://kb.example.com", None, "alice", "secret")
 
         expected_b64 = base64.b64encode(b"alice:secret").decode()
@@ -162,23 +141,14 @@ class TestRun:
 
     def _run_with_mocks(self, insecure: bool):
         """Helper: run() with all fastmcp internals mocked; return the transport call kwargs."""
-        import types
-        mock_fastmcp, mock_mcp = self._mock_fastmcp()
+        mock_create_proxy, mock_mcp = self._mock_fastmcp()
         mock_transport_cls = MagicMock()
         mock_proxy_client_cls = MagicMock()
 
-        fake_fastmcp_mod = types.ModuleType("fastmcp")
-        fake_fastmcp_mod.FastMCP = mock_fastmcp
-        fake_transport_mod = types.ModuleType("fastmcp.client.transports")
-        fake_transport_mod.StreamableHttpTransport = mock_transport_cls
-        fake_proxy_mod = types.ModuleType("fastmcp.server.proxy")
-        fake_proxy_mod.ProxyClient = mock_proxy_client_cls
-
-        with patch.dict(sys.modules, {
-            "fastmcp": fake_fastmcp_mod,
-            "fastmcp.client.transports": fake_transport_mod,
-            "fastmcp.server.proxy": fake_proxy_mod,
-        }):
+        with patch.dict(
+            sys.modules,
+            self._fake_modules(mock_create_proxy, mock_transport_cls, mock_proxy_client_cls),
+        ):
             proxy.run("https://kb.example.com", "mykey", None, None, insecure=insecure)
 
         _, call_kwargs = mock_transport_cls.call_args

@@ -70,9 +70,9 @@ def run(
         sys.exit(1)
 
     # Defer fastmcp import so --help and unit tests don't require the full server stack.
-    from fastmcp import FastMCP  # noqa: PLC0415
     from fastmcp.client.transports import StreamableHttpTransport  # noqa: PLC0415
-    from fastmcp.server.proxy import ProxyClient  # noqa: PLC0415
+    from fastmcp.server import create_proxy  # noqa: PLC0415
+    from fastmcp.server.providers.proxy import ProxyClient  # noqa: PLC0415
 
     url = _endpoint(kb_url)
 
@@ -93,5 +93,5 @@ def run(
     if httpx_client_factory is not None:
         transport_kwargs["httpx_client_factory"] = httpx_client_factory
     transport = StreamableHttpTransport(url, **transport_kwargs)
-    mcp = FastMCP.as_proxy(ProxyClient(transport), name="Sourcerer")
+    mcp = create_proxy(ProxyClient(transport), name="Sourcerer")
     mcp.run()
