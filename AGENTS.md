@@ -19,6 +19,8 @@ Commands:
   Agent Builder MCP endpoint; intended to be launched by Claude Desktop via `mcpServers`)
 - `sourcerer help`
 
+`sourcerer --version` (a top-level flag, not a subcommand) prints the installed version.
+
 All commands that communicate with Elasticsearch or Kibana accept `--insecure` (flag, default
 off). When set, TLS certificate verification is disabled — useful for locally-hosted clusters
 with self-signed certificates that are trusted in your environment. Also configurable via the

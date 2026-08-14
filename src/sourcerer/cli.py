@@ -77,9 +77,73 @@ def insecure_option(f):
     )(f)
 
 
-@click.group()
+# Grouping of top-level commands in `--help`, in display order. Each tuple is a
+# section title and the command names under it. Any command not listed here is
+# appended to a trailing "Other commands" section.
+_COMMAND_GROUPS = (
+    ("Main commands", ("setup", "index", "prune")),
+    ("Other commands", ("mcp-proxy", "benchmark", "help")),
+)
+_OTHER_COMMANDS_TITLE = "Other commands"
+
+
+class _FlushDescriptionGroup(click.Group):
+    """A Group whose top-level help description is rendered flush-left (no indent),
+    instead of Click's default 2-space indent, while options/commands still indent.
+    Bare URLs are left as plain text so terminals auto-detect them as clickable
+    links (OSC 8 escapes are avoided: Terminal.app ignores them and they confuse
+    Click's line-wrapping, splitting the URL mid-string).
+
+    Commands are rendered in titled sections (see `_COMMAND_GROUPS`) rather than one
+    flat "Commands" list, so the primary workflow (setup/index/prune) leads."""
+
+    def format_help_text(self, ctx, formatter):
+        text = self.help or ""
+        if text:
+            formatter.write_paragraph()
+            for line in text.split("\n"):
+                line = line.strip()
+                if line.startswith("Sourcerer"):
+                    line = click.style("Sourcerer", bold=True) + line[len("Sourcerer"):]
+                elif line.startswith(("http://", "https://")):
+                    line = click.style(line, dim=True)
+                formatter.write_text(line)
+
+    def format_commands(self, ctx, formatter):
+        commands = {name: self.get_command(ctx, name) for name in self.list_commands(ctx)}
+        commands = {name: cmd for name, cmd in commands.items()
+                    if cmd is not None and not cmd.hidden}
+
+        grouped = set()
+        sections = []
+        for title, names in _COMMAND_GROUPS:
+            rows = [(name, commands[name]) for name in names if name in commands]
+            grouped.update(name for name, _ in rows)
+            sections.append((title, rows))
+        # Fold any command missing from _COMMAND_GROUPS into the "Other commands" section.
+        leftover = [(name, cmd) for name, cmd in commands.items() if name not in grouped]
+        if leftover:
+            for i, (title, rows) in enumerate(sections):
+                if title == _OTHER_COMMANDS_TITLE:
+                    sections[i] = (title, rows + leftover)
+                    break
+            else:
+                sections.append((_OTHER_COMMANDS_TITLE, leftover))
+
+        limit = formatter.width - 6 - max((len(name) for name in commands), default=0)
+        for title, rows in sections:
+            if not rows:
+                continue
+            entries = [(name, (cmd.get_short_help_str(limit) or "")) for name, cmd in rows]
+            with formatter.section(title):
+                formatter.write_dl(entries)
+
+
+@click.group(cls=_FlushDescriptionGroup)
+@click.version_option(package_name="sourcerer", message="%(version)s")
 def cli():
-    """Sourcerer - index and search source code in Elasticsearch."""
+    """Sourcerer - Ask the source.
+    https://github.com/elastic/sourcerer"""
 
 
 @cli.command(name="help")
