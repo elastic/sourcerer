@@ -657,14 +657,14 @@ If not `null`, this suffix is appended to the end of the index name separated by
 a caret (`^`).
 
 Example index naming pattern where `sources[i].index.level` is `"repo"` and
-`sources[i].index.suffix` is `"@deploy"`:
+`sources[i].index.suffix` is `"deploy"`:
 
-`sourcerer-v2-*~{git.host}~{git.org}~{git.repo}^@deploy`
+`sourcerer-v2-*~{git.host}~{git.org}~{git.repo}^deploy`
 
 For instance:
 
-`sourcerer-v2-files~github~elastic~kibana^@deploy`
-`sourcerer-v2-lines~github~elastic~kibana^@deploy`
+`sourcerer-v2-files~github~elastic~kibana^deploy`
+`sourcerer-v2-lines~github~elastic~kibana^deploy`
 
 - Required: No
 - Type: String

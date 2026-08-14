@@ -7,8 +7,10 @@
 import os
 import pathlib
 import signal
+from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
+from itertools import islice
 
 # Third-party packages
 from elasticsearch import Elasticsearch
@@ -164,7 +166,19 @@ def _init_worker(
     )
 
 
-def build_file_actions(rel_path: str) -> list[dict]:
+def build_file_actions(rel_paths: list[str]) -> list[dict]:
+    """Build the bulk actions for a batch of files: for each, its file-metadata doc plus a line
+    doc per line of text. Runs in a worker process (see _init_worker for the shared context). A
+    batch (rather than one path) is the unit crossing the process boundary -- it replaces the old
+    executor.map(..., chunksize=...) IPC batching now that index_repo submits paths in windowed
+    groups. A binary file or one that can't be read contributes only its file doc."""
+    out: list[dict] = []
+    for rel_path in rel_paths:
+        out.extend(_build_one_file_actions(rel_path))
+    return out
+
+
+def _build_one_file_actions(rel_path: str) -> list[dict]:
     """Build the bulk actions for one file: its file-metadata doc plus a line doc per line of
     text. Runs in a worker process (see _init_worker for the shared context). Mirrors the old
     inline generator -- a binary file or one that can't be read yields only its file doc."""
@@ -250,7 +264,7 @@ def index_repo(
     f_index = files_index(host, org, repo)
 
     # Generation (read + decode + per-line dict build + id hashing) is the throughput ceiling,
-    # so fan it out across worker processes; each returns one file's actions, which we flatten
+    # so fan it out across worker processes; each returns one batch's actions, which we flatten
     # into the lazy stream parallel_bulk consumes. Doc ids are deterministic and independent
     # (make_doc_id), so file/line docs need not stay adjacent or ordered.
     t = _tuning()
@@ -260,10 +274,27 @@ def index_repo(
         initializer=_init_worker,
         initargs=(host, org, repo, commit_sha, str(repo_dir), symlink_paths),
     ) as executor:
+        def _batched(paths: Iterator[str], n: int) -> Iterator[list[str]]:
+            it = iter(paths)
+            while batch := list(islice(it, n)):
+                yield batch
+
         def generate_actions():
-            for file_actions in executor.map(
-                build_file_actions, iter_tracked_files(repo_dir), chunksize=t.index_worker_chunksize
-            ):
+            # Bounded sliding window of in-flight futures: keep at most `max_inflight` batches
+            # submitted-but-unconsumed so completed per-file action lists (each carrying every
+            # line doc) cannot pile up in this process while parallel_bulk is slower than
+            # generation -- the unbounded backlog that made peak memory scale with repo size.
+            # Peak generation backlog is ~ max_inflight * index_worker_chunksize files of docs,
+            # independent of repo size. The window derives from existing tuning (no new knob).
+            batches = _batched(iter_tracked_files(repo_dir), t.index_worker_chunksize)
+            max_inflight = max(1, t.index_workers) * 2
+            inflight: deque = deque()
+            for batch in islice(batches, max_inflight):
+                inflight.append(executor.submit(build_file_actions, batch))
+            while inflight:
+                file_actions = inflight.popleft().result()  # blocks: backpressure on a slow sink
+                for batch in islice(batches, 1):
+                    inflight.append(executor.submit(build_file_actions, batch))
                 yield from file_actions
 
         # parallel_bulk is lazy -- it does no work until the returned generator is consumed.
@@ -294,10 +325,10 @@ def index_repo(
                 if on_progress is not None and processed % 1000 == 0:
                     on_progress(files_count, lines_count)
         except KeyboardInterrupt:
-            # Cancel the file tasks still queued in the pool so the `with` block's join below
-            # returns in seconds. executor.map queues ~every tracked file up front; a plain
-            # shutdown(wait=True) would process all of them (tens of thousands on a large repo)
-            # before quitting -- the lag that made Ctrl-C take minutes to take hold.
+            # Cancel the batch tasks still queued in the pool so the `with` block's join below
+            # returns in seconds. The windowed submit above keeps only ~max_inflight batches
+            # queued (not every tracked file), so a plain shutdown(wait=True) would already be
+            # quick -- but cancel_futures makes teardown immediate regardless of window size.
             executor.shutdown(wait=False, cancel_futures=True)
             raise
     if on_progress is not None:

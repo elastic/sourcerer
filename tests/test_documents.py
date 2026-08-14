@@ -11,6 +11,7 @@ import stat
 # App packages
 from sourcerer.commands.index import documents
 from sourcerer.commands.index.documents import (
+    _build_one_file_actions,
     build_file_actions,
     build_file_doc,
     file_attributes,
@@ -210,7 +211,7 @@ class TestBuildFileActions:
     def test_text_file_yields_file_and_line_actions(self, tmp_path):
         (tmp_path / "a.txt").write_text("one\ntwo\n")
         _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path)
-        actions = build_file_actions("a.txt")
+        actions = _build_one_file_actions("a.txt")
         assert actions[0]["_index"] == files_index("github", "acme", "widgets")
         line_actions = [a for a in actions if a["_index"] == lines_index("github", "acme", "widgets")]
         assert len(line_actions) == 2
@@ -218,7 +219,7 @@ class TestBuildFileActions:
     def test_binary_file_yields_only_file_doc(self, tmp_path):
         (tmp_path / "b.bin").write_bytes(b"\x00\x01\x02binarydata")
         _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path)
-        actions = build_file_actions("b.bin")
+        actions = _build_one_file_actions("b.bin")
         assert len(actions) == 1
         assert actions[0]["_index"] == files_index("github", "acme", "widgets")
 
@@ -228,21 +229,21 @@ class TestBuildFileActions:
         content = ("a" * 8192) + "\x00"
         (tmp_path / "c.txt").write_text(content)
         _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path)
-        actions = build_file_actions("c.txt")
+        actions = _build_one_file_actions("c.txt")
         line_actions = [a for a in actions if a["_index"] == lines_index("github", "acme", "widgets")]
         assert len(line_actions) >= 1
 
     def test_binary_file_has_binary_attribute(self, tmp_path):
         (tmp_path / "b.bin").write_bytes(b"\x00\x01\x02binarydata")
         _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path)
-        actions = build_file_actions("b.bin")
+        actions = _build_one_file_actions("b.bin")
         assert actions[0]["_source"]["file"]["attributes"] == ["binary"]
 
     def test_text_file_actions_carry_size(self, tmp_path):
         p = tmp_path / "a.txt"
         p.write_text("one\ntwo\n")
         _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path)
-        actions = build_file_actions("a.txt")
+        actions = _build_one_file_actions("a.txt")
         expected_size = p.lstat().st_size
         for action in actions:
             assert action["_source"]["file"]["size"] == expected_size
@@ -253,7 +254,7 @@ class TestBuildFileActions:
         link = tmp_path / "link.txt"
         os.symlink(target, link)
         _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path, symlink_paths=frozenset({"link.txt"}))
-        actions = build_file_actions("link.txt")
+        actions = _build_one_file_actions("link.txt")
         # Both files and lines docs should carry target_path and target_size
         for action in actions:
             assert action["_source"]["file"]["target_path"] == os.readlink(link)
@@ -267,7 +268,7 @@ class TestBuildFileActions:
         link = tmp_path / "dangling.txt"
         os.symlink(tmp_path / "nonexistent.txt", link)
         _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path, symlink_paths=frozenset({"dangling.txt"}))
-        actions = build_file_actions("dangling.txt")
+        actions = _build_one_file_actions("dangling.txt")
         assert len(actions) == 1
         assert actions[0]["_index"] == files_index("github", "acme", "widgets")
         file_fields = actions[0]["_source"]["file"]
@@ -283,7 +284,7 @@ class TestBuildFileActions:
         fake_link = tmp_path / "CLAUDE.md"
         fake_link.write_text("AGENTS.md")  # content = target path, no newline (git blob)
         _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path, symlink_paths=frozenset({"CLAUDE.md"}))
-        actions = build_file_actions("CLAUDE.md")
+        actions = _build_one_file_actions("CLAUDE.md")
         file_action = actions[0]
         assert file_action["_source"]["file"]["attributes"] == ["symlink"]
         assert file_action["_source"]["file"]["target_path"] == "AGENTS.md"
@@ -293,3 +294,19 @@ class TestBuildFileActions:
         line_actions = [a for a in actions if a["_index"] == lines_index("github", "acme", "widgets")]
         assert len(line_actions) == 1
         assert line_actions[0]["_source"]["file"]["target_path"] == "AGENTS.md"
+
+
+class TestBuildFileActionsBatch:
+    def test_batch_concatenates_per_file_actions(self, tmp_path):
+        # build_file_actions takes a batch of paths (the unit crossing the process boundary)
+        # and returns the concatenation of each file's per-file actions, order preserved.
+        (tmp_path / "a.txt").write_text("one\ntwo\n")
+        (tmp_path / "b.txt").write_text("x\ny\nz\n")
+        _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path)
+        batched = build_file_actions(["a.txt", "b.txt"])
+        expected = _build_one_file_actions("a.txt") + _build_one_file_actions("b.txt")
+        assert batched == expected
+
+    def test_empty_batch_yields_no_actions(self, tmp_path):
+        _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path)
+        assert build_file_actions([]) == []
