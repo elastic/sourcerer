@@ -346,6 +346,14 @@ tag, or bypass the script's lockfile, test, build, branch, version, or remote-ta
 Pushing a valid tag triggers `.github/workflows/release.yml`, which repeats the quality
 checks and creates the GitHub release.
 
+### Dependencies
+
+Always pin dependencies to an exact version (`pkg==X.Y.Z`) in `pyproject.toml` — for both
+runtime and dev dependencies. Do not use range constraints (`>=`, `~=`, `^`). Exact pins make
+builds reproducible and let Dependabot recognize a fixed version directly from `pyproject.toml`
+(a `>=` lower bound leaves the alert open even after the lockfile resolves to a safe version).
+When bumping a dependency, set the pin to the version `uv lock` resolves and re-run the tests.
+
 ### Upgrading from v1 to v2
 
 v2.0.0 adds a `git.host` dimension so the same org/repo can be indexed and cited across

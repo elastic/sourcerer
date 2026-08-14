@@ -9,11 +9,11 @@ description = "Index and search source code in Elasticsearch."
 requires-python = ">=3.10"
 dependencies = [
     "click==8.1.8",
-    "croniter>=6.2.4",
+    "croniter==6.2.4",
     "elasticsearch==8.17.1",
-    "fastmcp>=3.2.0",
+    "fastmcp==3.4.7",
     "packaging==26.2",
-    "python-dotenv>=1.2.2",
+    "python-dotenv==1.2.2",
     "pyyaml==6.0.2",
     "requests==2.34.2",
     "rich==13.9.4",
@@ -21,7 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8",
+    "pytest==9.1.1",
 ]
 
 [project.scripts]
