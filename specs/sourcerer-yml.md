@@ -413,14 +413,29 @@ for indexing if they don't also qualify for pruning.
 
 ### `sources[i].since`
 
-Defines the starting point for indexing relative to the most recent point in the
-commit history within the scope defined in `sources[i].git`.  The starting point
-is an inclusion floor.
+Sets the earliest point in commit history to index. Exactly one child field can
+be given (`age`, `date`, `commit`, or `ref`). When `null`, empty (`{}`), or
+omitted, no floor is applied.
 
-Exactly one child field can be given (`age`, `date`, `commit`, or `ref`).
+**Behavior by `ref_type`:**
 
-When `null`, empty (`{}`), or omitted, the entire history is considered for
-indexing, and filtered only by `sources[i].match` and `sources[i].retain`.
+- **`ref_type: tag`** — `since` is a filter on which tags are *selected*: tags
+  whose commit date is before the floor are excluded. Each selected tag is still
+  one indexed snapshot.
+- **`ref_type: branch`** — `since` triggers a **commit history walk**: every
+  commit on the first-parent mainline of the branch from the tip back to (and
+  including) the oldest commit whose committer date is >= the floor is indexed as
+  its own snapshot. Without `since`, only the current branch tip is indexed.
+
+  **Pair with `retain`**: without a `retain.count` or `retain.age` bound, every
+  commit selected by the floor is indexed. The prune-aware pre-filter trims
+  commits that `retain` would immediately delete *before* ingest — so
+  `retain.count: 5` with `since.age: 1y` indexes only the 5 newest commits, not
+  the full year of history.
+
+  **First-parent walk**: merged feature-branch commits are not enumerated
+  individually; they appear as the merge commit on the mainline. This matches the
+  intuitive "history of main."
 
 - Required: No
 - Type: Object

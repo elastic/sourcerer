@@ -91,6 +91,25 @@ Sets where indexing starts. Provide **exactly one** of:
 | `commit` | Start from this commit hash. |
 | `ref` | Start from the commit this tag/branch points to (accepts the full ref name or a bare version). |
 
+**Behavior by `ref_type`:**
+
+- **`ref_type: tag`** — `since` is a filter on which tags are *selected*: only tags whose commit date
+  is on or after the floor are indexed. Each matching tag is still one indexed snapshot.
+- **`ref_type: branch`** — `since` causes the branch's **commit history to be walked** back to the
+  floor. Every commit on the first-parent mainline from the branch tip back to (and including) the
+  oldest commit whose committer date is >= the floor is indexed as its own snapshot (one set of
+  content docs + one refs marker per commit). This turns a single branch into N indexed commits.
+
+  **Important:** pair a branch `since` with `retain.count` or `retain.age` to bound how many
+  historical commits are actually indexed. Without a date/count `retain`, every commit the floor
+  selects is indexed. The retention pre-filter trims retention-doomed commits *before* ingest —
+  so `retain.count: 5` with `since.age: 1y` indexes only the 5 newest commits on the branch,
+  not all commits in the past year.
+
+  The history walk uses `--first-parent` semantics: only the branch's own mainline commits are
+  enumerated; merged feature-branch commits appear only as the merge commit on the mainline, not
+  as individual snapshots. This matches the intuitive "history of main."
+
 #### Pattern syntax
 
 Patterns combine a version DSL with glob syntax:

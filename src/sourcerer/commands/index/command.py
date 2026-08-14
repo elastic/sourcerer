@@ -34,6 +34,7 @@ from .git import (
     commit_date,
     count_tracked_files,
     default_branch,
+    list_branch_commits,
     prepared_repo,
     ref_dates,
     resolve_cache_root,
@@ -51,6 +52,23 @@ from .runtime import _aborted, _tuning, bulk_indexing_settings, handle_interrupt
 from .selection import _effective_since_floor, _load_config, _resolve_entry
 
 
+def _branch_has_since(branch_name: str, cfg) -> bool:
+    """True if any selector for this branch has a date/age/commit/ref `since` that would
+    trigger a history walk. Version-based `since` (a tag name used as a floor for tag
+    selectors) does not apply to branches and is excluded. Used to bypass the pre-clone
+    tip-only skip so the post-clone walk can find unindexed historical commits."""
+    if cfg is None:
+        return False
+    for sel in cfg.selectors:
+        if sel.ref_type != "branch":
+            continue
+        if sel.matches("branch", branch_name) is None:
+            continue
+        if sel.since is not None and sel.since_version_floor() is None:
+            return True
+    return False
+
+
 def index_ref_in_dir(
     es: Elasticsearch,
     host: str,
@@ -64,12 +82,18 @@ def index_ref_in_dir(
     reporter: ProgressReporter | None = None,
     unit: Unit | None = None,
     retry_window: datetime.timedelta | None = None,
+    at_commit: str | None = None,
 ) -> None:
     """
     Index a single ref of one repo into an already-cloned `repo_dir`. Checks out the ref
     (the clone holds every branch/tag, so one clone serves any number of refs), then
     runs the authoritative SHA guard and indexes, tags, or records the ref. At most one of
     branch/tag/commit should be set; none means the remote's default branch.
+
+    `at_commit`: when set on a branch, check out this specific commit SHA instead of the
+    branch tip, but record the ref marker as `ref_type=branch, ref=<branch>`. Used by the
+    branch history walk (`since` on a branch) to index each historical commit while keeping
+    it associated with the branch so `resolve_head`/`retain.count`-per-branch work correctly.
     """
     if reporter is None:
         reporter = ProgressReporter()
@@ -82,15 +106,21 @@ def index_ref_in_dir(
     # default branch) are checked out at their fetched remote tip so a reused clone can't land on
     # a stale local branch; tags/commits are immutable and checked out directly.
     reporter.set_stage(unit, "checkout")
-    if branch:
+    if at_commit:
+        # Branch history walk: check out a specific historical commit, not the branch tip.
+        checkout_ref(repo_dir, at_commit)
+        commit_sha = at_commit
+    elif branch:
         checkout_branch(repo_dir, branch)
+        commit_sha = resolve_commit(repo_dir)
     elif tag or commit:
         checkout_ref(repo_dir, tag or commit)
+        commit_sha = resolve_commit(repo_dir)
     else:
         branch = default_branch(repo_dir)
         checkout_branch(repo_dir, branch)
+        commit_sha = resolve_commit(repo_dir)
 
-    commit_sha = resolve_commit(repo_dir)
     if branch:
         ref_for_id = branch
     elif tag:
@@ -99,7 +129,11 @@ def index_ref_in_dir(
         ref_for_id = commit_sha
     ref_type = "branch" if branch else "tag" if tag else "commit"
     commit_date_iso = commit_date(repo_dir)
-    unit.ref = ref_for_id
+    # For historical branch commits (at_commit set), keep the display ref that was set by the
+    # caller (e.g. "main@abc12345") so progress output shows which commit is being indexed.
+    # For all other refs, update unit.ref to the resolved ref name (resolves default branch).
+    if not at_commit:
+        unit.ref = ref_for_id
 
     # Post-clone guard: authoritative SHA check (covers -c and any ls-remote
     # peeling mismatch).
@@ -466,6 +500,13 @@ def run_config(
                         # ES error -- treat as pending; post-clone guard is authoritative.
                         pending.append((unit, branch, tag, None))
                         continue
+                    # A branch unit with a date/age/commit/ref `since` must not be pre-clone
+                    # skipped even if its tip is already indexed: historical commits back to the
+                    # floor may still need indexing (e.g. when `since` is first added to an
+                    # existing source). The post-clone walk enumerates only the unindexed commits.
+                    if branch and _branch_has_since(unit.ref, cfg_by_repo.get((host, org, repo))):
+                        pending.append((unit, branch, tag, None))
+                        continue
                     ref_id = build_ref_id(host, org, repo, unit.kind, unit.ref or "", sha)
                     if _needs_index(ref_id, sha, status_map, content_commits, indexing_cutoff):
                         pending.append((unit, branch, tag, None))
@@ -479,6 +520,11 @@ def run_config(
                     branch = unit.ref if unit.kind == "branch" else None
                     tag = unit.ref if unit.kind == "tag" else None
                     commit = unit.ref if unit.kind == "commit" else None
+                    # Same bypass as the batchable path: a branch with a `since` history walk
+                    # must not be pre-clone skipped even if its tip is already indexed.
+                    if branch and _branch_has_since(unit.ref, cfg_by_repo.get((host, org, repo))):
+                        pending.append((unit, branch, tag, commit))
+                        continue
                     try:
                         skip, ref_for_id, _ = pre_clone_skip(
                             es, host, org, repo, branch, tag, commit, clone_url, force,
@@ -528,9 +574,54 @@ def run_config(
                     # prune" can't diverge. count/version/prerelease are cohort-relative, so the
                     # whole group's refs are scored together (e.g. v8.14.0-.2 are dropped once
                     # v8.14.3 is in the candidate set via patch:0).
-                    prospective: list[tuple[Unit, str | None, str | None, str | None, Marker]] = []
+                    #
+                    # Branch history walk: a branch unit with a `since` floor is expanded into
+                    # one entry per historical commit instead of using the single tip-date gate.
+                    # `list_branch_commits` walks the first-parent mainline back to the floor.
+                    # The original unit (which represents the branch tip in Phase 1's ls-remote
+                    # skip pass) is replaced by per-commit units here; the retention pre-filter
+                    # then trims the full cohort so only commits that would survive `retain` are
+                    # actually indexed (no index-then-prune waste). A branch without `since` and
+                    # non-branch refs are unchanged (single entry, tip-date gate as before).
+                    prospective: list[tuple[Unit, str | None, str | None, str | None, str | None, Marker]] = []
                     for unit, branch, tag, commit in pending:
                         ref_type = "branch" if branch else "tag" if tag else "commit"
+                        floor = _effective_since_floor(cfg, repo_dir, ref_type, unit.ref, now)
+
+                        if branch and floor is not None:
+                            # Expand the branch into its historical commits back to `floor`.
+                            branch_commits = list_branch_commits(repo_dir, branch, floor)
+                            if not branch_commits:
+                                # Walk returned nothing (e.g. subprocess error or branch too
+                                # new) -- fall through to the regular tip-only path below.
+                                pass
+                            else:
+                                # The original tip unit (from Phase 1) becomes the first entry
+                                # (newest commit); remaining historical commits each get a new
+                                # Unit. All share kind="branch" so retain.count-per-branch works.
+                                tip_sha, tip_cd = branch_commits[0]
+                                unit.ref = branch   # ensure ref is the branch name, not a SHA
+                                prospective.append((unit, branch, None, None, tip_sha, Marker(
+                                    id=f"branch:{branch}:{tip_sha}", ref=branch, ref_type="branch",
+                                    commit=tip_sha, commit_date=tip_cd, indexed_at=now,
+                                )))
+                                extra_units: list[Unit] = []
+                                for sha, cd in branch_commits[1:]:
+                                    hist_unit = Unit(
+                                        host=host, org=org, repo=repo,
+                                        ref=f"{branch}@{sha[:8]}", kind="branch",
+                                    )
+                                    extra_units.append(hist_unit)
+                                    prospective.append((hist_unit, branch, None, None, sha, Marker(
+                                        id=f"branch:{branch}:{sha}", ref=branch, ref_type="branch",
+                                        commit=sha, commit_date=cd, indexed_at=now,
+                                    )))
+                                if extra_units:
+                                    reporter.add_units(extra_units)
+                                continue  # skip the non-branch / no-since path below
+
+                        # Non-branch refs, branch without `since`, or branch whose walk returned
+                        # nothing: single entry with the tip-date gate.
                         info = _rev_info(repo_dir, unit.ref)
                         sha, cd = info if info else ("", None)
                         # For a commit selector, unit.ref is still the (possibly short) SHA
@@ -539,11 +630,10 @@ def run_config(
                         # against. Fall back to the prefix if resolution failed (checkout will
                         # then fail too, reported as a per-unit error).
                         marker_ref = sha if (ref_type == "commit" and sha) else unit.ref
-                        floor = _effective_since_floor(cfg, repo_dir, ref_type, unit.ref, now)
                         if floor is not None and cd is not None and cd < floor:
                             reporter.finish(unit, "skipped", detail=f"before since floor {floor.date()}")
                             continue
-                        prospective.append((unit, branch, tag, commit, Marker(
+                        prospective.append((unit, branch, tag, commit, None, Marker(
                             id=f"{ref_type}:{marker_ref}", ref=marker_ref, ref_type=ref_type,
                             commit=sha, commit_date=cd, indexed_at=now,
                         )))
@@ -553,7 +643,7 @@ def run_config(
                         decisions = plan_repo([m for *_, m in prospective], cfg, now)
                         doomed = {d.marker.id for d in decisions if d.action == "delete"}
 
-                    for unit, branch, tag, commit, marker in prospective:
+                    for unit, branch, tag, commit, at_commit, marker in prospective:
                         if _aborted.is_set():
                             break
                         if marker.id in doomed:
@@ -563,6 +653,7 @@ def run_config(
                             index_ref_in_dir(
                                 es, host, org, repo, repo_dir, branch, tag, commit,
                                 force, reporter, unit, retry_window=retry_window,
+                                at_commit=at_commit,
                             )
                         except KeyboardInterrupt:
                             break  # aborted mid-ref -- stop this group, leave the rest unmarked

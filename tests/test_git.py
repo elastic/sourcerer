@@ -1,4 +1,4 @@
-"""Unit tests for the blobless-clone and gc behavior in sourcerer.commands.index.git. These
+"""Unit tests for git helpers in sourcerer.commands.index.git. These
 call the real `git` binary against local repos (no network) rather than mocking subprocess,
 because the thing under test is git's own object-model behavior (does the filter really omit
 blobs, does checkout really fault them back in, does gc really reclaim orphaned objects) --
@@ -204,3 +204,183 @@ class TestGitGc:
         not_a_repo = tmp_path / "not_a_repo"
         not_a_repo.mkdir()
         gitmod._git_gc(not_a_repo)  # must not raise
+
+
+def _commit_dated(work_dir: pathlib.Path, name: str, content: bytes, message: str, date_iso: str) -> str:
+    """Commit a file at an explicit author + committer date (ISO-8601) and return the SHA."""
+    (work_dir / name).write_bytes(content)
+    _run("-C", str(work_dir), "add", name)
+    env_extra = f"GIT_COMMITTER_DATE={date_iso} GIT_AUTHOR_DATE={date_iso}"
+    subprocess.run(
+        f"{env_extra} git -C {work_dir} -c user.email=test@example.com -c user.name=test"
+        f" commit -q -m '{message}'",
+        shell=True, check=True, capture_output=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(work_dir), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+@pytest.fixture
+def branch_history_repo(tmp_path):
+    """A bare repo cloned locally with a branch of 5 commits spread across known dates.
+    Returns (clone_dir, [sha_newest, ..., sha_oldest], [date_newest, ..., date_oldest]).
+    The clone has an `origin/main` remote ref (bare clone with --bare).
+    Dates are 5 days apart ending today-ish; exact values don't matter, only their order."""
+    import datetime as dt
+
+    work = tmp_path / "work"
+    _run("init", "-q", "-b", "main", str(work))
+
+    # Commit oldest-first (2024-01-02 → 2024-01-06) so git history is coherent.
+    # shas[0] will be the oldest commit, shas[4] the newest.
+    dates_iso = [
+        f"2024-01-0{2 + i}T12:00:00+00:00" for i in range(5)
+    ]  # 2024-01-02, 03, 04, 05, 06 (oldest → newest)
+    shas = []
+    for i, d in enumerate(dates_iso):
+        sha = _commit_dated(work, f"f{i}.txt", f"content {i}".encode(), f"commit {i}", d)
+        shas.append(sha)
+
+    # shas[4]=newest(2024-01-06), shas[0]=oldest(2024-01-02).
+    # list_branch_commits returns newest-first, so expected order = reversed(shas).
+    shas_newest_first = list(reversed(shas))  # shas_newest_first[0] = newest
+
+    bare = tmp_path / "bare.git"
+    _run("clone", "--bare", "-q", str(work), str(bare))
+
+    # Create a non-bare clone so we have an `origin/main` ref to walk.
+    clone = tmp_path / "clone"
+    _run("clone", "-q", str(bare), str(clone))
+
+    return clone, shas_newest_first, dates_iso
+
+
+class TestListBranchCommits:
+    def test_returns_all_commits_when_floor_is_before_oldest(self, branch_history_repo):
+        """With a floor earlier than all commits, every commit is returned newest-first."""
+        import datetime as dt
+        clone, shas, _ = branch_history_repo
+        floor = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+        result = gitmod.list_branch_commits(clone, "main", floor)
+        result_shas = [sha for sha, _ in result]
+        assert result_shas == shas, f"Expected {shas}, got {result_shas}"
+
+    def test_far_past_floor_returns_all_commits(self, branch_history_repo):
+        """Regression: a pre-1970 floor (e.g. from `since.age: 100y`) must return ALL commits.
+
+        The original implementation used `git log --since`, whose approxidate parser silently
+        returns nothing for dates before the Unix epoch -- so a `100y` floor (~1926) yielded zero
+        commits and the branch fell back to tip-only. Filtering in Python fixes this."""
+        import datetime as dt
+        clone, shas, _ = branch_history_repo
+        floor = dt.datetime(1900, 1, 1, tzinfo=dt.timezone.utc)
+        result = gitmod.list_branch_commits(clone, "main", floor)
+        result_shas = [sha for sha, _ in result]
+        assert result_shas == shas, f"Expected all {len(shas)} commits, got {len(result_shas)}"
+
+    def test_floor_at_exact_commit_date_is_inclusive(self, branch_history_repo):
+        """A floor set to exactly a commit's committer date must INCLUDE that commit.
+
+        Asserts the inclusive `cd >= floor` boundary (matching _effective_since_floor's `cd < floor`
+        exclusion). git's `--since` was fuzzy/exclusive at the exact-timestamp boundary."""
+        import datetime as dt
+        clone, shas, _ = branch_history_repo
+        # shas[4] is the oldest commit (2024-01-02T12:00:00+00:00). Floor at its exact date
+        # must still include it -> all 5 commits returned.
+        floor = dt.datetime(2024, 1, 2, 12, 0, 0, tzinfo=dt.timezone.utc)
+        result = gitmod.list_branch_commits(clone, "main", floor)
+        result_shas = [sha for sha, _ in result]
+        assert shas[-1] in result_shas, "Commit at the exact floor date must be included"
+        assert result_shas == shas, f"Expected all {len(shas)} commits, got {len(result_shas)}"
+
+    def test_excludes_commits_before_floor(self, branch_history_repo):
+        """Floor between commit 2 and 3 (oldest-to-newest numbering) returns only the newer half."""
+        import datetime as dt
+        clone, shas, _ = branch_history_repo
+        # shas[0]=newest(2024-01-06), shas[4]=oldest(2024-01-02)
+        # Floor 2024-01-04 includes shas[0], [1], [2] (dates 06, 05, 04).
+        floor = dt.datetime(2024, 1, 4, tzinfo=dt.timezone.utc)
+        result = gitmod.list_branch_commits(clone, "main", floor)
+        result_shas = [sha for sha, _ in result]
+        assert result_shas == shas[:3], f"Expected {shas[:3]}, got {result_shas}"
+
+    def test_returns_empty_when_all_commits_before_floor(self, branch_history_repo):
+        """Floor after all commits returns an empty list."""
+        import datetime as dt
+        clone, shas, _ = branch_history_repo
+        floor = dt.datetime(2025, 1, 1, tzinfo=dt.timezone.utc)
+        result = gitmod.list_branch_commits(clone, "main", floor)
+        assert result == []
+
+    def test_results_are_newest_first(self, branch_history_repo):
+        """Commit dates in results must be non-increasing (newest-first order)."""
+        import datetime as dt
+        clone, shas, _ = branch_history_repo
+        floor = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+        result = gitmod.list_branch_commits(clone, "main", floor)
+        dates = [cd for _, cd in result]
+        assert dates == sorted(dates, reverse=True), "Results must be newest-first"
+
+    def test_returns_empty_for_nonexistent_branch(self, branch_history_repo):
+        """A nonexistent branch name degrades gracefully to an empty list."""
+        import datetime as dt
+        clone, _, _ = branch_history_repo
+        floor = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+        result = gitmod.list_branch_commits(clone, "does-not-exist", floor)
+        assert result == []
+
+    def test_returns_empty_for_non_repo(self, tmp_path):
+        """A path that is not a git repo degrades gracefully to an empty list."""
+        import datetime as dt
+        not_a_repo = tmp_path / "not_a_repo"
+        not_a_repo.mkdir()
+        floor = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+        result = gitmod.list_branch_commits(not_a_repo, "main", floor)
+        assert result == []
+
+    def test_first_parent_only_does_not_include_merged_commits(self, tmp_path):
+        """With a merge commit, --first-parent returns only the mainline (not feature branch)."""
+        import datetime as dt
+
+        work = tmp_path / "work"
+        _run("init", "-q", "-b", "main", str(work))
+        _commit_dated(work, "a.txt", b"a", "mainline commit A", "2024-01-01T12:00:00+00:00")
+        main_a_sha = subprocess.run(
+            ["git", "-C", str(work), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+        # Feature branch: diverges from mainline A, adds 2 commits.
+        _run("-C", str(work), "checkout", "-q", "-b", "feature")
+        _commit_dated(work, "f1.txt", b"f1", "feature commit F1", "2024-01-02T12:00:00+00:00")
+        _commit_dated(work, "f2.txt", b"f2", "feature commit F2", "2024-01-03T12:00:00+00:00")
+
+        # Merge feature back into main.
+        _run("-C", str(work), "checkout", "-q", "main")
+        subprocess.run(
+            ["git", "-C", str(work), "-c", "user.email=test@example.com", "-c", "user.name=test",
+             "merge", "--no-ff", "-m", "Merge feature", "feature"],
+            check=True, capture_output=True,
+        )
+        merge_sha = subprocess.run(
+            ["git", "-C", str(work), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+        bare = tmp_path / "bare.git"
+        _run("clone", "--bare", "-q", str(work), str(bare))
+        clone = tmp_path / "clone"
+        _run("clone", "-q", str(bare), str(clone))
+
+        floor = dt.datetime(2023, 1, 1, tzinfo=dt.timezone.utc)
+        result = gitmod.list_branch_commits(clone, "main", floor)
+        result_shas = [sha for sha, _ in result]
+
+        # --first-parent: only merge commit + mainline A, NOT the feature branch's F1/F2.
+        assert merge_sha in result_shas
+        assert main_a_sha in result_shas
+        assert len(result_shas) == 2, (
+            f"Expected 2 first-parent commits (merge + A), got {len(result_shas)}: {result_shas}"
+        )

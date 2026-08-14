@@ -117,6 +117,14 @@ class ProgressReporter:
         self.units = units
         self.total = len(units)
 
+    def add_units(self, new_units: list["Unit"]) -> None:
+        """Append units discovered after set_plan (e.g. per-commit expansions of a branch
+        with `since`). Thread-safe: process_group workers call this during Phase 2 after the
+        plan is already set. `total` is updated so progress fractions stay correct."""
+        with self._lock:
+            self.units.extend(new_units)
+            self.total += len(new_units)
+
     def reorder_group(self, host: str, org: str, repo: str, dates: dict[tuple[str, str], int]) -> None:
         """Reorder this repo's units newest-first by creation date to match the
         actual indexing order (which also uses `dates`). Called once per repo after

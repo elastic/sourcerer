@@ -22,7 +22,7 @@ from ...planner import Marker, content_delete_set, plan_repo
 from ...progress import Unit
 from ...queries import fetch_markers
 from ...utils import ES_ERRORS
-from .git import _rev_info, prepared_repo
+from .git import _rev_info, list_branch_commits, prepared_repo
 from .markers import (
     build_ref_id, commit_fully_indexed, commits_with_content,
     markers_status_by_id, _needs_index,
@@ -63,8 +63,13 @@ def _dry_run_repo(
         # Pass 1: resolve each ref's commit SHA and date from the local clone.
         # Branches resolve to their fetched origin tip -- the same commit checkout_branch would
         # land on -- not a stale local branch; tags dereference to their commit (matching
-        # write_ref_marker).
-        resolved: list[tuple[Unit, str, str, datetime.datetime | None]] = []  # (unit, ref_type, sha, cd)
+        # write_ref_marker). Branches with a `since` floor are expanded into their full
+        # first-parent history back to the floor, matching what a real run would index.
+        # Tuple: (unit, ref_type, sha, cd, marker_ref) where marker_ref is what the ref marker
+        # stores (branch name for branches, unit.ref for tags/commits). For expanded branch
+        # history the display ref (unit.ref) may be "main@abc12345" but marker_ref is "main" so
+        # plan_repo groups all commits under the same branch for retain.count-per-branch scoring.
+        resolved: list[tuple[Unit, str, str, datetime.datetime | None, str]] = []
         for unit in group:
             ref_type = unit.kind
             rev = f"origin/{unit.ref}" if ref_type == "branch" else unit.ref
@@ -73,17 +78,37 @@ def _dry_run_repo(
             if not sha:
                 rows.append((unit, "error", "could not resolve ref", None, None))
                 continue
-            resolved.append((unit, ref_type, sha, cd))
+
+            if ref_type == "branch" and cfg is not None:
+                floor = _effective_since_floor(cfg, repo_dir, ref_type, unit.ref, now)
+                if floor is not None:
+                    branch_commits = list_branch_commits(repo_dir, unit.ref, floor)
+                    if branch_commits:
+                        branch_name = unit.ref
+                        # Expand: tip unit first, then synthetic units for each historical commit.
+                        # marker_ref = branch name for all, so plan_repo retain.count groups them.
+                        for i, (bsha, bcd) in enumerate(branch_commits):
+                            hist_ref = branch_name if i == 0 else f"{branch_name}@{bsha[:8]}"
+                            hist_unit = unit if i == 0 else Unit(
+                                host=unit.host, org=unit.org, repo=unit.repo,
+                                ref=hist_ref, kind="branch",
+                            )
+                            resolved.append((hist_unit, "branch", bsha, bcd, branch_name))
+                        continue  # skip the single-tip entry below
+
+            resolved.append((unit, ref_type, sha, cd, unit.ref or ""))
 
         # Pass 2: batched ES skip check -- one markers lookup + one content-presence check for
         # the whole group instead of per-ref should_index calls. On ES error, fall back to
         # treating every ref as needing indexing (the post-clone guard remains authoritative).
+        # marker_ref is the branch/tag/commit ref stored in the ES marker (branch name for all
+        # commits of an expanded branch, so pre-existing markers are looked up correctly).
         status_map: dict[str, dict] = {}
         content_commits: set[str] = set()
         if not force and resolved:
             ref_ids = [
-                build_ref_id(host, org, repo, ref_type, unit.ref or "", sha)
-                for unit, ref_type, sha, _ in resolved
+                build_ref_id(host, org, repo, ref_type, marker_ref, sha)
+                for unit, ref_type, sha, _, marker_ref in resolved
             ]
             try:
                 status_map = markers_status_by_id(es, ref_ids)
@@ -97,31 +122,39 @@ def _dry_run_repo(
 
         # Pass 3: classify resolved refs.
         indexing_cutoff = (now - retry_window) if retry_window is not None else None
-        pending: list[tuple[Unit, str, str, datetime.datetime | None]] = []
-        for unit, ref_type, sha, cd in resolved:
-            ref_id = build_ref_id(host, org, repo, ref_type, unit.ref or "", sha)
+        pending: list[tuple[Unit, str, str, datetime.datetime | None, str]] = []
+        for unit, ref_type, sha, cd, marker_ref in resolved:
+            ref_id = build_ref_id(host, org, repo, ref_type, marker_ref, sha)
             if not force and not _needs_index(ref_id, sha, status_map, content_commits, indexing_cutoff):
                 rows.append((unit, "up-to-date", "already indexed", sha, cd))
                 continue
+            # Since-floor gate for non-expanded refs (tags, commits, branches without `since` or
+            # where the walk returned nothing). Expanded branch entries are already floor-filtered
+            # by list_branch_commits (git --since). Use unit.ref for selector matching: expanded
+            # history units use a display ref like "main@abc" that won't match a branch selector,
+            # so _effective_since_floor returns None and they pass through (their date is already
+            # guaranteed >= floor by the walk).
             floor = _effective_since_floor(cfg, repo_dir, ref_type, unit.ref, now)
             if floor is not None and cd is not None and cd < floor:
                 rows.append((unit, "skip", f"before since floor {floor.date()}", sha, cd))
                 continue
-            pending.append((unit, ref_type, sha, cd))
+            pending.append((unit, ref_type, sha, cd, marker_ref))
 
         # Prune-aware pre-filter over the fresh candidates, exactly as process_group does before
         # indexing: a ref this run would immediately re-prune (e.g. an older patch superseded by a
         # newer one also new this run) is never indexed. Scored over the candidate set only.
+        # marker_ref is used for Marker.ref and Marker.id so retain.count-per-branch groups all
+        # expanded history entries under the same branch name, matching the real indexing path.
         doomed: set[str] = set()
         if cfg is not None and pending:
             candidates = [
-                Marker(id=f"{rt}:{u.ref}", ref=u.ref, ref_type=rt, commit=sha, commit_date=cd, indexed_at=now)
-                for (u, rt, sha, cd) in pending
+                Marker(id=f"{rt}:{mr}:{sha}", ref=mr, ref_type=rt, commit=sha, commit_date=cd, indexed_at=now)
+                for (u, rt, sha, cd, mr) in pending
             ]
             doomed = {d.marker.id for d in plan_repo(candidates, cfg, now) if d.action == "delete"}
 
-        for unit, ref_type, sha, cd in pending:
-            if f"{ref_type}:{unit.ref}" in doomed:
+        for unit, ref_type, sha, cd, marker_ref in pending:
+            if f"{ref_type}:{marker_ref}:{sha}" in doomed:
                 rows.append((unit, "skip", "pruned by retain", sha, cd))
                 continue
             # Content is keyed by commit: if another ref already fully indexed this exact commit
@@ -131,8 +164,8 @@ def _dry_run_repo(
             shared = not force and commit_fully_indexed(es, host, org, repo, sha)
             rows.append((unit, "reuse" if shared else "index", "content shared" if shared else "", sha, cd))
             synth.append(Marker(
-                id=build_ref_id(host, org, repo, ref_type, unit.ref, sha),
-                ref=unit.ref, ref_type=ref_type, commit=sha, commit_date=cd, indexed_at=now,
+                id=build_ref_id(host, org, repo, ref_type, marker_ref, sha),
+                ref=marker_ref, ref_type=ref_type, commit=sha, commit_date=cd, indexed_at=now,
             ))
 
         # Prune preview: the markers that would exist AFTER this run = existing markers (older

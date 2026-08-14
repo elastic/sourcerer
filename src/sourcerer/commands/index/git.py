@@ -516,3 +516,55 @@ def _commit_date_of(repo_dir: pathlib.Path, rev: str) -> datetime.datetime | Non
     remote branch (origin/<rev>). Returns None if the rev can't be resolved."""
     info = _rev_info(repo_dir, rev)
     return info[1] if info else None
+
+
+def list_branch_commits(
+    repo_dir: pathlib.Path,
+    branch: str,
+    since_floor: datetime.datetime,
+) -> list[tuple[str, datetime.datetime]]:
+    """Return (commit_sha, committer_date) pairs for commits on the first-parent mainline of
+    origin/<branch> whose committer date is >= since_floor (inclusive), newest-first.
+
+    Uses `--first-parent` so only the branch's own mainline is walked — merged feature-branch
+    commits are collapsed to the merge commit and not enumerated separately. This matches the
+    intuitive "history of main" and avoids a combinatorial explosion on repos with heavy branching.
+
+    The date cutoff is applied in Python (cd >= since_floor), NOT via `git log --since`. Git's
+    `--since` uses approxidate, which silently returns nothing for pre-1970 floors (e.g.
+    `since.age: 100y` -> a ~1926 floor) and is fuzzy/exclusive at the exact-timestamp boundary.
+    Filtering here gives exact, inclusive semantics matching `_effective_since_floor`'s `cd < floor`
+    exclusion, for any floor. Reading the full first-parent list is cheap -- it is commit metadata
+    (SHA + date) only, no blobs -- and the retention pre-filter still bounds what actually gets
+    indexed.
+
+    Returns [] on any subprocess failure so callers degrade gracefully (the tip-only fallback
+    is used instead)."""
+    try:
+        out = subprocess.run(
+            [
+                "git", "-C", str(repo_dir), "log",
+                "--first-parent",
+                "--format=%H%x09%cI",
+                f"origin/{branch}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return []
+    results: list[tuple[str, datetime.datetime]] = []
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        sha, iso = parts
+        cd = _parse_dt(iso)
+        # git log is newest-first, so the kept subset stays newest-first.
+        if cd is not None and cd >= since_floor:
+            results.append((sha, cd))
+    return results

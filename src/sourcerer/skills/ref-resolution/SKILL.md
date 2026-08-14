@@ -41,5 +41,16 @@ Resolve each ref independently using the steps above. Run content queries agains
 ### Explicit ref (branch name, exact tag, commit hash)
 Use as given. If it is a branch, call `refs.list` with `git_ref_type: branch` to confirm it exists and retrieve its current commit. If it is a tag, confirm and get its commit. If it is a commit hash, use it directly - optionally confirm with `git_ref_type: commit` if it may be a pinned commit rather than one reached via a branch/tag.
 
+### Branch as of a specific date (e.g. "main as it was on 2024-03-01")
+When a branch was indexed with `since` (history walk), multiple snapshots of the branch exist —
+one per historical commit. Resolve "branch as of date D" like this:
+1. Call `refs.list` with `git_ref_type: branch` and `git_ref: <branch>`.
+2. From the results, filter to markers with `commit_date <= D` and `status: complete`.
+3. Pick the marker with the **latest** `commit_date` among those (the branch state at the closest point on or before D).
+4. Use that marker's `git.commit` for content queries.
+
+If only one marker exists for the branch (tip-only indexing, no `since`), state that historical
+snapshots are unavailable for that branch.
+
 ## Pinning the commit
 Once a ref resolves to a `git.commit`, use that commit in every subsequent `sourcerer.code.*` and `sourcerer.files.*` call for that repo and ref. Re-invoke this skill only when the question introduces a new or additional ref.
