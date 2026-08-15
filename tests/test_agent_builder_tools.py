@@ -64,6 +64,16 @@ def test_content_tools_use_universal_ref_key_join_query():
         assert "defaultValue" not in params["git_ref_key"]
 
 
+def test_refs_list_default_status_also_surfaces_incremental_ready():
+    # Incremental join docs are never status:"complete" (only "ready"/"indexing" -- see
+    # markers.write_incremental_ready/write_incremental_indexing), so the default (no-arg)
+    # call must not silently omit every incremental branch.
+    tool = _tools()["sourcerer.refs.list"]
+    query = tool["configuration"]["query"]
+    assert 'status == "ready"' in query
+    assert tool["configuration"]["params"]["status"]["defaultValue"] == "complete"
+
+
 def test_output_keeps_git_host():
     # Every tool that KEEPs git.org must also KEEP git.host (before it), so host reaches output.
     for tid, tool in _tools().items():

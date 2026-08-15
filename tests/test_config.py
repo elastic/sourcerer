@@ -53,7 +53,7 @@ def _git(host="github", org="acme", repo="widgets", ref_type="branch"):
 
 
 def _source(host="github", org="acme", repo="widgets", ref_type="branch",
-            match="main", since=None, retain=None, omit_match=False, update=None):
+            match="main", since=None, retain=None, omit_match=False, update=None, index=None):
     src = {"git": _git(host, org, repo, ref_type)}
     if not omit_match:
         src["match"] = match
@@ -63,6 +63,8 @@ def _source(host="github", org="acme", repo="widgets", ref_type="branch",
         src["retain"] = retain
     if update is not None:
         src["update"] = update
+    if index is not None:
+        src["index"] = index
     return src
 
 
@@ -219,6 +221,14 @@ class TestParseUpdateMode:
     def test_incremental_with_retain_raises(self):
         with pytest.raises(ValueError, match="cannot be combined with 'retain'"):
             _cfg([_source(ref_type="branch", update="incremental", retain={"count": 5})])
+
+    def test_incremental_with_commit_level_index_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'index.level: commit'"):
+            _cfg([_source(ref_type="branch", update="incremental", index={"level": "commit"})])
+
+    def test_incremental_with_repo_level_index_is_fine(self):
+        cfg = _cfg([_source(ref_type="branch", update="incremental", index={"level": "repo"})])
+        assert cfg.repos[0].selectors[0].update == "incremental"
 
 
 class TestParseCommitSource:
