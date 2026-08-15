@@ -11,8 +11,8 @@ import datetime
 from elasticsearch import Elasticsearch, NotFoundError
 
 # App packages
-from ...indices import FILES_ALIAS, REFS_ALIAS, REFS_INDEX, files_index
-from ...utils import make_doc_id
+from ...indices import FILES_ALIAS, LINES_ALIAS, REFS_ALIAS, REFS_INDEX, files_index, lines_index
+from ...utils import build_ref_key, make_doc_id
 from .git import resolve_remote
 
 
@@ -534,6 +534,490 @@ def pre_clone_skip(
     ):
         return True, ref_for_id, remote_sha
     return False, ref_for_id, remote_sha
+
+
+# --- refs join docs (git.ref_key), keyed by `_id = ref_key` -------------------------------
+# One document per `ref_key` (INV-004): snapshot content's join doc lives at `_id = <commit>`;
+# an incremental branch's single join doc lives at `_id = {host}~{org}~{repo}~{ref}` and its
+# `git.commit` is the branch's live HEAD, advanced only by a two-phase indexing -> ready
+# publication (INV-006). These are a DISTINCT id space from `build_ref_id`'s hashed, append-only
+# ref-name markers above (untouched -- they still drive `since`/retention history); a join doc's
+# `_id` is a plain, unhashed `ref_key` string, which a `build_ref_id` hash can never collide with.
+
+ERROR_MAX_LEN = 2000  # bound stored failure text so a giant git/ES error can't bloat the doc
+
+
+def write_snapshot_join_doc(
+    es: Elasticsearch,
+    host: str,
+    org: str,
+    repo: str,
+    ref_type: str,
+    ref: str,
+    commit_sha: str,
+    commit_date_iso: str | None,
+    refresh: bool = False,
+) -> None:
+    """Write (or idempotently re-write) the snapshot refs join doc: `_id = commit_sha`,
+    `git.ref_key = commit_sha`, `git.commit = commit_sha` (the commit is its own citable
+    identity). `ref`/`ref_type` record the ref that produced this write (informational only --
+    multiple refs resolving to the same commit all write the same doc, so re-writes are a
+    no-op change)."""
+    doc = {
+        "git": {
+            "ref_key": commit_sha,
+            "host": host,
+            "org": org,
+            "repo": repo,
+            "ref": ref,
+            "ref_type": ref_type,
+            "commit": commit_sha,
+            "commit_date": commit_date_iso,
+        },
+        "update_mode": "snapshot",
+        "status": "complete",
+    }
+    es.index(index=REFS_INDEX, id=commit_sha, document=doc, refresh=refresh)
+
+
+def read_incremental_ref(es: Elasticsearch, host: str, org: str, repo: str, ref: str) -> dict | None:
+    """The branch's incremental join doc `_source`, or None if never indexed. A real-time GET
+    (by `_id = ref_key`), so it reflects the last write even without a refresh."""
+    try:
+        return es.get(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref))["_source"]
+    except NotFoundError:
+        return None
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _build_incremental_join_doc(
+    host: str,
+    org: str,
+    repo: str,
+    ref: str,
+    *,
+    status: str,
+    commit: str | None,
+    target_commit: str | None = None,
+    commit_date_iso: str | None = None,
+    files_count: int = 0,
+    lines_count: int = 0,
+    indexed_at: str | None = None,
+    indexing_started_at: str | None = None,
+    failed_at: str | None = None,
+    error: str | None = None,
+) -> dict:
+    return {
+        "git": {
+            "ref_key": build_ref_key(host, org, repo, ref),
+            "host": host,
+            "org": org,
+            "repo": repo,
+            "ref": ref,
+            "ref_type": "branch",
+            "commit": commit,
+            "target_commit": target_commit,
+            "commit_date": commit_date_iso,
+        },
+        "update_mode": "incremental",
+        "status": status,
+        "files_count": files_count,
+        "lines_count": lines_count,
+        "indexed_at": indexed_at,
+        "indexing_started_at": indexing_started_at,
+        "failed_at": failed_at,
+        "error": error[:ERROR_MAX_LEN] if error else None,
+    }
+
+
+def write_incremental_indexing(
+    es: Elasticsearch,
+    host: str,
+    org: str,
+    repo: str,
+    ref: str,
+    completed_commit: str | None,
+    target_commit: str,
+    prior: dict | None = None,
+    refresh: bool = False,
+) -> None:
+    """Publish `status: indexing`: the completed pointer (`git.commit`) stays at the LAST
+    completed SHA (or None on a first index) while `git.target_commit` advertises the candidate
+    SHA the run is advancing to. A failed run never overwrites `git.commit` with `target_commit`
+    (INV-006) -- only `write_incremental_ready` does that, after delete+index+refresh succeed."""
+    prior = prior or {}
+    pg = prior.get("git", {})
+    doc = _build_incremental_join_doc(
+        host, org, repo, ref,
+        status="indexing",
+        commit=completed_commit,
+        target_commit=target_commit,
+        commit_date_iso=pg.get("commit_date"),
+        files_count=prior.get("files_count", 0),
+        lines_count=prior.get("lines_count", 0),
+        indexed_at=prior.get("indexed_at"),
+        indexing_started_at=_now_iso(),
+        failed_at=prior.get("failed_at"),
+        error=prior.get("error"),
+    )
+    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref), document=doc, refresh=refresh)
+
+
+def write_incremental_ready(
+    es: Elasticsearch,
+    host: str,
+    org: str,
+    repo: str,
+    ref: str,
+    commit: str,
+    commit_date_iso: str | None,
+    files_count: int,
+    lines_count: int,
+    refresh: bool = True,
+) -> None:
+    """Publish `status: ready` at the NEW completed commit, clearing `target_commit` and any
+    prior failure fields. This is the pointer-advancing publication boundary (INV-006): callers
+    must delete+index+refresh the content indices FIRST, then call this."""
+    doc = _build_incremental_join_doc(
+        host, org, repo, ref,
+        status="ready",
+        commit=commit,
+        target_commit=None,
+        commit_date_iso=commit_date_iso,
+        files_count=files_count,
+        lines_count=lines_count,
+        indexed_at=_now_iso(),
+        indexing_started_at=None,
+        failed_at=None,
+        error=None,
+    )
+    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref), document=doc, refresh=refresh)
+
+
+def write_incremental_failed(
+    es: Elasticsearch,
+    host: str,
+    org: str,
+    repo: str,
+    ref: str,
+    completed_commit: str | None,
+    target_commit: str | None,
+    error: str,
+    prior: dict | None = None,
+    refresh: bool = False,
+) -> None:
+    """Record a failed update WITHOUT advancing the completed pointer: status stays `indexing`,
+    `git.commit` remains the last completed SHA, and a bounded `error`/`failed_at` are stored for
+    diagnosis (INV-006). The next run retries old -> current and clears these on success."""
+    prior = prior or {}
+    pg = prior.get("git", {})
+    doc = _build_incremental_join_doc(
+        host, org, repo, ref,
+        status="indexing",
+        commit=completed_commit,
+        target_commit=target_commit,
+        commit_date_iso=pg.get("commit_date"),
+        files_count=prior.get("files_count", 0),
+        lines_count=prior.get("lines_count", 0),
+        indexed_at=prior.get("indexed_at"),
+        indexing_started_at=prior.get("indexing_started_at") or _now_iso(),
+        failed_at=_now_iso(),
+        error=error,
+    )
+    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref), document=doc, refresh=refresh)
+
+
+def _delete_by_query_sync(es: Elasticsearch, index: str, query: dict, refresh: bool) -> None:
+    """Synchronous delete-by-query used by the incremental path. Unlike the async prune
+    deletion, this waits for completion so a subsequent re-index can't race a still-running
+    delete, and uses `conflicts="proceed"` so a concurrent version bump doesn't abort the batch.
+    A missing index (first index, before any content exists) is ignored."""
+    try:
+        es.delete_by_query(
+            index=index,
+            query=query,
+            wait_for_completion=True,
+            conflicts="proceed",
+            refresh=refresh,
+            ignore_unavailable=True,
+            allow_no_indices=True,
+        )
+    except NotFoundError:
+        pass
+
+
+def delete_incremental_paths(
+    es: Elasticsearch,
+    host: str,
+    org: str,
+    repo: str,
+    ref: str,
+    paths,
+    index_level: str = "repo",
+    index_suffix: str | None = None,
+    refresh: bool = False,
+) -> None:
+    """Synchronously delete the file and line docs for `paths` on this exact branch. Scoped by
+    the exact `git.ref_key` (a single keyword term, so one branch's docs can never bleed into
+    another's -- INV-008) plus a `file.path` terms filter, never a wildcard. A no-op for an
+    empty path set."""
+    paths = list(paths)
+    if not paths:
+        return
+    ref_key = build_ref_key(host, org, repo, ref)
+    query = {
+        "bool": {
+            "filter": [
+                {"term": {"git.ref_key": ref_key}},
+                {"terms": {"file.path": paths}},
+            ]
+        }
+    }
+    for index in (
+        files_index(host, org, repo, None, index_level, index_suffix),
+        lines_index(host, org, repo, None, index_level, index_suffix),
+    ):
+        _delete_by_query_sync(es, index, query, refresh)
+
+
+def delete_incremental_branch(
+    es: Elasticsearch,
+    host: str,
+    org: str,
+    repo: str,
+    ref: str,
+    index_level: str = "repo",
+    index_suffix: str | None = None,
+    refresh: bool = False,
+) -> None:
+    """Delete EVERY incremental content doc for this branch (full namespace), scoped by the
+    exact `git.ref_key` (INV-008). Used for the initial index and the missing-diff-base rebuild
+    (INV-007)."""
+    ref_key = build_ref_key(host, org, repo, ref)
+    query = {"bool": {"filter": [{"term": {"git.ref_key": ref_key}}]}}
+    for index in (
+        files_index(host, org, repo, None, index_level, index_suffix),
+        lines_index(host, org, repo, None, index_level, index_suffix),
+    ):
+        _delete_by_query_sync(es, index, query, refresh)
+
+
+def count_incremental_branch_docs(
+    es: Elasticsearch, host: str, org: str, repo: str, ref: str,
+    index_level: str = "repo", index_suffix: str | None = None,
+) -> tuple[int, int]:
+    """Authoritative (files, lines) totals for a branch's current incremental view, counted by
+    exact `git.ref_key`. Call AFTER refreshing the content indices so counts reflect the just-
+    applied deletes and indexes -- these become the ready marker's files_count/lines_count.
+    Returns 0 for an index that does not exist yet."""
+    ref_key = build_ref_key(host, org, repo, ref)
+    query = {"bool": {"filter": [{"term": {"git.ref_key": ref_key}}]}}
+
+    def _count(index: str) -> int:
+        try:
+            return int(es.count(index=index, query=query)["count"])
+        except NotFoundError:
+            return 0
+
+    return (
+        _count(files_index(host, org, repo, None, index_level, index_suffix)),
+        _count(lines_index(host, org, repo, None, index_level, index_suffix)),
+    )
+
+
+def refresh_incremental_content(
+    es: Elasticsearch, host: str, org: str, repo: str,
+    index_level: str = "repo", index_suffix: str | None = None,
+) -> None:
+    """Make the branch's just-written incremental content visible before the ready pointer is
+    published (INV-006: content refresh precedes the final refs write). Best-effort over
+    missing indices."""
+    es.indices.refresh(
+        index=[
+            files_index(host, org, repo, None, index_level, index_suffix),
+            lines_index(host, org, repo, None, index_level, index_suffix),
+        ],
+        ignore_unavailable=True,
+        allow_no_indices=True,
+    )
+
+
+# --- one-time upgrade backfill (default-on; --no-backfill opts out) -----------------------
+# Stamps `git.ref_key`/`update_mode` onto pre-existing snapshot content that predates this
+# feature, migrates the refs index mapping, and creates the missing `_id = commit` join docs
+# (INV-009/INV-010). Safe to run on every `index` invocation: both the content update and the
+# join-doc creation are no-ops the second time.
+
+def backfill_snapshot_ref_keys(es: Elasticsearch, host: str, org: str, repo: str) -> int:
+    """Idempotent `_update_by_query` stamping `git.ref_key = git.commit` + `update_mode:
+    "snapshot"` onto this repo's content docs that lack `git.ref_key` (pre-upgrade data).
+    Returns the total number of docs updated across the files and lines aliases; 0 on a repeat
+    run (INV-009) since the `must_not: exists` filter then matches nothing."""
+    query = {
+        "bool": {
+            "filter": [
+                {"term": {"git.host": host}},
+                {"term": {"git.org": org}},
+                {"term": {"git.repo": repo}},
+            ],
+            "must_not": [{"exists": {"field": "git.ref_key"}}],
+        }
+    }
+    script = {
+        "source": (
+            "ctx._source.git.ref_key = ctx._source.git.commit; "
+            "ctx._source.update_mode = 'snapshot';"
+        ),
+        "lang": "painless",
+    }
+    total = 0
+    for index in (FILES_ALIAS, LINES_ALIAS):
+        try:
+            resp = es.update_by_query(
+                index=index, query=query, script=script,
+                wait_for_completion=True, conflicts="proceed", refresh=True,
+                ignore_unavailable=True, allow_no_indices=True,
+            )
+            total += int(resp.get("updated", 0))
+        except NotFoundError:
+            pass
+    return total
+
+
+def distinct_commits_for_repo(es: Elasticsearch, host: str, org: str, repo: str) -> set[str]:
+    """Every distinct `git.commit` present in this repo's content, via a terms aggregation.
+    Used by the backfill to find every already-indexed snapshot commit that needs a refs join
+    doc (INV-010). Returns an empty set when the files index doesn't exist yet."""
+    query = {
+        "bool": {
+            "filter": [
+                {"term": {"git.host": host}},
+                {"term": {"git.org": org}},
+                {"term": {"git.repo": repo}},
+            ]
+        }
+    }
+    try:
+        resp = es.search(
+            index=FILES_ALIAS, size=0, query=query,
+            aggs={"commits": {"terms": {"field": "git.commit", "size": 10000}}},
+        )
+    except NotFoundError:
+        return set()
+    return {b["key"] for b in resp["aggregations"]["commits"]["buckets"]}
+
+
+def commits_with_join_doc(es: Elasticsearch, commits: set[str]) -> set[str]:
+    """The subset of `commits` that already have a `_id = commit` refs join doc. A batched
+    ids lookup, the join-doc analogue of `commits_with_content`."""
+    if not commits:
+        return set()
+    try:
+        resp = es.search(
+            index=REFS_ALIAS, size=len(commits), query={"ids": {"values": sorted(commits)}},
+            source_includes=[],
+        )
+    except NotFoundError:
+        return set()
+    return {hit["_id"] for hit in resp["hits"]["hits"]}
+
+
+def backfill_refs_join_docs(es: Elasticsearch, host: str, org: str, repo: str) -> int:
+    """Ensure a snapshot `_id = commit` join doc exists for every distinct content commit in
+    this repo (INV-010). For each missing commit, an existing `build_ref_id` marker (if any)
+    supplies the ref/ref_type/commit_date it was originally indexed under; falls back to
+    generic values if none is found (the content is authoritative either way -- the join doc's
+    ref/ref_type are informational). Returns the number of join docs created; 0 on a repeat run
+    (INV-009)."""
+    commits = distinct_commits_for_repo(es, host, org, repo)
+    if not commits:
+        return 0
+    missing = commits - commits_with_join_doc(es, commits)
+    created = 0
+    for commit_sha in missing:
+        query = {
+            "bool": {
+                "filter": [
+                    {"term": {"git.host": host}},
+                    {"term": {"git.org": org}},
+                    {"term": {"git.repo": repo}},
+                    {"term": {"git.commit": commit_sha}},
+                    {"term": {"status": "complete"}},
+                ]
+            }
+        }
+        try:
+            resp = es.search(index=REFS_ALIAS, size=1, query=query)
+        except NotFoundError:
+            resp = {"hits": {"hits": []}}
+        hits = resp["hits"]["hits"]
+        if hits:
+            src_git = hits[0]["_source"].get("git", {})
+            ref = src_git.get("ref") or commit_sha
+            ref_type = src_git.get("ref_type") or "commit"
+            commit_date_iso = src_git.get("commit_date")
+        else:
+            ref, ref_type, commit_date_iso = commit_sha, "commit", None
+        write_snapshot_join_doc(es, host, org, repo, ref_type, ref, commit_sha, commit_date_iso)
+        created += 1
+    if created:
+        # Refresh so a uniqueness gate run immediately afterward (see command._run_uniqueness_gate)
+        # sees every join doc just created rather than racing the refs index's refresh interval.
+        try:
+            es.indices.refresh(index=REFS_INDEX)
+        except NotFoundError:
+            pass
+    return created
+
+
+def apply_refs_index_mapping(es: Elasticsearch, mapping: dict) -> None:
+    """Apply an updated mapping to the physical REFS_INDEX. A `put_index_template` change alone
+    (see `setup`) only affects indices created AFTER the change -- an existing repo's refs index
+    predates the `git.ref_key` field and needs its mapping updated explicitly so the field is
+    typed as intended rather than dynamically guessed on first write. A no-op if the index
+    doesn't exist yet."""
+    try:
+        es.indices.put_mapping(index=REFS_INDEX, properties=mapping.get("properties", {}))
+    except NotFoundError:
+        pass
+
+
+def apply_content_index_mapping(es: Elasticsearch, files_mapping: dict, lines_mapping: dict) -> None:
+    """Apply the updated files/lines template mappings to every EXISTING physical content index
+    behind the read aliases. This must run BEFORE `backfill_snapshot_ref_keys` writes
+    `git.ref_key`/`update_mode` onto pre-existing content: an index created before this feature
+    has no explicit mapping for those fields, so the first `_update_by_query` write would
+    otherwise fall back to ES's dynamic string mapping (`text`, no fielddata) instead of the
+    `keyword` type the template defines -- silently breaking every later `git.ref_key`
+    aggregation/sort/exact-match query. `put_mapping` against an alias updates every backing
+    index it resolves to. A no-op if neither alias has any backing index yet."""
+    for alias, mapping in ((FILES_ALIAS, files_mapping), (LINES_ALIAS, lines_mapping)):
+        try:
+            es.indices.put_mapping(index=alias, properties=mapping.get("properties", {}))
+        except NotFoundError:
+            pass
+
+
+def backfill_repo(
+    es: Elasticsearch, host: str, org: str, repo: str, refs_mapping: dict | None = None,
+    files_mapping: dict | None = None, lines_mapping: dict | None = None,
+) -> dict:
+    """Run the full one-time upgrade for one repo: apply the updated content/refs index
+    mappings (once, if given -- must happen BEFORE the content update so the new fields land
+    typed correctly rather than dynamically guessed), stamp `ref_key`/`update_mode` onto
+    pre-existing snapshot content (idempotent), and create a join doc for every already-indexed
+    commit that lacks one. Returns a small summary dict for reporting; every field is 0 on a
+    repeat run (INV-009)."""
+    if files_mapping is not None and lines_mapping is not None:
+        apply_content_index_mapping(es, files_mapping, lines_mapping)
+    if refs_mapping is not None:
+        apply_refs_index_mapping(es, refs_mapping)
+    updated = backfill_snapshot_ref_keys(es, host, org, repo)
+    created = backfill_refs_join_docs(es, host, org, repo)
+    return {"content_updated": updated, "join_docs_created": created}
 
 
 def resolve_head(es: Elasticsearch, host: str, org: str, repo: str, ref_type: str, ref: str) -> dict | None:

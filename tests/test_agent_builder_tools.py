@@ -40,6 +40,30 @@ def test_git_host_filtered_before_git_org():
             f"{tid} filters git.org before git.host"
 
 
+_CONTENT_TOOL_IDS = (
+    "sourcerer.code.search", "sourcerer.code.grep",
+    "sourcerer.files.cat", "sourcerer.files.head", "sourcerer.files.tail",
+    "sourcerer.files.ls", "sourcerer.files.tree",
+    "sourcerer.files.read_lines", "sourcerer.files.wc",
+)
+
+
+def test_content_tools_use_universal_ref_key_join_query():
+    # INV-005: every content tool's WHERE runs the identical `git.ref_key == ?git_ref_key`
+    # shape with no update_mode/mode conditional, and joins sourcerer-refs on git.ref_key to
+    # resolve the commit for both snapshot and incremental content.
+    tools = _tools()
+    for tid in _CONTENT_TOOL_IDS:
+        query = tools[tid]["configuration"]["query"]
+        params = tools[tid]["configuration"]["params"]
+        assert "update_mode" not in query, f"{tid} query has an update_mode conditional"
+        assert "git.ref_key == ?git_ref_key" in query, f"{tid} missing the exact ref_key filter"
+        assert "| LOOKUP JOIN sourcerer-refs ON git.ref_key" in query, f"{tid} missing the universal join"
+        assert "git_commit" not in params, f"{tid} still has the old git_commit param"
+        assert params["git_ref_key"]["optional"] is False
+        assert "defaultValue" not in params["git_ref_key"]
+
+
 def test_output_keeps_git_host():
     # Every tool that KEEPs git.org must also KEEP git.host (before it), so host reaches output.
     for tid, tool in _tools().items():

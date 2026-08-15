@@ -59,6 +59,9 @@
             },
             "commit_date": {
               "type": "date"
+            },
+            "ref_key": {
+              "type": "keyword"
             }
           }
         },

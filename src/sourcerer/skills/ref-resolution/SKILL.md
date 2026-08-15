@@ -52,5 +52,21 @@ one per historical commit. Resolve "branch as of date D" like this:
 If only one marker exists for the branch (tip-only indexing, no `since`), state that historical
 snapshots are unavailable for that branch.
 
-## Pinning the commit
-Once a ref resolves to a `git.commit`, use that commit in every subsequent `sourcerer.code.*` and `sourcerer.files.*` call for that repo and ref. Re-invoke this skill only when the question introduces a new or additional ref.
+## Pinning the ref_key
+Every content query (`sourcerer.code.*` and `sourcerer.files.*`) takes the same single param,
+`git_ref_key`, and runs the identical universal join query underneath
+(`WHERE git.ref_key == ?git_ref_key | LOOKUP JOIN sourcerer-refs ON git.ref_key`) regardless of
+whether the source is indexed as `snapshot` or `incremental`. Derive it once a ref is resolved:
+
+- **Snapshot** (the default; most tags and one-off branch indexes): resolve the ref to its
+  `git.commit` as above, then use that **commit SHA directly** as `git_ref_key` -- for snapshot
+  content, `git.ref_key == git.commit`.
+- **Incremental** (a branch source configured with `update: incremental` in `sourcerer.yml`;
+  `refs.list` surfaces its join doc with `update_mode: incremental` and no separate per-commit
+  history): build the `git_ref_key` directly as `{host}~{org}~{repo}~{ref}` (host/org/repo
+  lowercased, ref case-preserved, `~`-joined) -- no commit resolution needed, since the key names
+  the branch itself and the join always resolves it to the CURRENT indexed commit at query time.
+
+Use the resulting `git_ref_key` in every subsequent content call for that repo and ref, and read
+the resolved `git.commit` back from the join for citations. Re-invoke this skill only when the
+question introduces a new or additional ref.

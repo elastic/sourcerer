@@ -9,8 +9,14 @@ configuration:
     | WHERE git.host LIKE ?git_host
         AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
-        AND git.commit LIKE ?git_commit
+        AND git.ref_key == ?git_ref_key
         AND file.path LIKE ?file_path
+
+    // Resolve the commit for this ref_key via the universal join -- identical for
+    // snapshot and incremental content. Snapshot content already carries its own
+    // git.commit (equal to git.ref_key), so the join's value simply overwrites it in
+    // place; incremental content has no git.commit of its own, so the join supplies it.
+    | LOOKUP JOIN sourcerer-refs ON git.ref_key
 
     // Glob match (* and **) on file.path
     | EVAL _fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")
@@ -57,11 +63,10 @@ configuration:
       description: Filter by git repo(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
-    git_commit:
+    git_ref_key:
       type: string
-      description: Filter by git commit(s) (supports * wildcards)
-      optional: true
-      defaultValue: "*"
+      description: Exact ref_key to scope to -- a commit SHA (snapshot content) or the incremental "{host}~{org}~{repo}~{ref}" key (see sourcerer.refs.list). Required exact match, no wildcards.
+      optional: false
     file_path:
       type: string
       description: File path(s) to cat (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)

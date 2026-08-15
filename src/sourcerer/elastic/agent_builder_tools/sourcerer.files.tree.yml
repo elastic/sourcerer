@@ -9,7 +9,13 @@ configuration:
     | WHERE git.host LIKE ?git_host
         AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
-        AND git.commit LIKE ?git_commit
+        AND git.ref_key == ?git_ref_key
+
+    // Resolve the commit for this ref_key via the universal join -- identical for
+    // snapshot and incremental content. Snapshot content already carries its own
+    // git.commit (equal to git.ref_key), so the join's value simply overwrites it in
+    // place; incremental content has no git.commit of its own, so the join supplies it.
+    | LOOKUP JOIN sourcerer-refs ON git.ref_key
 
     // Split each file path into its segments
     | EVAL _segs = SPLIT(file.path, "/")
@@ -180,11 +186,10 @@ configuration:
       description: Filter by git repo(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
-    git_commit:
+    git_ref_key:
       type: string
-      description: Filter by git commit(s) (supports * wildcards)
-      optional: true
-      defaultValue: "*"
+      description: Exact ref_key to scope to -- a commit SHA (snapshot content) or the incremental "{host}~{org}~{repo}~{ref}" key (see sourcerer.refs.list). Required exact match, no wildcards.
+      optional: false
     file_path:
       type: string
       description: Directory to tree, e.g. src or src/sourcerer. The tree is rooted there and recurses; depth is controlled by L, not by this pattern. May also be a glob to filter what is listed (e.g. src/*.xml lists only XML files under src, at any depth). A single * already matches across directories, so ** is never required.

@@ -17,6 +17,19 @@ ID_SEP = b"\x00"
 ID_DIGEST_SIZE = 16
 
 
+def build_ref_key(host: str, org: str, repo: str, ref: str) -> str:
+    """Deterministic incremental ref_key: `{host}~{org}~{repo}~{ref}` (host/org/repo lowercased,
+    ref case-preserved).
+
+    `~` is safe as a delimiter because it is illegal in git ref names (see
+    `git check-ref-format`) and is already the index-name segment delimiter used for
+    host/org/repo elsewhere (see `indices.py`), so it cannot collide with any of the joined
+    values. Snapshot content instead uses the bare commit SHA as its `ref_key` -- this helper
+    is only for the incremental (ref-addressed) shape.
+    """
+    return "~".join((host.lower(), org.lower(), repo.lower(), ref))
+
+
 def make_doc_id(*parts: str) -> str:
     """Deterministic, URL-safe document id: BLAKE2b hex of the NUL-joined fields.
 

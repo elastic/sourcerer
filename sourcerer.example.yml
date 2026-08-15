@@ -184,6 +184,21 @@ sources:
   retain:
     count: 5
 
+# Incremental (ref-addressed) update mode -- branch-only. Instead of a new commit-addressed
+# snapshot on every HEAD advance, content is keyed by git.ref_key = "{host}~{org}~{repo}~{ref}"
+# and stays in place: a HEAD advance re-indexes only the files `git diff` reports changed
+# (a delta update), rather than the whole tree. Good for a fast-moving branch that deploys off
+# main, where staying current matters more than retaining per-commit history. `since` and
+# `retain` are not meaningful here (there is no per-commit history to filter/retain -- see
+# specs/incremental-indexing.md) and are rejected if given.
+- git:
+    host: github
+    org: elastic
+    repo: serverless-gitops
+    ref_type: branch
+  match: main
+  update: incremental             # default: snapshot
+
 # Feature/fix branches as of a week ago; keep the newest commit, prune > 1 month.
 - git:
     host: github

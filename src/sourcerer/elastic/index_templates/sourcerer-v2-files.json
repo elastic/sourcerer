@@ -55,8 +55,22 @@
             "commit": {
               "type": "keyword",
               "normalizer": "lowercase"
+            },
+            "ref_key": {
+              "type": "keyword"
+            },
+            "ref": {
+              "type": "keyword"
+            },
+            "ref_type": {
+              "type": "keyword",
+              "normalizer": "lowercase"
             }
           }
+        },
+        "update_mode": {
+          "type": "keyword",
+          "normalizer": "lowercase"
         },
         "file": {
           "properties": {
