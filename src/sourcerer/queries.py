@@ -244,6 +244,67 @@ def content_indices_for_commit(
     return sorted(names)
 
 
+def enumerate_content_ref_keys(es: Elasticsearch, host: str, org: str, repo: str) -> set[str]:
+    """Every distinct `git.ref_key` present in this repo's content (files + lines aliases), via
+    a paginated composite aggregation scoped to (host, org, repo). Feeds the post-upgrade
+    uniqueness gate (INV-011): every value this returns must resolve to exactly one
+    `sourcerer-v2-refs` join doc. Returns an empty set if neither alias has any matching docs."""
+    filters = [
+        {"term": {"git.host": host}},
+        {"term": {"git.org": org}},
+        {"term": {"git.repo": repo}},
+    ]
+    out: set[str] = set()
+    for index in (FILES_ALIAS, LINES_ALIAS):
+        after: dict | None = None
+        while True:
+            composite: dict = {
+                "size": _COMPOSITE_PAGE_SIZE,
+                "sources": [{"ref_key": {"terms": {"field": "git.ref_key"}}}],
+            }
+            if after is not None:
+                composite["after"] = after
+            try:
+                resp = es.search(
+                    index=index, size=0,
+                    query={"bool": {"filter": filters}},
+                    aggs={"keys": {"composite": composite}},
+                )
+            except NotFoundError:
+                break
+            agg = resp["aggregations"]["keys"]
+            buckets = agg["buckets"]
+            if not buckets:
+                break
+            for b in buckets:
+                out.add(b["key"]["ref_key"])
+            after = agg.get("after_key")
+            if after is None:
+                break
+    return out
+
+
+def check_ref_key_uniqueness(es: Elasticsearch, host: str, org: str, repo: str) -> list[str]:
+    """The post-upgrade uniqueness gate (INV-011): every distinct `git.ref_key` in this repo's
+    content must resolve to EXACTLY ONE `sourcerer-v2-refs` join doc. Returns the sorted list of
+    offending ref_keys (missing entirely, or matched by more than one join doc) -- empty means
+    the invariant holds. A single aggregation query counts join docs per ref_key; a key absent
+    from the buckets has zero matches (missing)."""
+    ref_keys = enumerate_content_ref_keys(es, host, org, repo)
+    if not ref_keys:
+        return []
+    try:
+        resp = es.search(
+            index=REFS_ALIAS, size=0,
+            query={"terms": {"git.ref_key": sorted(ref_keys)}},
+            aggs={"keys": {"terms": {"field": "git.ref_key", "size": len(ref_keys)}}},
+        )
+        counts = {b["key"]: b["doc_count"] for b in resp["aggregations"]["keys"]["buckets"]}
+    except NotFoundError:
+        counts = {}
+    return sorted(key for key in ref_keys if counts.get(key, 0) != 1)
+
+
 def resolve_content_commit(
     es: Elasticsearch, host: str, org: str, repo: str, prefix: str,
 ) -> set[str]:

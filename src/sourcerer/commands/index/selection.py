@@ -46,7 +46,7 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
                 seen.add((rt, prefix))
                 units.append(Unit(
                     host=cfg.host, org=cfg.org, repo=cfg.repo, ref=prefix, kind=rt,
-                    index_level=sel.index_level, index_suffix=sel.index_suffix,
+                    index_level=sel.index_level, index_suffix=sel.index_suffix, update=sel.update,
                 ))
             continue
         if rt not in fetched:
@@ -67,7 +67,7 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
             units.append(Unit(
                 host=cfg.host, org=cfg.org, repo=cfg.repo, ref=name, kind=rt,
                 remote_sha=ref_map[name],
-                index_level=sel.index_level, index_suffix=sel.index_suffix,
+                index_level=sel.index_level, index_suffix=sel.index_suffix, update=sel.update,
             ))
 
     failed_kinds = sorted(k for k, v in fetched.items() if v is None)

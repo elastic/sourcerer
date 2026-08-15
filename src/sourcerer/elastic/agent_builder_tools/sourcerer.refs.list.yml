@@ -12,10 +12,18 @@ configuration:
         AND git.commit LIKE ?git_commit
         AND git.ref LIKE ?git_ref
         AND git.ref_type LIKE ?git_ref_type
-        AND status LIKE ?status
+        // An incremental branch's join doc is never "complete" (only "ready"/"indexing" --
+        // see markers.write_incremental_ready/write_incremental_indexing), so the default
+        // ?status == "complete" must also surface "ready" docs, or the default (no-arg) call
+        // this skill documents would silently omit every incremental branch from the results.
+        AND (status LIKE ?status OR (?status == "complete" AND status == "ready"))
 
     // Format the response
     | SORT indexed_at DESC
+    // git.ref_key is not surfaced here -- it's purely an internal storage/join key (used only
+    // by content tools' `LOOKUP JOIN sourcerer-refs ON git.ref_key`), never something an agent
+    // needs to read or construct. Use git.ref (branch/tag name) or git.commit as the git_ref
+    // param on a content tool -- see the ref-resolution skill.
     | KEEP git.host, git.org, git.repo, git.ref, git.ref_type, git.commit, git.commit_date, status, files_count, lines_count, indexed_at, indexing_started_at
     | LIMIT 1000000
   params:
@@ -51,6 +59,6 @@ configuration:
       defaultValue: "*"
     status:
       type: string
-      description: Filter by ref status. "complete" = fully indexed (default); "indexing" = currently being indexed; "*" = all statuses.
+      description: Filter by ref status. "complete" = fully indexed (default; also includes incremental branches, whose join doc status is "ready" rather than "complete"); "indexing" = currently being indexed; "*" = all statuses.
       optional: true
       defaultValue: "complete"

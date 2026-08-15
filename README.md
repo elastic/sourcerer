@@ -85,6 +85,36 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
 
 The [`sourcerer.yml` specification](specs/sourcerer-yml.md) has the full reference of fields supported by the configuration file.
 
+### Snapshot vs. incremental indexing (`update: <mode>`)
+
+Each source can set `update: snapshot` (the default) or `update: incremental` (branch-only).
+Every Agent Builder content tool takes the same `git_ref` param either way (a commit SHA or an
+exact branch/tag name) and resolves a commit the same way regardless of mode; `git.ref_key` is
+an internal storage/join detail, never something the agent constructs or passes.
+
+- **`snapshot`** (default): content is commit-addressed, exactly as before. `git.ref_key` is the
+  commit SHA itself, so every ref (branch, tag, or pinned commit) that resolves to the same
+  commit collapses to one snapshot. A moving branch's HEAD advance indexes a brand-new snapshot
+  under the new commit.
+- **`incremental`** (branch-only): content is ref-addressed instead. `git.ref_key` is
+  `{host}~{org}~{repo}~{ref}` and content carries no `git.commit` of its own -- the branch's
+  current commit lives only on its refs join doc, resolved via the join above. A HEAD advance
+  re-indexes only the files `git diff --name-status` reports changed (add/modify/delete/rename),
+  not the whole tree, so staying current on a fast-moving branch (e.g. GitOps/IaC repos that
+  deploy off `main`) is cheap. `since` and `retain` don't apply to an incremental source (there is
+  no per-commit history to filter or retain) and are rejected if given.
+
+```yaml
+sources:
+- git: { host: "github", org: "elastic", repo: "serverless-gitops", ref_type: "branch" }
+  match: "main"
+  update: incremental
+```
+
+Upgrading from a pre-`ref_key` install is automatic and invisible: every `index` run backfills
+pre-existing snapshot content in place (idempotent -- a repeat run changes nothing) unless you
+pass `--no-backfill`.
+
 ### Cloning with SSH
 
 By default, `sourcerer` clones repos using HTTPS. You can override this in `sourcerer.yml` by setting the `urls.clone` of a Git host to an SSH-compatible URL template.

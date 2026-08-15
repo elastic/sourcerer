@@ -14,7 +14,9 @@ from sourcerer.commands.index.documents import (
     _build_one_file_actions,
     build_file_actions,
     build_file_doc,
+    build_incremental_file_doc,
     file_attributes,
+    iter_incremental_line_docs,
     iter_line_docs,
 )
 from sourcerer.indices import files_index, lines_index
@@ -27,7 +29,14 @@ def _set_worker_ctx(host: str, org: str, repo: str, commit_sha: str, repo_dir, s
     # should leave behind for the rest of the pytest session.
     documents._WORKER_CTX.update(
         host=host, org=org, repo=repo, commit_sha=commit_sha, repo_dir=pathlib.Path(repo_dir),
-        symlink_paths=symlink_paths,
+        symlink_paths=symlink_paths, mode="snapshot",
+    )
+
+
+def _set_worker_ctx_incremental(host: str, org: str, repo: str, ref: str, repo_dir, symlink_paths=frozenset()) -> None:
+    documents._WORKER_CTX.update(
+        host=host, org=org, repo=repo, ref=ref, repo_dir=pathlib.Path(repo_dir),
+        symlink_paths=symlink_paths, mode="incremental",
     )
 
 
@@ -69,7 +78,9 @@ class TestBuildFileDoc:
         p = tmp_path / "a.txt"
         p.write_text("hello")
         _id, doc = build_file_doc("github", "acme", "widgets", "deadbeef", "a.txt", p)
-        assert doc["git"] == {"host": "github", "org": "acme", "repo": "widgets", "commit": "deadbeef"}
+        assert doc["git"] == {"host": "github", "org": "acme", "repo": "widgets", "commit": "deadbeef",
+                              "ref_key": "deadbeef"}
+        assert doc["update_mode"] == "snapshot"
 
     def test_host_changes_id(self, tmp_path):
         p = tmp_path / "a.txt"
@@ -120,6 +131,12 @@ class TestBuildFileDoc:
 
 
 class TestIterLineDocs:
+    def test_snapshot_ref_key_and_update_mode(self):
+        docs = list(iter_line_docs("github", "acme", "widgets", "deadbeef", "a.txt", "one"))
+        _id, doc = docs[0]
+        assert doc["git"]["ref_key"] == "deadbeef"
+        assert doc["update_mode"] == "snapshot"
+
     def test_line_numbering_starts_at_one(self):
         docs = list(iter_line_docs("github", "acme", "widgets", "deadbeef", "a.txt", "one\ntwo\nthree"))
         numbers = [d["line"]["number"] for _id, d in docs]
@@ -160,6 +177,57 @@ class TestIterLineDocs:
             assert "target_path" not in d["file"]
             assert "target_size" not in d["file"]
             assert "attributes" not in d["file"]
+
+
+class TestIncrementalDocs:
+    def test_ref_key_is_tilde_joined(self, tmp_path):
+        p = tmp_path / "a.txt"
+        p.write_text("hello")
+        _id, doc = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
+        assert doc["git"]["ref_key"] == "github~acme~widgets~main"
+
+    def test_no_commit_field(self, tmp_path):
+        p = tmp_path / "a.txt"
+        p.write_text("hello")
+        _id, doc = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
+        assert "commit" not in doc["git"]
+
+    def test_update_mode_incremental(self, tmp_path):
+        p = tmp_path / "a.txt"
+        p.write_text("hello")
+        _id, doc = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
+        assert doc["update_mode"] == "incremental"
+
+    def test_id_stable_across_commits(self, tmp_path):
+        # The whole point of ref-addressing: the id does not depend on the commit, only the
+        # ref, so a modified file's doc overwrites in place rather than minting a new id.
+        p = tmp_path / "a.txt"
+        p.write_text("hello")
+        id1, _ = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
+        p.write_text("hello world -- content changed, same ref/path")
+        id2, _ = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
+        assert id1 == id2
+
+    def test_id_differs_from_snapshot_id(self, tmp_path):
+        p = tmp_path / "a.txt"
+        p.write_text("hello")
+        snap_id, _ = build_file_doc("github", "acme", "widgets", "deadbeef", "a.txt", p)
+        incr_id, _ = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
+        assert snap_id != incr_id
+
+    def test_line_docs_ref_key_and_no_commit(self):
+        docs = list(iter_incremental_line_docs("github", "acme", "widgets", "main", "a.txt", "one\ntwo"))
+        for _id, d in docs:
+            assert d["git"]["ref_key"] == "github~acme~widgets~main"
+            assert "commit" not in d["git"]
+            assert d["update_mode"] == "incremental"
+
+    def test_worker_ctx_routes_to_incremental_builders(self, tmp_path):
+        (tmp_path / "a.txt").write_text("one\ntwo\n")
+        _set_worker_ctx_incremental("github", "acme", "widgets", "main", tmp_path)
+        actions = _build_one_file_actions("a.txt")
+        assert actions[0]["_source"]["git"]["ref_key"] == "github~acme~widgets~main"
+        assert "commit" not in actions[0]["_source"]["git"]
 
 
 class TestFileAttributes:

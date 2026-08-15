@@ -12,7 +12,7 @@ Commands:
   include them.
 - `sourcerer index <org>/<repo> [-b <branch>] [-t <tag>] [-c <commit>]` (single-repo path
   defaults to `git.host` = `github`)
-- `sourcerer index --config <file> [--prune] [--dry-run]`
+- `sourcerer index --config <file> [--prune] [--dry-run] [--no-backfill]`
 - `sourcerer prune [--config <file>] [--dry-run]` (config-driven retention prune is skipped
   without `--config`; the orphan sweep always runs)
 - `sourcerer mcp-proxy [-e <env>]` (run a stdio MCP proxy that forwards to the Kibana
@@ -57,6 +57,34 @@ config's `sources:` is a YAML list, one entry per (host, org, repo, ref_type). S
 | `match` | yes | For `branch`/`tag`: pattern string or list of patterns matched against ref names (version DSL + glob), a ref matches if any pattern hits. For `commit`: a commit SHA/prefix string or list of them (see below). |
 | `since` | no | Index-side inclusion floor: the earliest commit to start indexing from. See below. Not valid for `git.ref_type: commit`. |
 | `retain` | no | Retention policy (see below). Omit to keep forever. For `git.ref_type: commit`, only `age` is valid. |
+| `update` | no | `snapshot` (default) or `incremental` (branch-only). See below. |
+
+#### `update: <mode>` (snapshot vs. incremental)
+
+`snapshot` (default): content is commit-addressed, as always -- `git.ref_key` on every content
+doc equals its `git.commit`, and a HEAD advance on a branch indexes a whole new snapshot under
+the new commit.
+
+`incremental` (branch-only; rejects `since`/`retain` -- there is no per-commit history for either
+to apply to): content is ref-addressed instead. `git.ref_key` is
+`{host}~{org}~{repo}~{ref}` and carries no `git.commit` of its own; the branch's live commit
+lives only on its refs join doc (`_id = git.ref_key`). A HEAD advance runs `git diff
+--name-status` between the previously-completed commit and the new tip and only deletes/
+reindexes the paths git reports changed -- add/modify/delete/rename/copy -- instead of
+reindexing the whole tree. A missing diff base (force-push, GC'd, or the first index) rebuilds
+the whole branch namespace. The refs join doc publishes `status: indexing` before any content
+change and `status: ready` (with the new commit) only after the deletes/indexes/refresh all
+succeed, so a crash mid-update leaves the prior commit and content in place.
+
+```yaml
+- git:
+    host: github
+    org: elastic
+    repo: serverless-gitops
+    ref_type: branch
+  match: main
+  update: incremental
+```
 
 #### `git.ref_type: commit` (pinning an explicit commit)
 
@@ -346,6 +374,50 @@ creates one index/shard per commit — see `specs/sourcerer-yml.md` for the cave
   in `sourcerer-refs` mapping the branch to its current commit. To search a branch,
   resolve it to a commit via the refs index (the `sourcerer.refs.list` tool), then filter
   content by `git.host` + `git.commit`.
+
+### `git.ref_key` and the universal join query
+
+Every content doc (file and line, both `update` modes) carries a `git.ref_key` keyword field:
+the bare commit SHA for `snapshot` content, or `{host}~{org}~{repo}~{ref}` for `incremental`
+content (see `update: <mode>` above; `build_ref_key` in `src/sourcerer/utils.py`). A second,
+distinct kind of `sourcerer-v2-refs` document -- a **refs join doc**, `_id = git.ref_key`
+(exactly one per key) -- carries the citable `git.commit`: one per commit for snapshot content,
+one per branch (holding the live HEAD) for incremental content. This is a different id space
+from the hashed, append-only `build_ref_id` ref-name markers described above (those still drive
+`since`/retention history and are untouched by this).
+
+Every Agent Builder content tool (`sourcerer.code.*`, `sourcerer.files.*`) therefore runs the
+same query shape regardless of mode, with no `update_mode` conditional -- and `git.ref_key` is
+NEVER an agent-facing param, only the internal join field:
+
+```esql
+FROM sourcerer-lines
+| WHERE ... AND (git.commit == ?git_ref OR git.ref == ?git_ref)
+| LOOKUP JOIN sourcerer-refs ON git.ref_key
+| WHERE git.commit LIKE ?git_commit
+```
+
+`git_ref` is a required, exact-match param (no wildcards) -- resolve a ref first (see
+`src/sourcerer/skills/ref-resolution/SKILL.md`), then pass through whatever it resolved to: a
+snapshot ref's commit SHA, or an incremental branch's plain name (e.g. `main`) -- no construction,
+no `ref_key` involved. The tool matches `git_ref` against whichever field the row actually
+carries (`git.commit` for snapshot, `git.ref` for incremental), so the same param and the same
+query shape work for both without the caller knowing which mode it is. `git_commit` is optional
+(default `"*"`) and filters the commit the join resolves -- it lets a caller assert the branch it
+resolved `git_ref` against hasn't since advanced; a no-op for a commit-scoped query, since
+`git.commit` already equals `git_ref` there. The join adds/overwrites `git.commit` on every row,
+so snapshot content (which already carries its own, identical `git.commit`) is unaffected and
+incremental content (which has none) gets it from the join.
+
+### Upgrade backfill (`--no-backfill`)
+
+`sourcerer index` runs a one-time, idempotent upgrade backfill by default on every invocation:
+an `_update_by_query` stamps `git.ref_key = git.commit` + `update_mode: snapshot` onto
+pre-existing snapshot content that predates this feature, the refs index's mapping is
+re-applied to the existing physical index (a template change alone only affects indices
+created afterward), and a snapshot refs join doc is created for every already-indexed commit
+that lacks one. Pass `--no-backfill` to skip it. Safe to run every time: a repeat run touches
+nothing (see `backfill_repo` in `src/sourcerer/commands/index/markers.py`).
 
 ## Releases
 

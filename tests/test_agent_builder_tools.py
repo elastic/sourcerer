@@ -40,6 +40,59 @@ def test_git_host_filtered_before_git_org():
             f"{tid} filters git.org before git.host"
 
 
+_CONTENT_TOOL_IDS = (
+    "sourcerer.code.search", "sourcerer.code.grep",
+    "sourcerer.files.cat", "sourcerer.files.head", "sourcerer.files.tail",
+    "sourcerer.files.ls", "sourcerer.files.tree",
+    "sourcerer.files.read_lines", "sourcerer.files.wc",
+)
+
+
+def test_content_tools_use_universal_ref_join_query():
+    # INV-005: every content tool's WHERE runs the identical `(git.commit == ?git_ref OR
+    # git.ref == ?git_ref)` shape with no update_mode/mode conditional, and joins sourcerer-refs
+    # on git.ref_key (a purely internal field -- never an agent-facing param) to resolve the
+    # commit for both snapshot and incremental content. git_commit survives as an optional
+    # POST-join consistency guard (not a scoping filter -- git_ref is the scoping param).
+    tools = _tools()
+    for tid in _CONTENT_TOOL_IDS:
+        query = tools[tid]["configuration"]["query"]
+        params = tools[tid]["configuration"]["params"]
+        assert "update_mode" not in query, f"{tid} query has an update_mode conditional"
+        assert "git.commit == ?git_ref" in query, f"{tid} missing the commit-or-ref filter"
+        assert "git.ref == ?git_ref" in query, f"{tid} missing the commit-or-ref filter"
+        assert "| LOOKUP JOIN sourcerer-refs ON git.ref_key" in query, f"{tid} missing the universal join"
+        assert "git_ref_key" not in params, f"{tid} still exposes git_ref_key as a param"
+        assert "?git_ref_key" not in query, f"{tid} still references ?git_ref_key"
+        assert params["git_ref"]["optional"] is False
+        assert "defaultValue" not in params["git_ref"]
+        assert params["git_commit"]["optional"] is True
+        assert params["git_commit"]["defaultValue"] == "*"
+        # The git_commit filter must appear AFTER the join (it filters the joined value, not
+        # the raw content doc -- incremental content has no git.commit of its own).
+        assert query.index("LOOKUP JOIN sourcerer-refs") < query.index("git.commit LIKE ?git_commit")
+
+
+def test_refs_list_does_not_surface_ref_key():
+    # git.ref_key is purely an internal storage/join key -- never something an agent reads or
+    # constructs -- so refs.list must not surface it.
+    tool = _tools()["sourcerer.refs.list"]
+    query = tool["configuration"]["query"]
+    for line in query.splitlines():
+        if line.strip().startswith("| KEEP"):
+            assert "ref_key" not in line
+
+
+def test_refs_list_default_status_also_surfaces_incremental_ready():
+    # Incremental join docs are never status:"complete" (only "ready"/"indexing" -- see
+    # markers.write_incremental_ready/write_incremental_indexing), so the default (no-arg)
+    # call must not silently omit every incremental branch.
+    tool = _tools()["sourcerer.refs.list"]
+    query = tool["configuration"]["query"]
+    assert 'status == "ready"' in query
+    assert tool["configuration"]["params"]["status"]["defaultValue"] == "complete"
+
+
 def test_output_keeps_git_host():
     # Every tool that KEEPs git.org must also KEEP git.host (before it), so host reaches output.
     for tid, tool in _tools().items():

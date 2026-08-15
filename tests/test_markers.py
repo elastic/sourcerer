@@ -11,10 +11,28 @@ from elasticsearch import NotFoundError
 
 # App packages
 from sourcerer.commands.index.markers import (
-    build_ref_id, commit_prefix_indexed, commits_with_content, fully_indexed_counts,
-    markers_status_by_id, _needs_index, _parse_marker_started, pre_clone_skip, should_index,
+    ERROR_MAX_LEN,
+    build_ref_id,
+    commit_prefix_indexed,
+    commits_with_content,
+    count_incremental_branch_docs,
+    delete_incremental_branch,
+    delete_incremental_paths,
+    fully_indexed_counts,
+    markers_status_by_id,
+    _needs_index,
+    _parse_marker_started,
+    pre_clone_skip,
+    read_incremental_ref,
+    should_index,
+    write_incremental_failed,
+    write_incremental_indexing,
+    write_incremental_ready,
+    write_ref_marker,
+    write_snapshot_join_doc,
 )
-from sourcerer.indices import FILES_ALIAS, REFS_ALIAS
+from sourcerer.indices import FILES_ALIAS, REFS_ALIAS, REFS_INDEX
+from sourcerer.utils import build_ref_key
 
 FULL_SHA = "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60"
 
@@ -376,3 +394,177 @@ class TestFullyIndexedCounts:
         assert fully_indexed_counts(es, "gitlab", "acme", "widgets", FULL_SHA) == (7, 900)
         call = es.search.call_args.kwargs
         assert {"term": {"git.host": "gitlab"}} in call["query"]["bool"]["filter"]
+
+
+OLD = "1111111111111111111111111111111111111111"
+NEW = "2222222222222222222222222222222222222222"
+
+
+def _indexed_doc(es):
+    return es.index.call_args.kwargs["document"]
+
+
+class TestSnapshotJoinDoc:
+    def test_join_doc_id_and_ref_key_are_the_commit(self):
+        es = MagicMock()
+        write_snapshot_join_doc(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None)
+        call = es.index.call_args.kwargs
+        assert call["id"] == OLD
+        assert call["index"] == REFS_INDEX
+        doc = call["document"]
+        assert doc["git"]["ref_key"] == OLD
+        assert doc["git"]["commit"] == OLD
+        assert doc["update_mode"] == "snapshot"
+        assert doc["status"] == "complete"
+
+    def test_join_doc_idempotent_rewrite_same_id(self):
+        first = MagicMock()
+        second = MagicMock()
+        write_snapshot_join_doc(first, "github", "acme", "widgets", "branch", "main", OLD, None)
+        write_snapshot_join_doc(second, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None)
+        assert first.index.call_args.kwargs["id"] == second.index.call_args.kwargs["id"]
+
+
+class TestIncrementalRefKeyIdentity:
+    def test_id_is_ref_key_not_a_hash(self):
+        es = MagicMock()
+        write_incremental_indexing(es, "github", "acme", "widgets", "main", OLD, NEW)
+        assert es.index.call_args.kwargs["id"] == build_ref_key("github", "acme", "widgets", "main")
+
+    def test_stable_across_calls_commit_independent(self):
+        a = build_ref_key("github", "acme", "widgets", "main")
+        b = build_ref_key("github", "acme", "widgets", "main")
+        assert a == b  # one document per branch, no commit folded in
+
+
+class TestWriteIncrementalIndexing:
+    def test_incremental_marker_preserves_completed_commit_and_exposes_target(self):
+        es = MagicMock()
+        write_incremental_indexing(es, "github", "acme", "widgets", "main",
+                                    completed_commit=OLD, target_commit=NEW)
+        doc = _indexed_doc(es)
+        assert doc["status"] == "indexing"
+        assert doc["git"]["commit"] == OLD  # completed pointer unchanged (INV-006)
+        assert doc["git"]["target_commit"] == NEW
+        assert doc["update_mode"] == "incremental"
+        assert es.index.call_args.kwargs["index"] == REFS_INDEX
+
+    def test_incremental_marker_first_index_has_no_completed_commit(self):
+        es = MagicMock()
+        write_incremental_indexing(es, "github", "acme", "widgets", "main",
+                                    completed_commit=None, target_commit=NEW)
+        assert _indexed_doc(es)["git"]["commit"] is None
+
+    def test_incremental_marker_carries_prior_counts(self):
+        es = MagicMock()
+        prior = {"files_count": 12, "lines_count": 340, "git": {"commit_date": "2026-01-01T00:00:00+00:00"}}
+        write_incremental_indexing(es, "github", "acme", "widgets", "main", OLD, NEW, prior=prior)
+        doc = _indexed_doc(es)
+        assert doc["files_count"] == 12 and doc["lines_count"] == 340
+        assert doc["git"]["commit_date"] == "2026-01-01T00:00:00+00:00"
+
+
+class TestWriteIncrementalReady:
+    def test_incremental_marker_advances_commit_and_clears_target_and_error(self):
+        es = MagicMock()
+        write_incremental_ready(es, "github", "acme", "widgets", "main", commit=NEW,
+                                 commit_date_iso="2026-02-02T00:00:00+00:00",
+                                 files_count=5, lines_count=99)
+        doc = _indexed_doc(es)
+        assert doc["status"] == "ready"
+        assert doc["git"]["commit"] == NEW  # advances only after a successful run (INV-006)
+        assert doc["git"]["target_commit"] is None
+        assert doc["error"] is None and doc["failed_at"] is None
+        assert doc["files_count"] == 5 and doc["lines_count"] == 99
+        assert es.index.call_args.kwargs["refresh"] is True  # publication boundary
+
+
+class TestWriteIncrementalFailed:
+    def test_incremental_marker_keeps_status_indexing_and_retains_old_pointer(self):
+        es = MagicMock()
+        write_incremental_failed(es, "github", "acme", "widgets", "main", completed_commit=OLD,
+                                  target_commit=NEW, error="boom")
+        doc = _indexed_doc(es)
+        assert doc["status"] == "indexing"  # not advanced -- a failed run leaves the prior state
+        assert doc["git"]["commit"] == OLD
+        assert doc["git"]["target_commit"] == NEW
+        assert doc["error"] == "boom"
+        assert doc["failed_at"] is not None
+
+    def test_incremental_marker_error_text_is_bounded(self):
+        es = MagicMock()
+        write_incremental_failed(es, "github", "acme", "widgets", "main", OLD, NEW, error="x" * 5000)
+        assert len(_indexed_doc(es)["error"]) == ERROR_MAX_LEN
+
+
+class TestReadIncrementalRef:
+    def test_returns_source(self):
+        es = MagicMock()
+        es.get.return_value = {"_source": {"status": "ready", "git": {"commit": NEW}}}
+        assert read_incremental_ref(es, "github", "acme", "widgets", "main") == (
+            {"status": "ready", "git": {"commit": NEW}}
+        )
+        assert es.get.call_args.kwargs["id"] == build_ref_key("github", "acme", "widgets", "main")
+
+    def test_missing_returns_none(self):
+        es = MagicMock()
+        es.get.side_effect = _not_found()
+        assert read_incremental_ref(es, "github", "acme", "widgets", "main") is None
+
+
+class TestDeleteIncrementalPaths:
+    def test_empty_paths_is_noop(self):
+        es = MagicMock()
+        delete_incremental_paths(es, "github", "acme", "widgets", "main", [])
+        es.delete_by_query.assert_not_called()
+
+    def test_scoped_to_exact_ref_key_and_paths(self):
+        es = MagicMock()
+        delete_incremental_paths(es, "github", "acme", "widgets", "main", ["a.txt", "b.txt"])
+        assert es.delete_by_query.call_count == 2  # files + lines indices
+        for call in es.delete_by_query.call_args_list:
+            query = call.kwargs["query"]
+            assert {"term": {"git.ref_key": build_ref_key("github", "acme", "widgets", "main")}} in (
+                query["bool"]["filter"]
+            )
+            assert {"terms": {"file.path": ["a.txt", "b.txt"]}} in query["bool"]["filter"]
+
+    def test_missing_index_is_ignored(self):
+        es = MagicMock()
+        es.delete_by_query.side_effect = _not_found()
+        delete_incremental_paths(es, "github", "acme", "widgets", "main", ["a.txt"])  # no raise
+
+
+class TestDeleteIncrementalBranch:
+    def test_scoped_to_exact_ref_key_only(self):
+        es = MagicMock()
+        delete_incremental_branch(es, "github", "acme", "widgets", "main")
+        assert es.delete_by_query.call_count == 2
+        for call in es.delete_by_query.call_args_list:
+            query = call.kwargs["query"]
+            assert query["bool"]["filter"] == [
+                {"term": {"git.ref_key": build_ref_key("github", "acme", "widgets", "main")}}
+            ]
+
+    def test_isolated_from_another_branch(self):
+        # Two incremental branches indexed; deleting one's docs must never scope to the other's
+        # ref_key (INV-008) -- asserted here at the query-construction level.
+        es_a = MagicMock()
+        es_b = MagicMock()
+        delete_incremental_branch(es_a, "github", "acme", "widgets", "main")
+        delete_incremental_branch(es_b, "github", "acme", "widgets", "dev")
+        query_a = es_a.delete_by_query.call_args_list[0].kwargs["query"]
+        query_b = es_b.delete_by_query.call_args_list[0].kwargs["query"]
+        assert query_a != query_b
+
+
+class TestCountIncrementalBranchDocs:
+    def test_missing_index_returns_zero(self):
+        es = MagicMock()
+        es.count.side_effect = _not_found()
+        assert count_incremental_branch_docs(es, "github", "acme", "widgets", "main") == (0, 0)
+
+    def test_returns_counts(self):
+        es = MagicMock()
+        es.count.return_value = {"count": 5}
+        assert count_incremental_branch_docs(es, "github", "acme", "widgets", "main") == (5, 5)

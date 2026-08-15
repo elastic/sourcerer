@@ -287,6 +287,9 @@ class Selector:
     # route to different indices (e.g. kibana release tags -> ~repo, deploy tags -> ~repo^deploy).
     index_level: str = "repo"              # "host" | "org" | "repo" | "commit"
     index_suffix: str | None = None        # appended as ^{suffix}; None == no suffix
+    # sources[i].update: "snapshot" (default, commit-addressed content) or "incremental"
+    # (ref-addressed content, branch-only -- see specs/incremental-indexing.md).
+    update: str = "snapshot"
 
     def matches(self, ref_type: str, ref: str) -> Version | None:
         if self.ref_type != ref_type:
@@ -408,6 +411,7 @@ def _parse_commit_match(raw: dict, ctx: str) -> list[str]:
 
 _GIT_KEYS = {"host", "org", "repo", "ref_type"}
 _INDEX_LEVELS = ("host", "org", "repo", "commit")
+_UPDATE_MODES = ("snapshot", "incremental")
 # A suffix goes into a physical index name after a `^`, so it must be safe as an index-name
 # segment: the same characters forbidden in a host id, plus the `^` we use as the suffix delimiter.
 _FORBIDDEN_SUFFIX_CHARS = _FORBIDDEN_HOST_CHARS | {"^"}
@@ -475,10 +479,25 @@ def _parse_git_scope(raw: dict, ctx: str) -> tuple[str, str, str, str]:
 def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
     """Parse one `sources[i]` entry into (host, org, repo, Selector). The ref_type comes from the
     `git` block; `match`/`since`/`retain` are top-level siblings."""
-    unknown = set(raw) - {"git", "match", "since", "retain", "schedule", "index"}
+    unknown = set(raw) - {"git", "match", "since", "retain", "schedule", "index", "update"}
     if unknown:
         raise ValueError(f"{ctx}: unknown keys {sorted(unknown)}")
     host, org, repo, ref_type = _parse_git_scope(raw, ctx)
+
+    update = raw.get("update", "snapshot")
+    if update not in _UPDATE_MODES:
+        raise ValueError(f"{ctx} update: must be one of {list(_UPDATE_MODES)} (got {update!r})")
+    if update == "incremental":
+        if ref_type != "branch":
+            raise ValueError(f"{ctx} update: 'incremental' is only valid for git.ref_type: branch "
+                             f"(got ref_type {ref_type!r})")
+        # An incremental branch maintains a single mutable ref-addressed view with no per-commit
+        # history for retention to trim and no inclusion floor to apply -- both since and retain
+        # are meaningless here (see specs/incremental-indexing.md).
+        if raw.get("since") is not None:
+            raise ValueError(f"{ctx}: 'update: incremental' cannot be combined with 'since'")
+        if raw.get("retain") is not None:
+            raise ValueError(f"{ctx}: 'update: incremental' cannot be combined with 'retain'")
 
     if ref_type == "commit":
         # A pinned commit has no enumerable name to pattern-match against (see selection.py),
@@ -528,10 +547,14 @@ def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
     index_level, index_suffix = "repo", None
     if raw.get("index") is not None:
         index_level, index_suffix = _parse_index(raw["index"], ctx)
+    if update == "incremental" and index_level == "commit":
+        # Incremental content carries no git.commit of its own (see build_ref_key), so a
+        # commit-level index name -- which requires a commit sha -- can never be built for it.
+        raise ValueError(f"{ctx}: 'update: incremental' cannot be combined with 'index.level: commit'")
 
     selector = Selector(ref_type=ref_type, raw_patterns=patterns, compiled=compiled,
                         since=since, retain=retain, levels=levels, schedule=schedule,
-                        index_level=index_level, index_suffix=index_suffix)
+                        index_level=index_level, index_suffix=index_suffix, update=update)
     return host, org, repo, selector
 
 
