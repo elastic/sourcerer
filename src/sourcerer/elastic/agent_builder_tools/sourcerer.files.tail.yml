@@ -9,14 +9,21 @@ configuration:
     | WHERE git.host LIKE ?git_host
         AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
-        AND git.ref_key == ?git_ref_key
+        // A commit SHA (snapshot content) or the exact branch/tag name (incremental
+        // content, which has no git.commit of its own) -- whichever this source resolves to.
+        AND (git.commit == ?git_ref OR git.ref == ?git_ref)
         AND file.path LIKE ?file_path
 
-    // Resolve the commit for this ref_key via the universal join -- identical for
-    // snapshot and incremental content. Snapshot content already carries its own
-    // git.commit (equal to git.ref_key), so the join's value simply overwrites it in
-    // place; incremental content has no git.commit of its own, so the join supplies it.
+    // git.ref_key is purely an internal storage/join key (never a query param): every
+    // content doc and its refs join doc share the same ref_key, so this LOOKUP JOIN
+    // resolves each row's citable commit regardless of how the row above was scoped --
+    // by commit (snapshot) or by ref name (incremental).
     | LOOKUP JOIN sourcerer-refs ON git.ref_key
+
+    // Optional consistency guard: assert the branch hasn't advanced since git_ref was
+    // resolved (only meaningful when git_ref names an incremental branch; a no-op filter
+    // for a commit-scoped query, since git.commit already equals git_ref there).
+    | WHERE git.commit LIKE ?git_commit
 
     // Glob match (* and **) on file.path
     | EVAL _fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")
@@ -62,10 +69,15 @@ configuration:
       description: Filter by git repo(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
-    git_ref_key:
+    git_ref:
       type: string
-      description: Exact ref_key to scope to -- a commit SHA (snapshot content) or the incremental "{host}~{org}~{repo}~{ref}" key (see sourcerer.refs.list). Required exact match, no wildcards.
+      description: Exact commit SHA, or exact branch/tag name for an incremental source (no wildcards). Resolve via sourcerer.refs.list first.
       optional: false
+    git_commit:
+      type: string
+      description: Optional consistency guard (supports * wildcards) against the commit resolved by the LOOKUP JOIN -- e.g. assert an incremental branch hasn't advanced since git_ref was resolved. Omit (default "*") to skip the check.
+      optional: true
+      defaultValue: "*"
     file_path:
       type: string
       description: File path(s) to tail (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml)

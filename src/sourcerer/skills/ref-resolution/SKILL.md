@@ -36,10 +36,10 @@ Disambiguate based on context:
 - **Comparison or history** (e.g. "how has X evolved across 8.x?"): resolve to *all matching commits*. Collect every stable tag in the range; query each one separately. Label findings clearly by version.
 
 ### Comparison across versions (e.g. "8.x vs 9.x", "before and after 8.17")
-Resolve each ref independently using the steps above. Run content queries against each commit, then compare results. Label each finding with its version.
+Resolve each ref independently using the steps above. Run content queries against each resolved ref (see "Pinning the ref" below), then compare results. Label each finding with its version.
 
 ### Explicit ref (branch name, exact tag, commit hash)
-Use as given. If it is a branch, call `refs.list` with `git_ref_type: branch` to confirm it exists and retrieve its current commit. If it is a tag, confirm and get its commit. If it is a commit hash, use it directly - optionally confirm with `git_ref_type: commit` if it may be a pinned commit rather than one reached via a branch/tag.
+Use as given. If it is a branch, call `refs.list` with `git_ref_type: branch` to confirm it exists and retrieve its row. If it is a tag, confirm it the same way. If it is a commit hash, you don't need a `refs.list` call to use it in a content query (a commit hash is already a valid `git_ref` value) - optionally confirm with `git_ref_type: commit` if it may be a pinned commit rather than one reached via a branch/tag.
 
 ### Branch as of a specific date (e.g. "main as it was on 2024-03-01")
 When a branch was indexed with `since` (history walk), multiple snapshots of the branch exist —
@@ -47,26 +47,32 @@ one per historical commit. Resolve "branch as of date D" like this:
 1. Call `refs.list` with `git_ref_type: branch` and `git_ref: <branch>`.
 2. From the results, filter to markers with `commit_date <= D` and `status: complete`.
 3. Pick the marker with the **latest** `commit_date` among those (the branch state at the closest point on or before D).
-4. Use that marker's `git.commit` for content queries.
+4. Use that row for content queries as described below.
 
 If only one marker exists for the branch (tip-only indexing, no `since`), state that historical
 snapshots are unavailable for that branch.
 
-## Pinning the ref_key
-Every content query (`sourcerer.code.*` and `sourcerer.files.*`) takes the same single param,
-`git_ref_key`, and runs the identical universal join query underneath
-(`WHERE git.ref_key == ?git_ref_key | LOOKUP JOIN sourcerer-refs ON git.ref_key`) regardless of
-whether the source is indexed as `snapshot` or `incremental`. Derive it once a ref is resolved:
+## Pinning the ref
+Every content query (`sourcerer.code.*` and `sourcerer.files.*`) takes the same single required
+param, `git_ref`: an exact commit SHA, or an exact branch/tag name. The tool matches it against
+whichever field the content actually carries (`git.commit` for a `snapshot` source, `git.ref`
+for an `incremental` branch) and then joins to resolve the citable commit -- there is no mode
+you need to reason about.
 
-- **Snapshot** (the default; most tags and one-off branch indexes): resolve the ref to its
-  `git.commit` as above, then use that **commit SHA directly** as `git_ref_key` -- for snapshot
-  content, `git.ref_key == git.commit`.
-- **Incremental** (a branch source configured with `update: incremental` in `sourcerer.yml`;
-  `refs.list` surfaces its join doc with `update_mode: incremental` and no separate per-commit
-  history): build the `git_ref_key` directly as `{host}~{org}~{repo}~{ref}` (host/org/repo
-  lowercased, ref case-preserved, `~`-joined) -- no commit resolution needed, since the key names
-  the branch itself and the join always resolves it to the CURRENT indexed commit at query time.
+Once a ref is resolved above, pass the value straight through:
+- Resolved to a commit (tags, one-off branch snapshots -- the common case): use that commit SHA
+  as `git_ref`.
+- Resolved to an incremental branch (a source configured with `update: incremental` in
+  `sourcerer.yml`; its `refs.list` row has `status: ready`, not `complete`): use the branch name
+  itself as `git_ref` (e.g. `main`) -- no commit needed, the query always resolves to whatever
+  commit that branch is CURRENTLY at.
 
-Use the resulting `git_ref_key` in every subsequent content call for that repo and ref, and read
-the resolved `git.commit` back from the join for citations. Re-invoke this skill only when the
-question introduces a new or additional ref.
+`git.ref_key` is an internal storage/join detail (`LOOKUP JOIN sourcerer-refs ON git.ref_key`
+inside the tool) -- it is never a param you construct or a value `refs.list` returns.
+
+Read the resolved `git.commit` back from the same row (or from the content query's own join)
+for citations. Every content tool also accepts an optional `git_commit` param (default `"*"`):
+it filters the commit the join resolves, so passing the expected commit re-asserts that an
+incremental branch hasn't advanced since `git_ref` was resolved -- pass it when that matters
+(e.g. a long-running investigation), otherwise leave it at the default. Re-invoke this skill
+only when the question introduces a new or additional ref.

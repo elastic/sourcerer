@@ -88,9 +88,9 @@ The [`sourcerer.yml` specification](specs/sourcerer-yml.md) has the full referen
 ### Snapshot vs. incremental indexing (`update: <mode>`)
 
 Each source can set `update: snapshot` (the default) or `update: incremental` (branch-only).
-Both modes write content that carries a `git.ref_key`, and every Agent Builder tool query and
-skill resolves a commit the same way regardless of mode:
-`WHERE git.ref_key == ?git_ref_key | LOOKUP JOIN sourcerer-refs ON git.ref_key`.
+Every Agent Builder content tool takes the same `git_ref` param either way (a commit SHA or an
+exact branch/tag name) and resolves a commit the same way regardless of mode; `git.ref_key` is
+an internal storage/join detail, never something the agent constructs or passes.
 
 - **`snapshot`** (default): content is commit-addressed, exactly as before. `git.ref_key` is the
   commit SHA itself, so every ref (branch, tag, or pinned commit) that resolves to the same

@@ -387,19 +387,26 @@ from the hashed, append-only `build_ref_id` ref-name markers described above (th
 `since`/retention history and are untouched by this).
 
 Every Agent Builder content tool (`sourcerer.code.*`, `sourcerer.files.*`) therefore runs the
-same query shape regardless of mode, with no `update_mode` conditional:
+same query shape regardless of mode, with no `update_mode` conditional -- and `git.ref_key` is
+NEVER an agent-facing param, only the internal join field:
 
 ```esql
 FROM sourcerer-lines
-| WHERE git.ref_key == ?git_ref_key AND ...
+| WHERE ... AND (git.commit == ?git_ref OR git.ref == ?git_ref)
 | LOOKUP JOIN sourcerer-refs ON git.ref_key
+| WHERE git.commit LIKE ?git_commit
 ```
 
-`git_ref_key` is a required, exact-match param (no wildcards) -- resolve a ref to it first (see
-`src/sourcerer/skills/ref-resolution/SKILL.md`): a snapshot ref resolves to its commit and uses
-that commit directly as `git_ref_key`; an incremental branch builds `{host}~{org}~{repo}~{ref}`
-directly, no commit resolution needed. The join adds/overwrites `git.commit` on every row, so
-snapshot content (which already carries its own, identical `git.commit`) is unaffected and
+`git_ref` is a required, exact-match param (no wildcards) -- resolve a ref first (see
+`src/sourcerer/skills/ref-resolution/SKILL.md`), then pass through whatever it resolved to: a
+snapshot ref's commit SHA, or an incremental branch's plain name (e.g. `main`) -- no construction,
+no `ref_key` involved. The tool matches `git_ref` against whichever field the row actually
+carries (`git.commit` for snapshot, `git.ref` for incremental), so the same param and the same
+query shape work for both without the caller knowing which mode it is. `git_commit` is optional
+(default `"*"`) and filters the commit the join resolves -- it lets a caller assert the branch it
+resolved `git_ref` against hasn't since advanced; a no-op for a commit-scoped query, since
+`git.commit` already equals `git_ref` there. The join adds/overwrites `git.commit` on every row,
+so snapshot content (which already carries its own, identical `git.commit`) is unaffected and
 incremental content (which has none) gets it from the join.
 
 ### Upgrade backfill (`--no-backfill`)
