@@ -96,6 +96,9 @@
         },
         "index_suffix": {
           "type": "keyword"
+        },
+        "update_mode": {
+          "type": "keyword"
         }
       }
     }

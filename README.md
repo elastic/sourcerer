@@ -413,6 +413,7 @@ the repo root. uv reads `pyproject.toml`, provisions a matching Python, and sync
 dependencies into an isolated `./.venv` (gitignored) on first run:
 
 ```sh
+uv sync --extra dev
 uv run sourcerer help
 uv run sourcerer setup
 uv run sourcerer index elastic/elasticsearch -b main

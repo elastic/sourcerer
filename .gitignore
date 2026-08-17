@@ -13,6 +13,7 @@ vendor/
 
 # Secrets & local config
 .env
+sourcerer.yml
 
 # macOS
 .DS_Store

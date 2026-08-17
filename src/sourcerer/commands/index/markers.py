@@ -458,7 +458,7 @@ def write_ref_marker(
     #
     # index_level/index_suffix record this source's index.* routing (semantic, not the resolved
     # index name). The physical files/lines index is reconstructed on demand from git.host/org/
-    # repo/commit + these two fields via indices.files_index/lines_index, so a v2->v3 prefix bump
+    # repo/commit + these two fields via indices.files_index/lines_index, so a v3->v4 prefix bump
     # stays correct and prune/migration can find (and clean up) exactly where content lives.
     # Legacy markers written before this feature omit both; readers fall back to the "repo"/None
     # defaults, which reconstruct to the historical repo-level name where that content actually is.
