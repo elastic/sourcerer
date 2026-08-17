@@ -1,6 +1,6 @@
 """Tests for the incremental (ref-addressed) branch orchestration in
 sourcerer.commands.index.command.index_incremental_branch_in_dir: the two-phase
-indexing -> ready publication, full rebuild vs delta update selection, and failure handling.
+indexing -> complete publication, full rebuild vs delta update selection, and failure handling.
 Every ES call and every git/documents side effect is mocked/patched -- these are orchestration
 tests, not an end-to-end index run (see specs/incremental-indexing.md Task 16 for that)."""
 
@@ -116,7 +116,7 @@ class TestIncrementalIndexDeltaRun:
             mocks["index_incremental_paths"].assert_not_called()
             mocks["write_incremental_indexing"].assert_not_called()
             mocks["write_incremental_ready"].assert_not_called()
-            assert unit.status == "skipped"
+            assert unit.status == "no-changes"
         finally:
             _stop(patchers)
 

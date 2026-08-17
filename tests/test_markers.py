@@ -471,7 +471,7 @@ class TestWriteIncrementalReady:
                                  commit_date_iso="2026-02-02T00:00:00+00:00",
                                  files_count=5, lines_count=99)
         doc = _indexed_doc(es)
-        assert doc["status"] == "ready"
+        assert doc["status"] == "complete"
         assert doc["git"]["commit"] == NEW  # advances only after a successful run (INV-006)
         assert doc["git"]["target_commit"] is None
         assert doc["error"] is None and doc["failed_at"] is None

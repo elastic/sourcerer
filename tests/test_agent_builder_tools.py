@@ -83,13 +83,13 @@ def test_refs_list_does_not_surface_ref_key():
             assert "ref_key" not in line
 
 
-def test_refs_list_default_status_also_surfaces_incremental_ready():
-    # Incremental join docs are never status:"complete" (only "ready"/"indexing" -- see
-    # markers.write_incremental_ready/write_incremental_indexing), so the default (no-arg)
-    # call must not silently omit every incremental branch.
+def test_refs_list_default_status_surfaces_all_refs():
+    # Incremental join docs now use status:"complete" (same as snapshot), so the default
+    # ?status == "complete" correctly surfaces all indexed refs without a special-case.
     tool = _tools()["sourcerer.refs.list"]
     query = tool["configuration"]["query"]
-    assert 'status == "ready"' in query
+    assert 'status == "ready"' not in query  # special-case removed; no longer needed
+    assert "status LIKE ?status" in query
     assert tool["configuration"]["params"]["status"]["defaultValue"] == "complete"
 
 

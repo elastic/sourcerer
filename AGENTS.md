@@ -73,7 +73,7 @@ lives only on its refs join doc (`_id = git.ref_key`). A HEAD advance runs `git 
 reindexes the paths git reports changed -- add/modify/delete/rename/copy -- instead of
 reindexing the whole tree. A missing diff base (force-push, GC'd, or the first index) rebuilds
 the whole branch namespace. The refs join doc publishes `status: indexing` before any content
-change and `status: ready` (with the new commit) only after the deletes/indexes/refresh all
+change and `status: complete` (with the new commit) only after the deletes/indexes/refresh all
 succeed, so a crash mid-update leaves the prior commit and content in place.
 
 ```yaml
@@ -385,6 +385,17 @@ distinct kind of `sourcerer-v3-refs` document -- a **refs join doc**, `_id = git
 one per branch (holding the live HEAD) for incremental content. This is a different id space
 from the hashed, append-only `build_ref_id` ref-name markers described above (those still drive
 `since`/retention history and are untouched by this).
+
+#### `status` field values
+
+Every `sourcerer-v3-refs` document — ref-name markers (keyed by `build_ref_id`) and refs join
+docs (keyed by `ref_key`) alike — carries a `status` field drawn from a shared two-value
+vocabulary, so the scheduler and `sourcerer.refs.list` can query both families uniformly:
+
+| Value | Meaning |
+|---|---|
+| `indexing` | A run is mid-flight. `indexing_started_at` is set; `indexed_at` is absent/null. Present on both ref-name markers (written by `write_indexing_marker` just before snapshot ingest) and incremental join docs (written by `write_incremental_indexing` just before incremental ingest). A stale `indexing` doc whose `indexing_started_at` is older than the retry window (default 6 h) marks a crashed run and is treated as due for re-indexing. |
+| `complete` | Fully indexed and ready to query. `indexed_at` is set; `indexing_started_at` is absent/null (the terminal write drops it). Written by `write_ref_marker` (snapshot ref-name markers), `write_snapshot_join_doc` (snapshot join docs), and `write_incremental_ready` (incremental join docs). The scheduler's "last indexed" aggregation and `sourcerer.refs.list`'s default `?status == "complete"` filter both use this value. |
 
 Every Agent Builder content tool (`sourcerer.code.*`, `sourcerer.files.*`) therefore runs the
 same query shape regardless of mode, with no `update_mode` conditional -- and `git.ref_key` is

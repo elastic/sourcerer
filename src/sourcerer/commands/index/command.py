@@ -299,7 +299,7 @@ def index_incremental_branch_in_dir(
         new commit, deleting only the paths git reports removed/changed and (re)indexing only the
         paths git reports added/changed (INV-008 -- scoped by the exact `ref_key`, never a whole
         namespace sweep).
-    The refs join doc is published `indexing` before any mutation and `ready` only after the
+    The refs join doc is published `indexing` before any mutation and `complete` only after the
     content deletes/indexes and a refresh all succeed (INV-006); a raised exception instead
     records `write_incremental_failed` and leaves the completed pointer untouched, then
     re-raises so the caller's per-unit error handling reports it.
@@ -318,7 +318,7 @@ def index_incremental_branch_in_dir(
     old_sha = None if force else (prior.get("git", {}).get("commit") if prior else None)
 
     if old_sha == new_sha and not force:
-        reporter.finish(unit, "skipped")
+        reporter.finish(unit, "no-changes")
         return
 
     level = unit.index_level
@@ -336,7 +336,7 @@ def index_incremental_branch_in_dir(
         if full_rebuild:
             delete_incremental_branch(es, host, org, repo, branch, index_level=level, index_suffix=suffix)
             reporter.set_total_files(unit, count_tracked_files(repo_dir))
-            index_incremental_paths(
+            indexed_files, indexed_lines = index_incremental_paths(
                 es, host, org, repo, repo_dir, branch, None,
                 on_progress=lambda f, l: reporter.update_counts(unit, f, l),
                 index_level=level, index_suffix=suffix,
@@ -345,7 +345,7 @@ def index_incremental_branch_in_dir(
             delete_incremental_paths(es, host, org, repo, branch, plan.delete_paths,
                                      index_level=level, index_suffix=suffix)
             reporter.set_total_files(unit, len(plan.index_paths))
-            index_incremental_paths(
+            indexed_files, indexed_lines = index_incremental_paths(
                 es, host, org, repo, repo_dir, branch, plan.index_paths,
                 on_progress=lambda f, l: reporter.update_counts(unit, f, l),
                 index_level=level, index_suffix=suffix,
@@ -365,7 +365,7 @@ def index_incremental_branch_in_dir(
         write_incremental_failed(es, host, org, repo, branch, completed_commit=old_sha,
                                  target_commit=new_sha, error=str(e), prior=prior)
         raise
-    reporter.finish(unit, "indexed", files_count, lines_count)
+    reporter.finish(unit, "indexed", indexed_files, indexed_lines)
 
 
 def index_one(

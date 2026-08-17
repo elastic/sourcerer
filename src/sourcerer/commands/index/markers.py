@@ -539,7 +539,7 @@ def pre_clone_skip(
 # --- refs join docs (git.ref_key), keyed by `_id = ref_key` -------------------------------
 # One document per `ref_key` (INV-004): snapshot content's join doc lives at `_id = <commit>`;
 # an incremental branch's single join doc lives at `_id = {host}~{org}~{repo}~{ref}` and its
-# `git.commit` is the branch's live HEAD, advanced only by a two-phase indexing -> ready
+# `git.commit` is the branch's live HEAD, advanced only by a two-phase indexing -> complete
 # publication (INV-006). These are a DISTINCT id space from `build_ref_id`'s hashed, append-only
 # ref-name markers above (untouched -- they still drive `since`/retention history); a join doc's
 # `_id` is a plain, unhashed `ref_key` string, which a `build_ref_id` hash can never collide with.
@@ -678,12 +678,12 @@ def write_incremental_ready(
     lines_count: int,
     refresh: bool = True,
 ) -> None:
-    """Publish `status: ready` at the NEW completed commit, clearing `target_commit` and any
+    """Publish `status: complete` at the NEW completed commit, clearing `target_commit` and any
     prior failure fields. This is the pointer-advancing publication boundary (INV-006): callers
     must delete+index+refresh the content indices FIRST, then call this."""
     doc = _build_incremental_join_doc(
         host, org, repo, ref,
-        status="ready",
+        status="complete",
         commit=commit,
         target_commit=None,
         commit_date_iso=commit_date_iso,

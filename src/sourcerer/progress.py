@@ -40,7 +40,7 @@ class Unit:
 
     `ref` may be None until a default branch is resolved. `kind` is one of
     branch|tag|commit|default. `status` is set once on completion to one of
-    indexed|skipped|tagged|recorded|error.
+    indexed|skipped|no-changes|tagged|recorded|error.
     """
 
     host: str
@@ -188,6 +188,8 @@ class ProgressReporter:
             return f"✓ {unit.label} - tagged existing content ({counts})"
         if unit.status == "recorded":
             return f"✓ {unit.label} - content already indexed, recorded ref ({counts})"
+        if unit.status == "no-changes":
+            return f"• {unit.label} - no changes, skipped"
         if unit.status == "skipped":
             return f"• {unit.label} - already indexed, skipped"
         if unit.status == "error":
@@ -207,7 +209,7 @@ class ProgressReporter:
         files = sum(u.files for u in self.units)
         lines = sum(u.lines for u in self.units)
         order = [("indexed", "indexed"), ("tagged", "tagged"), ("recorded", "recorded"),
-                 ("skipped", "skipped"), ("error", "failed")]
+                 ("skipped", "skipped"), ("no-changes", "no changes"), ("error", "failed")]
         parts = [f"{by[k]} {label}" for k, label in order if by.get(k)]
         body = ", ".join(parts) or "nothing to do"
         return f"Done in {format_elapsed(time.monotonic() - self.start_time)} - {body}; {files:,} files, {lines:,} lines"

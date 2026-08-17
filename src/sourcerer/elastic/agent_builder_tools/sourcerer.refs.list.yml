@@ -12,11 +12,7 @@ configuration:
         AND git.commit LIKE ?git_commit
         AND git.ref LIKE ?git_ref
         AND git.ref_type LIKE ?git_ref_type
-        // An incremental branch's join doc is never "complete" (only "ready"/"indexing" --
-        // see markers.write_incremental_ready/write_incremental_indexing), so the default
-        // ?status == "complete" must also surface "ready" docs, or the default (no-arg) call
-        // this skill documents would silently omit every incremental branch from the results.
-        AND (status LIKE ?status OR (?status == "complete" AND status == "ready"))
+        AND status LIKE ?status
 
     // Format the response
     | SORT indexed_at DESC
@@ -59,6 +55,6 @@ configuration:
       defaultValue: "*"
     status:
       type: string
-      description: Filter by ref status. "complete" = fully indexed (default; also includes incremental branches, whose join doc status is "ready" rather than "complete"); "indexing" = currently being indexed; "*" = all statuses.
+      description: Filter by ref status. "complete" = fully indexed (default); "indexing" = currently being indexed; "*" = all statuses.
       optional: true
       defaultValue: "complete"

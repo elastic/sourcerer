@@ -63,7 +63,7 @@ Once a ref is resolved above, pass the value straight through:
 - Resolved to a commit (tags, one-off branch snapshots -- the common case): use that commit SHA
   as `git_ref`.
 - Resolved to an incremental branch (a source configured with `update: incremental` in
-  `sourcerer.yml`; its `refs.list` row has `status: ready`, not `complete`): use the branch name
+  `sourcerer.yml`; its `refs.list` row has `status: complete`, same as a snapshot ref): use the branch name
   itself as `git_ref` (e.g. `main`) -- no commit needed, the query always resolves to whatever
   commit that branch is CURRENTLY at.
 
