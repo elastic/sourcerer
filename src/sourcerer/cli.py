@@ -272,7 +272,7 @@ def setup(url, api_key, username, password, kb_url, config_path, include_experim
     "--no-backfill",
     is_flag=True,
     default=False,
-    help="Skip the one-time upgrade backfill that stamps git.ref_key/update_mode onto "
+    help="Skip the one-time upgrade backfill that stamps git.ref_key onto "
     "pre-existing snapshot content and migrates the refs index (default: run it, idempotently, "
     "on every invocation).",
 )

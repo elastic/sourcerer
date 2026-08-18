@@ -95,7 +95,6 @@ def build_file_doc(
             # commit itself is the stable join key (see build_ref_key for the incremental shape).
             "ref_key": commit_sha,
         },
-        "update_mode": "snapshot",
         "file": file_fields,
     }
     # Content identity is (host, org, repo, commit, path): the same blob reached via any ref
@@ -144,7 +143,6 @@ def iter_line_docs(
             "commit": commit_sha,
             "ref_key": commit_sha,
         },
-        "update_mode": "snapshot",
         "file": file_fields,
     }
     for line_num, line_content in enumerate(content.splitlines(), start=1):
@@ -208,7 +206,6 @@ def build_incremental_file_doc(
             "ref_type": "branch",
             "ref_key": build_ref_key(host, org, repo, ref),
         },
-        "update_mode": "incremental",
         "file": file_fields,
     }
     _id = make_doc_id(host, org, repo, "branch", ref, rel_path)
@@ -255,7 +252,6 @@ def iter_incremental_line_docs(
             "ref_type": "branch",
             "ref_key": build_ref_key(host, org, repo, ref),
         },
-        "update_mode": "incremental",
         "file": file_fields,
     }
     for line_num, line_content in enumerate(content.splitlines(), start=1):

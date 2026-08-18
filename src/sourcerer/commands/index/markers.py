@@ -846,16 +846,16 @@ def refresh_incremental_content(
 
 
 # --- one-time upgrade backfill (default-on; --no-backfill opts out) -----------------------
-# Stamps `git.ref_key`/`update_mode` onto pre-existing snapshot content that predates this
-# feature, migrates the refs index mapping, and creates the missing `_id = commit` join docs
-# (INV-009/INV-010). Safe to run on every `index` invocation: both the content update and the
-# join-doc creation are no-ops the second time.
+# Stamps `git.ref_key` onto pre-existing snapshot content that predates this feature, migrates
+# the refs index mapping, and creates the missing `_id = commit` join docs (INV-009/INV-010).
+# Safe to run on every `index` invocation: both the content update and the join-doc creation
+# are no-ops the second time.
 
 def backfill_snapshot_ref_keys(es: Elasticsearch, host: str, org: str, repo: str) -> int:
-    """Idempotent `_update_by_query` stamping `git.ref_key = git.commit` + `update_mode:
-    "snapshot"` onto this repo's content docs that lack `git.ref_key` (pre-upgrade data).
-    Returns the total number of docs updated across the files and lines aliases; 0 on a repeat
-    run (INV-009) since the `must_not: exists` filter then matches nothing."""
+    """Idempotent `_update_by_query` stamping `git.ref_key = git.commit` onto this repo's
+    content docs that lack `git.ref_key` (pre-upgrade data). Returns the total number of docs
+    updated across the files and lines aliases; 0 on a repeat run (INV-009) since the
+    `must_not: exists` filter then matches nothing."""
     query = {
         "bool": {
             "filter": [
@@ -867,10 +867,7 @@ def backfill_snapshot_ref_keys(es: Elasticsearch, host: str, org: str, repo: str
         }
     }
     script = {
-        "source": (
-            "ctx._source.git.ref_key = ctx._source.git.commit; "
-            "ctx._source.update_mode = 'snapshot';"
-        ),
+        "source": "ctx._source.git.ref_key = ctx._source.git.commit;",
         "lang": "painless",
     }
     total = 0
@@ -988,10 +985,10 @@ def apply_refs_index_mapping(es: Elasticsearch, mapping: dict) -> None:
 def apply_content_index_mapping(es: Elasticsearch, files_mapping: dict, lines_mapping: dict) -> None:
     """Apply the updated files/lines template mappings to every EXISTING physical content index
     behind the read aliases. This must run BEFORE `backfill_snapshot_ref_keys` writes
-    `git.ref_key`/`update_mode` onto pre-existing content: an index created before this feature
-    has no explicit mapping for those fields, so the first `_update_by_query` write would
-    otherwise fall back to ES's dynamic string mapping (`text`, no fielddata) instead of the
-    `keyword` type the template defines -- silently breaking every later `git.ref_key`
+    `git.ref_key` onto pre-existing content: an index created before this feature has no
+    explicit mapping for that field, so the first `_update_by_query` write would otherwise
+    fall back to ES's dynamic string mapping (`text`, no fielddata) instead of the `keyword`
+    type the template defines -- silently breaking every later `git.ref_key`
     aggregation/sort/exact-match query. `put_mapping` against an alias updates every backing
     index it resolves to. A no-op if neither alias has any backing index yet."""
     for alias, mapping in ((FILES_ALIAS, files_mapping), (LINES_ALIAS, lines_mapping)):
@@ -1006,9 +1003,9 @@ def backfill_repo(
     files_mapping: dict | None = None, lines_mapping: dict | None = None,
 ) -> dict:
     """Run the full one-time upgrade for one repo: apply the updated content/refs index
-    mappings (once, if given -- must happen BEFORE the content update so the new fields land
-    typed correctly rather than dynamically guessed), stamp `ref_key`/`update_mode` onto
-    pre-existing snapshot content (idempotent), and create a join doc for every already-indexed
+    mappings (once, if given -- must happen BEFORE the content update so the new field lands
+    typed correctly rather than dynamically guessed), stamp `ref_key` onto pre-existing
+    snapshot content (idempotent), and create a join doc for every already-indexed
     commit that lacks one. Returns a small summary dict for reporting; every field is 0 on a
     repeat run (INV-009)."""
     if files_mapping is not None and lines_mapping is not None:

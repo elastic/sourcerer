@@ -68,10 +68,6 @@
             }
           }
         },
-        "update_mode": {
-          "type": "keyword",
-          "normalizer": "lowercase"
-        },
         "file": {
           "properties": {
             "path": {

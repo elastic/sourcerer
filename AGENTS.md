@@ -398,8 +398,8 @@ vocabulary, so the scheduler and `sourcerer.refs.list` can query both families u
 | `complete` | Fully indexed and ready to query. `indexed_at` is set; `indexing_started_at` is absent/null (the terminal write drops it). Written by `write_ref_marker` (snapshot ref-name markers), `write_snapshot_join_doc` (snapshot join docs), and `write_incremental_ready` (incremental join docs). The scheduler's "last indexed" aggregation and `sourcerer.refs.list`'s default `?status == "complete"` filter both use this value. |
 
 Every Agent Builder content tool (`sourcerer.code.*`, `sourcerer.files.*`) therefore runs the
-same query shape regardless of mode, with no `update_mode` conditional -- and `git.ref_key` is
-NEVER an agent-facing param, only the internal join field:
+same query shape regardless of mode -- and `git.ref_key` is NEVER an agent-facing param, only
+the internal join field:
 
 ```esql
 FROM sourcerer-lines
@@ -423,8 +423,8 @@ incremental content (which has none) gets it from the join.
 ### Upgrade backfill (`--no-backfill`)
 
 `sourcerer index` runs a one-time, idempotent upgrade backfill by default on every invocation:
-an `_update_by_query` stamps `git.ref_key = git.commit` + `update_mode: snapshot` onto
-pre-existing snapshot content that predates this feature, the refs index's mapping is
+an `_update_by_query` stamps `git.ref_key = git.commit` onto pre-existing snapshot content
+that predates this feature, the refs index's mapping is
 re-applied to the existing physical index (a template change alone only affects indices
 created afterward), and a snapshot refs join doc is created for every already-indexed commit
 that lacks one. Pass `--no-backfill` to skip it. Safe to run every time: a repeat run touches

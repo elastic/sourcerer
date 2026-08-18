@@ -80,7 +80,6 @@ class TestBuildFileDoc:
         _id, doc = build_file_doc("github", "acme", "widgets", "deadbeef", "a.txt", p)
         assert doc["git"] == {"host": "github", "org": "acme", "repo": "widgets", "commit": "deadbeef",
                               "ref_key": "deadbeef"}
-        assert doc["update_mode"] == "snapshot"
 
     def test_host_changes_id(self, tmp_path):
         p = tmp_path / "a.txt"
@@ -131,11 +130,10 @@ class TestBuildFileDoc:
 
 
 class TestIterLineDocs:
-    def test_snapshot_ref_key_and_update_mode(self):
+    def test_snapshot_ref_key(self):
         docs = list(iter_line_docs("github", "acme", "widgets", "deadbeef", "a.txt", "one"))
         _id, doc = docs[0]
         assert doc["git"]["ref_key"] == "deadbeef"
-        assert doc["update_mode"] == "snapshot"
 
     def test_line_numbering_starts_at_one(self):
         docs = list(iter_line_docs("github", "acme", "widgets", "deadbeef", "a.txt", "one\ntwo\nthree"))
@@ -192,12 +190,6 @@ class TestIncrementalDocs:
         _id, doc = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
         assert "commit" not in doc["git"]
 
-    def test_update_mode_incremental(self, tmp_path):
-        p = tmp_path / "a.txt"
-        p.write_text("hello")
-        _id, doc = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
-        assert doc["update_mode"] == "incremental"
-
     def test_id_stable_across_commits(self, tmp_path):
         # The whole point of ref-addressing: the id does not depend on the commit, only the
         # ref, so a modified file's doc overwrites in place rather than minting a new id.
@@ -220,7 +212,6 @@ class TestIncrementalDocs:
         for _id, d in docs:
             assert d["git"]["ref_key"] == "github~acme~widgets~main"
             assert "commit" not in d["git"]
-            assert d["update_mode"] == "incremental"
 
     def test_worker_ctx_routes_to_incremental_builders(self, tmp_path):
         (tmp_path / "a.txt").write_text("one\ntwo\n")

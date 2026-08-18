@@ -1,6 +1,6 @@
 """Tests for the one-time upgrade backfill in sourcerer.commands.index.markers: stamping
-git.ref_key/update_mode onto pre-existing snapshot content, migrating the refs index mapping,
-and creating missing snapshot join docs. Every ES call is mocked (INV-009/INV-010)."""
+git.ref_key onto pre-existing snapshot content, migrating the refs index mapping, and
+creating missing snapshot join docs. Every ES call is mocked (INV-009/INV-010)."""
 
 # Standard packages
 from unittest.mock import MagicMock
