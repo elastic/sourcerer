@@ -9,7 +9,20 @@ configuration:
     | WHERE git.host LIKE ?git_host
         AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
-        AND git.commit LIKE ?git_commit
+        AND git.ref_key IN (
+          // Resolve ?git_commit_ish against the small sourcerer-refs lookup table first, rather than
+          // evaluating the LIKE/OR wildcard match per line against this (far larger) content index.
+          // The subquery narrows host/org/repo/status/commit-ish down to a set of git.ref_key values
+          // once; the outer query then does a cheap membership check instead of a wildcard match on
+          // every row.
+            FROM sourcerer-refs
+            | WHERE git.host LIKE ?git_host
+                AND git.org LIKE ?git_org
+                AND git.repo LIKE ?git_repo
+                AND status == "complete"
+                AND (git.commit LIKE ?git_commit_ish OR git.ref LIKE ?git_commit_ish)
+            | KEEP git.ref_key
+          )
         AND file.path LIKE ?file_path
         AND MATCH(line.content.text, ?q)
 
@@ -19,16 +32,22 @@ configuration:
     | EVAL _file_segs = MV_COUNT(SPLIT(file.path, "/"))
     | WHERE _fp_is_recursive OR _file_segs == _fp_segs
 
-    // Collapse matching lines to one row per repo + commit
+    // Collapse matching lines to one row per repo + ref. Grouping by git.ref_key
+    // rather than git.commit matters for two reasons: incremental (branch-tracked)
+    // rows have no git.commit of their own, so grouping by commit would collapse
+    // every branch in a repo into one bucket; and two refs can point at the same
+    // commit (e.g. a release tag and the branch it was cut from), which grouping
+    // by commit would wrongly conflate into a single ref. ref_key is already
+    // present on every sourcerer-lines row, so no join is needed to get it.
     | STATS
         _commit_file_count_distinct = COUNT_DISTINCT(file.path),
         _commit_score_sum = SUM(_score)
-        BY git.host, git.org, git.repo, git.commit
+        BY git.host, git.org, git.repo, git.ref_key
 
     // Normalize by distinct files so breadth beats duplication
     | EVAL _commit_score_density = _commit_score_sum / SQRT(TO_DOUBLE(_commit_file_count_distinct))
 
-    // Collapse commits to one row per repo
+    // Collapse refs to one row per repo
     | STATS
         _repo_ref_count = COUNT(*),
         _repo_score_sum = SUM(_commit_score_density)
@@ -57,9 +76,9 @@ configuration:
       description: Filter by git repo(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
-    git_commit:
+    git_commit_ish:
       type: string
-      description: Filter by git commit(s) (supports * wildcards)
+      description: Filter by git commit(s) or ref(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     file_path:

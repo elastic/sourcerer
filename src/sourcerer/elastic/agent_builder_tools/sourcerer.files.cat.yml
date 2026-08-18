@@ -9,9 +9,20 @@ configuration:
     | WHERE git.host LIKE ?git_host
         AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
-        // A commit SHA (snapshot content) or the exact branch/tag name (incremental
-        // content, which has no git.commit of its own) -- whichever this source resolves to.
-        AND (git.commit == ?git_ref OR git.ref == ?git_ref)
+        AND git.ref_key IN (
+          // Resolve ?git_commit_ish against the small sourcerer-refs lookup table first, rather than
+          // evaluating the LIKE/OR wildcard match per line against this (far larger) content index.
+          // The subquery narrows host/org/repo/status/commit-ish down to a set of git.ref_key values
+          // once; the outer query then does a cheap membership check instead of a wildcard match on
+          // every row.
+            FROM sourcerer-refs
+            | WHERE git.host LIKE ?git_host
+                AND git.org LIKE ?git_org
+                AND git.repo LIKE ?git_repo
+                AND status == "complete"
+                AND (git.commit LIKE ?git_commit_ish OR git.ref LIKE ?git_commit_ish)
+            | KEEP git.ref_key
+          )
         AND file.path LIKE ?file_path
 
     // git.ref_key is purely an internal storage/join key (never a query param): every
@@ -20,10 +31,12 @@ configuration:
     // by commit (snapshot) or by ref name (incremental).
     | LOOKUP JOIN sourcerer-refs ON git.ref_key
 
-    // Optional consistency guard: assert the branch hasn't advanced since git_ref was
-    // resolved (only meaningful when git_ref names an incremental branch; a no-op filter
-    // for a commit-scoped query, since git.commit already equals git_ref there).
-    | WHERE git.commit LIKE ?git_commit
+    // Consistency guard: only serve content from a ref whose latest index is complete. This
+    // excludes the torn/partial-read window while an incremental branch is mid-reindex (its refs
+    // join doc is status:"indexing" until the new commit's content is fully published). A no-op
+    // for snapshot content, whose join doc is always status:"complete". `status` lives only on
+    // refs docs, so after the join it unambiguously means the joined ref's status.
+    | WHERE status == "complete"
 
     // Glob match (* and **) on file.path
     | EVAL _fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")
@@ -70,13 +83,9 @@ configuration:
       description: Filter by git repo(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
-    git_ref:
+    git_commit_ish:
       type: string
-      description: Exact commit SHA, or exact branch/tag name for an incremental source (no wildcards). Resolve via sourcerer.refs.list first.
-      optional: false
-    git_commit:
-      type: string
-      description: Optional consistency guard (supports * wildcards) against the commit resolved by the LOOKUP JOIN -- e.g. assert an incremental branch hasn't advanced since git_ref was resolved. Omit (default "*") to skip the check.
+      description: Filter by git commit(s) or ref(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
     file_path:

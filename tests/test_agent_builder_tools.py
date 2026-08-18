@@ -4,6 +4,7 @@ carry it into citation output. Parses the YAML and inspects the ESQL query text;
 
 # Standard packages
 import importlib.resources as resources
+import re
 
 # Third-party packages
 import pytest
@@ -49,28 +50,42 @@ _CONTENT_TOOL_IDS = (
 
 
 def test_content_tools_use_universal_ref_join_query():
-    # INV-005: every content tool's WHERE runs the identical `(git.commit == ?git_ref OR
-    # git.ref == ?git_ref)` shape with no update_mode/mode conditional, and joins sourcerer-refs
-    # on git.ref_key (a purely internal field -- never an agent-facing param) to resolve the
-    # commit for both snapshot and incremental content. git_commit survives as an optional
-    # POST-join consistency guard (not a scoping filter -- git_ref is the scoping param).
+    # INV-005: every content tool scopes to a set of git.ref_key values resolved from the small
+    # sourcerer-refs table via a subquery (`git.ref_key IN (FROM sourcerer-refs | WHERE ... (git.commit
+    # LIKE ?git_commit_ish OR git.ref LIKE ?git_commit_ish) | KEEP git.ref_key)`) rather than a
+    # per-row LIKE/OR wildcard match on the (far larger) content index, with no update_mode/mode
+    # conditional. It then joins sourcerer-refs on git.ref_key (a purely internal field -- never an
+    # agent-facing param) to resolve the commit for both snapshot and incremental content.
+    # git_commit_ish is the single scoping param (LIKE, so it supports wildcards); there is no
+    # separate git_commit param. A post-join `status == "complete"` guard excludes torn/partial
+    # reads while an incremental branch is mid-reindex (a no-op for always-complete snapshot content).
     tools = _tools()
     for tid in _CONTENT_TOOL_IDS:
         query = tools[tid]["configuration"]["query"]
         params = tools[tid]["configuration"]["params"]
         assert "update_mode" not in query, f"{tid} query has an update_mode conditional"
-        assert "git.commit == ?git_ref" in query, f"{tid} missing the commit-or-ref filter"
-        assert "git.ref == ?git_ref" in query, f"{tid} missing the commit-or-ref filter"
+        # The commit-or-ref match resolves inside the sourcerer-refs subquery, keyed by git.ref_key.
+        assert "git.ref_key IN (" in query, f"{tid} missing the ref_key subquery scope"
+        assert "git.commit LIKE ?git_commit_ish" in query, f"{tid} missing the commit-or-ref filter"
+        assert "git.ref LIKE ?git_commit_ish" in query, f"{tid} missing the commit-or-ref filter"
         assert "| LOOKUP JOIN sourcerer-refs ON git.ref_key" in query, f"{tid} missing the universal join"
         assert "git_ref_key" not in params, f"{tid} still exposes git_ref_key as a param"
         assert "?git_ref_key" not in query, f"{tid} still references ?git_ref_key"
-        assert params["git_ref"]["optional"] is False
-        assert "defaultValue" not in params["git_ref"]
-        assert params["git_commit"]["optional"] is True
-        assert params["git_commit"]["defaultValue"] == "*"
-        # The git_commit filter must appear AFTER the join (it filters the joined value, not
-        # the raw content doc -- incremental content has no git.commit of its own).
-        assert query.index("LOOKUP JOIN sourcerer-refs") < query.index("git.commit LIKE ?git_commit")
+        # git_commit_ish is optional with a "*" default: an unpinned query matches all indexed
+        # refs. Every content tool keeps this safe by carrying git.commit through to output (and,
+        # where it aggregates, grouping BY git.commit) so multi-ref matches stay attributable and
+        # are never summed across refs.
+        assert params["git_commit_ish"]["optional"] is True
+        assert params["git_commit_ish"]["defaultValue"] == "*"
+        # The old standalone git_commit guard param is gone: git_commit_ish is the sole scoping
+        # param, and the consistency guard is now the automatic, no-param `status == "complete"`.
+        # (Match on word boundary so ?git_commit_ish / git_commit_ish don't false-positive.)
+        assert not re.search(r"\bgit_commit\b", "\n".join(params)), f"{tid} still exposes git_commit as a param"
+        assert not re.search(r"\?git_commit\b", query), f"{tid} still references ?git_commit"
+        # The status guard must appear AFTER the join (status lives only on the refs doc the join
+        # brings in, never on the raw content doc).
+        assert '| WHERE status == "complete"' in query, f"{tid} missing the post-join status guard"
+        assert query.index("LOOKUP JOIN sourcerer-refs") < query.index('WHERE status == "complete"')
 
 
 def test_refs_list_does_not_surface_ref_key():
@@ -102,6 +117,35 @@ def test_output_keeps_git_host():
             if stripped.startswith("| KEEP") and "git.org" in stripped:
                 assert "git.host" in stripped, f"{tid} KEEP omits git.host"
                 assert stripped.index("git.host") < stripped.index("git.org")
+
+
+def test_content_tool_aggregation_is_ref_scoped():
+    # git_commit_ish defaults to "*", so a content query can match more than one ref at once.
+    # That is only safe if aggregation never blends refs: every STATS in a content tool must carry
+    # git.commit in its BY grouping key, so per-ref counts/bytes/line-blobs stay separate rather
+    # than being summed or interleaved across commits. Guards the files.ls-style regression where a
+    # `BY name` grouping silently summed file counts across every matching ref.
+    tools = _tools()
+    for tid in _CONTENT_TOOL_IDS:
+        query = tools[tid]["configuration"]["query"]
+        # Walk each STATS block: from a "| STATS" line through its trailing "BY ..." clause(s).
+        lines = query.splitlines()
+        for i, line in enumerate(lines):
+            if not line.strip().startswith("| STATS"):
+                continue
+            # Collect this STATS block's text up to the next pipe command.
+            block = [line]
+            for nxt in lines[i + 1:]:
+                if nxt.strip().startswith("|"):
+                    break
+                block.append(nxt)
+            block_text = "\n".join(block)
+            assert " BY " in block_text, f"{tid} has a STATS with no BY grouping"
+            by_clause = block_text.split(" BY ", 1)[1]
+            assert "git.commit" in by_clause, (
+                f"{tid} STATS groups without git.commit -- would blend refs when git_commit_ish "
+                f"matches more than one ref"
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -403,22 +403,45 @@ the internal join field:
 
 ```esql
 FROM sourcerer-lines
-| WHERE ... AND (git.commit == ?git_ref OR git.ref == ?git_ref)
+| WHERE ... AND git.ref_key IN (
+    // Resolve git_commit_ish against the small sourcerer-refs table once, then do a cheap
+    // membership check on the large content index (instead of a per-row LIKE/OR wildcard match).
+    FROM sourcerer-refs
+    | WHERE ... AND status == "complete"
+        AND (git.commit LIKE ?git_commit_ish OR git.ref LIKE ?git_commit_ish)
+    | KEEP git.ref_key
+  )
 | LOOKUP JOIN sourcerer-refs ON git.ref_key
-| WHERE git.commit LIKE ?git_commit
+| WHERE status == "complete"
 ```
 
-`git_ref` is a required, exact-match param (no wildcards) -- resolve a ref first (see
-`src/sourcerer/skills/ref-resolution/SKILL.md`), then pass through whatever it resolved to: a
-snapshot ref's commit SHA, or an incremental branch's plain name (e.g. `main`) -- no construction,
-no `ref_key` involved. The tool matches `git_ref` against whichever field the row actually
-carries (`git.commit` for snapshot, `git.ref` for incremental), so the same param and the same
-query shape work for both without the caller knowing which mode it is. `git_commit` is optional
-(default `"*"`) and filters the commit the join resolves -- it lets a caller assert the branch it
-resolved `git_ref` against hasn't since advanced; a no-op for a commit-scoped query, since
-`git.commit` already equals `git_ref` there. The join adds/overwrites `git.commit` on every row,
-so snapshot content (which already carries its own, identical `git.commit`) is unaffected and
+`git_commit_ish` is the single scoping param and supports `*`/`?` wildcards (the filter uses
+`LIKE`). It is optional (default `"*"`, matching every indexed ref), but for a normal content
+question resolve a ref first (see `src/sourcerer/skills/ref-resolution/SKILL.md`) and pass through
+whatever it resolved to: a snapshot ref's commit SHA, or an incremental branch's plain name (e.g.
+`main`) -- no construction, no `ref_key` involved. Leaving it at `"*"` matches content across all
+refs at once; because every content tool carries `git.commit` through to output (and any
+aggregation groups `BY git.commit`), unpinned results stay attributable per commit rather than
+being blended -- but a version-specific answer should still pin a ref. The subquery matches `git_commit_ish`
+against whichever field the ref actually carries (`git.commit` for snapshot, `git.ref` for
+incremental) and collapses it to a set of `git.ref_key` values; the outer query scopes content by
+membership in that set, so the same param and the same query shape work for both modes without the
+caller knowing which one it is. The join then adds/overwrites `git.commit` on every row, so
+snapshot content (which already carries its own, identical `git.commit`) is unaffected and
 incremental content (which has none) gets it from the join.
+
+The post-join `| WHERE status == "complete"` is an automatic consistency guard (no param): it
+serves content only from a ref whose latest index is complete, excluding the torn/partial-read
+window while an incremental branch is mid-reindex -- during a HEAD advance the branch's refs join
+doc is `status: indexing` and its content is being mutated in place, so a query joining to it
+would otherwise read a half-applied mix of the old and new commits. It is a no-op for snapshot
+content (whose join doc is always `status: complete`). Trade-off: a *failed* incremental run
+leaves the join doc at `status: indexing` with the prior commit's content still fully consistent;
+the guard hides that content until the next successful run republishes `status: complete`. Note
+this guard is about intra-update consistency, not inter-query staleness: because incremental
+content overwrites in place, only a branch's current HEAD is ever indexed, so a query always
+returns whatever commit the branch is at *now* -- to detect that a branch advanced since an
+earlier resolution, re-check `sourcerer.refs.list`.
 
 ### Upgrade backfill (`--no-backfill`)
 

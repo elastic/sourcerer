@@ -39,7 +39,7 @@ Disambiguate based on context:
 Resolve each ref independently using the steps above. Run content queries against each resolved ref (see "Pinning the ref" below), then compare results. Label each finding with its version.
 
 ### Explicit ref (branch name, exact tag, commit hash)
-Use as given. If it is a branch, call `refs.list` with `git_ref_type: branch` to confirm it exists and retrieve its row. If it is a tag, confirm it the same way. If it is a commit hash, you don't need a `refs.list` call to use it in a content query (a commit hash is already a valid `git_ref` value) - optionally confirm with `git_ref_type: commit` if it may be a pinned commit rather than one reached via a branch/tag.
+Use as given. If it is a branch, call `refs.list` with `git_ref_type: branch` to confirm it exists and retrieve its row. If it is a tag, confirm it the same way. If it is a commit hash, you don't need a `refs.list` call to use it in a content query (a commit hash is already a valid `git_commit_ish` value) - optionally confirm with `git_ref_type: commit` if it may be a pinned commit rather than one reached via a branch/tag.
 
 ### Branch as of a specific date (e.g. "main as it was on 2024-03-01")
 When a branch was indexed with `since` (history walk), multiple snapshots of the branch exist —
@@ -53,26 +53,31 @@ If only one marker exists for the branch (tip-only indexing, no `since`), state 
 snapshots are unavailable for that branch.
 
 ## Pinning the ref
-Every content query (`sourcerer.code.*` and `sourcerer.files.*`) takes the same single required
-param, `git_ref`: an exact commit SHA, or an exact branch/tag name. The tool matches it against
-whichever field the content actually carries (`git.commit` for a `snapshot` source, `git.ref`
-for an `incremental` branch) and then joins to resolve the citable commit -- there is no mode
-you need to reason about.
+Every content query (`sourcerer.code.*` and `sourcerer.files.*`) takes the same scoping param,
+`git_commit_ish`: a commit SHA, or a branch/tag name (`*` and `?` wildcards are supported). The
+tool matches it against whichever field the content actually carries (`git.commit` for a
+`snapshot` source, `git.ref` for an `incremental` branch) and then joins to resolve the citable
+commit -- there is no mode you need to reason about, and no separate commit param to supply.
+
+The param is optional (default `"*"`, matching every indexed ref), but for a version-specific
+question you should still resolve and pin a ref: an unpinned `"*"` query returns matches from
+*every* ref at once, which blends versions. Results stay attributable (each row carries its
+`git.commit`), so `"*"` is fine for "does this symbol exist anywhere" style questions -- just not
+for "how does X behave in 8.17".
 
 Once a ref is resolved above, pass the value straight through:
 - Resolved to a commit (tags, one-off branch snapshots -- the common case): use that commit SHA
-  as `git_ref`.
+  as `git_commit_ish`.
 - Resolved to an incremental branch (a source configured with `update: incremental` in
   `sourcerer.yml`; its `refs.list` row has `status: complete`, same as a snapshot ref): use the branch name
-  itself as `git_ref` (e.g. `main`) -- no commit needed, the query always resolves to whatever
+  itself as `git_commit_ish` (e.g. `main`) -- no commit needed, the query always resolves to whatever
   commit that branch is CURRENTLY at.
 
 `git.ref_key` is an internal storage/join detail (`LOOKUP JOIN sourcerer-refs ON git.ref_key`
 inside the tool) -- it is never a param you construct or a value `refs.list` returns.
 
-Read the resolved `git.commit` back from the same row (or from the content query's own join)
-for citations. Every content tool also accepts an optional `git_commit` param (default `"*"`):
-it filters the commit the join resolves, so passing the expected commit re-asserts that an
-incremental branch hasn't advanced since `git_ref` was resolved -- pass it when that matters
-(e.g. a long-running investigation), otherwise leave it at the default. Re-invoke this skill
-only when the question introduces a new or additional ref.
+Read the resolved `git.commit` back from each result row (the content query's own join supplies
+it) for citations. Because incremental content overwrites in place, a branch query always returns
+its current HEAD -- if you need to confirm a branch hasn't advanced since you resolved it (e.g. a
+long-running investigation), re-check `sourcerer.refs.list` for its current commit. Re-invoke this
+skill only when the question introduces a new or additional ref.
