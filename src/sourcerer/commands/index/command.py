@@ -263,7 +263,13 @@ def index_ref_in_dir(
     # Every snapshot unit -- whether freshly indexed or reusing a sibling's already-indexed
     # content -- must have its `_id = commit` refs join doc so the universal join query resolves
     # a commit for this content regardless of which ref reached it (INV-004).
-    write_snapshot_join_doc(es, host, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso)
+    # refresh=True so the post-index uniqueness gate (_run_uniqueness_gate, INV-011) sees this join
+    # doc immediately instead of racing the refs index's default (~1s) refresh interval: the bulk
+    # context manager refreshes the CONTENT indices on exit but not refs, so an unrefreshed write
+    # here would make the gate read this ref_key's content but miss its join doc and false-fail
+    # "missing". Mirrors write_incremental_ready (refresh=True) and backfill_refs_join_docs.
+    write_snapshot_join_doc(es, host, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso,
+                            refresh=True)
     if migrating:
         # Reconstruct the OLD index name from the prior marker's routing and drop this commit's
         # stale copy there. Commit-safety (another surviving ref sharing the commit) is respected

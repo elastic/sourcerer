@@ -424,6 +424,20 @@ class TestSnapshotJoinDoc:
         write_snapshot_join_doc(second, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None)
         assert first.index.call_args.kwargs["id"] == second.index.call_args.kwargs["id"]
 
+    def test_default_write_does_not_refresh(self):
+        es = MagicMock()
+        write_snapshot_join_doc(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None)
+        assert es.index.call_args.kwargs["refresh"] is False
+
+    def test_refresh_true_is_propagated(self):
+        # The snapshot indexing path (command.index_one) passes refresh=True so the post-index
+        # uniqueness gate (INV-011) doesn't race the refs index's async refresh and false-fail
+        # "git.ref_key missing". Guards that the write actually threads the flag to es.index.
+        es = MagicMock()
+        write_snapshot_join_doc(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None,
+                                refresh=True)
+        assert es.index.call_args.kwargs["refresh"] is True
+
 
 class TestIncrementalRefKeyIdentity:
     def test_id_is_ref_key_not_a_hash(self):
