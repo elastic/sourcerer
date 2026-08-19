@@ -46,7 +46,7 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
 
 1. Install the `sourcerer` CLI:
    ```sh
-   uv tool install "git+https://github.com/elastic/sourcerer.git@v2.4.5"
+   uv tool install "git+https://github.com/elastic/sourcerer.git@v3.0.0"
    ```
 2. Add connection details. Create a `.env` in your working directory, then fill it in:
    ```sh
@@ -346,10 +346,10 @@ claude plugin marketplace remove elastic-sourcerer
 
 ## Upgrades
 
-To upgrade, reinstall from the desired release tag, replacing `v2.4.5` with the release you want:
+To upgrade, reinstall from the desired release tag, replacing `v3.0.0` with the release you want:
 
 ```sh
-uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@v2.4.5"
+uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@v3.0.0"
 ```
 
 Git tag installations remain pinned to that release. `uv tool upgrade sourcerer` does not automatically discover a newer GitHub tag.
@@ -436,7 +436,7 @@ uv run pytest tests/
 #### Prepare a release
 
 ```sh
-./scripts/release.sh prepare v2.4.5
+./scripts/release.sh prepare v3.0.0
 ```
 
 `prepare` bumps the version numbers in `pyproject.toml`, `uv.lock`,
@@ -450,7 +450,7 @@ Then from an up-to-date `main` with no tracked changes, publish the tag to make
 an official release:
 
 ```sh
-./scripts/release.sh publish v2.4.5
+./scripts/release.sh publish v3.0.0
 ```
 
 `publish` verifies that all version files are consistent, `main` matches
