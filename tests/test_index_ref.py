@@ -66,7 +66,7 @@ class TestBranchBReusePath:
         # unchanged), so the reuse probe targets exactly where this commit's content lives.
         mock_cp.assert_called_once_with(
             es, "github", "elastic", "myrepo", FULL_SHA,
-            at_index="sourcerer-v2-files~github~elastic~myrepo",
+            at_index="sourcerer-v3-files~github~elastic~myrepo",
         )
         mock_index.assert_not_called()
         mock_wim.assert_not_called()  # indexing marker only written for fresh ingest
@@ -266,8 +266,8 @@ class TestIndexLevelSuffixMigration:
             i for i, c in enumerate(call_order) if isinstance(c, tuple)
         )
         deleted_indices = mock_del.call_args.args[5]
-        assert "sourcerer-v2-files~github~elastic~myrepo" in deleted_indices
-        assert "sourcerer-v2-lines~github~elastic~myrepo" in deleted_indices
+        assert "sourcerer-v3-files~github~elastic~myrepo" in deleted_indices
+        assert "sourcerer-v3-lines~github~elastic~myrepo" in deleted_indices
 
     def test_unchanged_routing_does_not_delete(self):
         """Same routing as recorded -> normal ingest, no migration delete."""

@@ -126,7 +126,7 @@ Elastic Agent Builder.
 
 URL template for repositories when running `git clone` during indexing.
 
-The `git` fields from the `sourcerer-v2-refs` index can be referenced as
+The `git` fields from the `sourcerer-v3-refs` index can be referenced as
 variables with curly braces (e.g. `{git.org}`, `{git.repo}`).
 
 Example: `https://github.com/{git.org}/{git.repo}.git`
@@ -139,7 +139,7 @@ Example: `https://github.com/{git.org}/{git.repo}.git`
 URL template for citing links to a directory in a repo. Used by the citation
 skills in Agent Builder.
 
-Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be
+Fields from the `sourcerer-v3-files*` or `sourcerer-v3-lines*` indices can be
 referenced as variables with curly braces (e.g. `{git.org}`, `{file.directory}`).
 
 Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.directory}`
@@ -152,7 +152,7 @@ Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.direct
 URL template for citing links to a file in a repo. Used by the citation skills
 in Elastic Agent Builder.
 
-Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be
+Fields from the `sourcerer-v3-files*` or `sourcerer-v3-lines*` indices can be
 referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`).
 
 Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}`
@@ -165,7 +165,7 @@ Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}`
 URL template for citing links to a line of code in a repo. Used by the citation
 skills in Elastic Agent Builder.
 
-Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be
+Fields from the `sourcerer-v3-files*` or `sourcerer-v3-lines*` indices can be
 referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`, `{line.number}`).
 
 Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#L{line.number}`
@@ -178,7 +178,7 @@ Example: `https://github.com/{git.org}/{git.repo}/blob/{git.commit}/{file.path}#
 URL template for citing links to a range of lines of code in a repo. Used by the
 citation skills in Elastic Agent Builder.
 
-Fields from the `sourcerer-v2-files*` or `sourcerer-v2-lines*` indices can be
+Fields from the `sourcerer-v3-files*` or `sourcerer-v3-lines*` indices can be
 referenced as variables with curly braces (e.g. `{git.org}`, `{file.path}`) as
 well as fields returned by the `sourcerer.code.*` and `sourcerer.files.*` tools
 in Elastic Agent Builder (e.g. `{line.number_start}`, `{line.number_end}`).
@@ -599,7 +599,7 @@ indexing (if it doesn't also qualify for pruning).
 Accepts a 5-field cron expression or a duration string (see `schedules[i].schedule`).
 
 The "due" check compares against the **most recently completed** indexing run for
-this source's scope `(host, org, repo, ref_type)` as recorded in `sourcerer-v2-refs`.
+this source's scope `(host, org, repo, ref_type)` as recorded in `sourcerer-v3-refs`.
 A source is **not due** if another run has `status: indexing` for a ref in scope
 with `indexing_started_at` newer than 6 hours ago. This prevents redundant
 parallel work when the same config is invoked on a tight cron schedule.
@@ -626,14 +626,14 @@ default repo-level index while its deploy tags go to a `^deploy`-suffixed index:
 ```yaml
 sources:
 - git: { host: github, org: elastic, repo: kibana, ref_type: tag }
-  match: "v{major}.{minor}.{patch}"       # -> sourcerer-v2-*~github~elastic~kibana
+  match: "v{major}.{minor}.{patch}"       # -> sourcerer-v3-*~github~elastic~kibana
 - git: { host: github, org: elastic, repo: kibana, ref_type: tag }
   match: "deploy@{major}"
-  index: { suffix: deploy }               # -> sourcerer-v2-*~github~elastic~kibana^deploy
+  index: { suffix: deploy }               # -> sourcerer-v3-*~github~elastic~kibana^deploy
 ```
 
 Agents are unaffected by routing: they query the `sourcerer-files` / `sourcerer-lines`
-read aliases, which span every `sourcerer-v2-files*` / `sourcerer-v2-lines*` index
+read aliases, which span every `sourcerer-v3-files*` / `sourcerer-v3-lines*` index
 regardless of its level or suffix.
 
 **Changing routing on an already-indexed source (migration).** Because content
@@ -666,10 +666,10 @@ Values of `level` and their effects on index names:
 
 |`level`   |Index name                                                   |
 |----------|-------------------------------------------------------------|
-|`"host"`  |`sourcerer-v2-*~{git.host}`                                  |
-|`"org"`   |`sourcerer-v2-*~{git.host}~{git.org}`                        |
-|`"repo"`  |`sourcerer-v2-*~{git.host}~{git.org}~{git.repo}`             |
-|`"commit"`|`sourcerer-v2-*~{git.host}~{git.org}~{git.repo}~{git.commit}`|
+|`"host"`  |`sourcerer-v3-*~{git.host}`                                  |
+|`"org"`   |`sourcerer-v3-*~{git.host}~{git.org}`                        |
+|`"repo"`  |`sourcerer-v3-*~{git.host}~{git.org}~{git.repo}`             |
+|`"commit"`|`sourcerer-v3-*~{git.host}~{git.org}~{git.repo}~{git.commit}`|
 
 **Caveat — `"commit"`:** a commit-level index creates one physical index (and at
 least one shard) *per indexed commit*. On a repo/branch with many indexed commits
@@ -692,12 +692,12 @@ a caret (`^`).
 Example index naming pattern where `sources[i].index.level` is `"repo"` and
 `sources[i].index.suffix` is `"deploy"`:
 
-`sourcerer-v2-*~{git.host}~{git.org}~{git.repo}^deploy`
+`sourcerer-v3-*~{git.host}~{git.org}~{git.repo}^deploy`
 
 For instance:
 
-`sourcerer-v2-files~github~elastic~kibana^deploy`
-`sourcerer-v2-lines~github~elastic~kibana^deploy`
+`sourcerer-v3-files~github~elastic~kibana^deploy`
+`sourcerer-v3-lines~github~elastic~kibana^deploy`
 
 - Required: No
 - Type: String

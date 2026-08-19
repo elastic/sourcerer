@@ -256,7 +256,7 @@ config files each driven by their own cron job. Run `sourcerer index --config` o
 cron** (e.g. every 5 minutes) and let the schedule config control the actual indexing cadence.
 
 **How the gate works**: on each invocation of `index --config`, before any ls-remote or clone
-work, the command queries `sourcerer-v2-refs` to see when each source was last fully indexed
+work, the command queries `sourcerer-v3-refs` to see when each source was last fully indexed
 (`status: complete`) and whether any ref in its scope is actively being indexed (`status:
 indexing`). Only sources whose schedule has fired since their last indexed run proceed to the
 expensive pipeline. Sources where another run is actively indexing are skipped.
@@ -347,19 +347,19 @@ Content is addressed by **host + commit**, not by ref name. A file's bytes are f
 by `(git.host, git.org, git.repo, git.commit, file.path)`, so the same file reached via any ref
 collapses to a single doc (no per-ref duplication), while the same org/repo on two different git
 hosts stays distinct. `git.host` is a lowercase keyword, placed before `git.org` in every index
-template's mappings and index sort. Backing indices are `sourcerer-v2-refs`,
-`sourcerer-v2-files~{git.host}~{git.org}~{git.repo}`, and
-`sourcerer-v2-lines~{git.host}~{git.org}~{git.repo}` (read via the unchanged `sourcerer-refs` /
+template's mappings and index sort. Backing indices are `sourcerer-v3-refs`,
+`sourcerer-v3-files~{git.host}~{git.org}~{git.repo}`, and
+`sourcerer-v3-lines~{git.host}~{git.org}~{git.repo}` (read via the unchanged `sourcerer-refs` /
 `sourcerer-files` / `sourcerer-lines` aliases).
 
 **Index routing (`sources[i].index.level` / `index.suffix`).** A source can override the content
 index name: `level` (`host`/`org`/`repo` (default)/`commit`) chooses the granularity
-(`sourcerer-v2-*~{host}` … `~{host}~{org}~{repo}~{commit}`), and `suffix` appends `^{suffix}`
+(`sourcerer-v3-*~{host}` … `~{host}~{org}~{repo}~{commit}`), and `suffix` appends `^{suffix}`
 (e.g. `~{host}~{org}~{repo}^deploy`). Routing is **per-source**, so two sources of the same
-`(host, org, repo)` may target different indices; the read aliases match `sourcerer-v2-files*` /
-`sourcerer-v2-lines*`, so every leveled/suffixed index auto-joins them and agents are unaffected.
+`(host, org, repo)` may target different indices; the read aliases match `sourcerer-v3-files*` /
+`sourcerer-v3-lines*`, so every leveled/suffixed index auto-joins them and agents are unaffected.
 The name is built by `files_index`/`lines_index` in `src/sourcerer/indices.py`; each ref marker in
-`sourcerer-v2-refs` records the source's `index_level`/`index_suffix` (semantic, not the resolved
+`sourcerer-v3-refs` records the source's `index_level`/`index_suffix` (semantic, not the resolved
 name — so a future prefix bump stays correct). Changing a source's routing between runs triggers a
 **migration** (`sourcerer index` re-ingests at the new index, flips the marker, then deletes the old
 copy; `sourcerer prune` sweeps any crash-leftover as `orphan:stale-location`, and deletes any
@@ -380,7 +380,7 @@ creates one index/shard per commit — see `specs/sourcerer-yml.md` for the cave
 Every content doc (file and line, both `update` modes) carries a `git.ref_key` keyword field:
 the bare commit SHA for `snapshot` content, or `{host}~{org}~{repo}~{ref}` for `incremental`
 content (see `update: <mode>` above; `build_ref_key` in `src/sourcerer/utils.py`). A second,
-distinct kind of `sourcerer-v2-refs` document -- a **refs join doc**, `_id = git.ref_key`
+distinct kind of `sourcerer-v3-refs` document -- a **refs join doc**, `_id = git.ref_key`
 (exactly one per key) -- carries the citable `git.commit`: one per commit for snapshot content,
 one per branch (holding the live HEAD) for incremental content. This is a different id space
 from the hashed, append-only `build_ref_id` ref-name markers described above (those still drive
@@ -456,3 +456,16 @@ different git hosting providers. This is a breaking change:
 - **Citations**: `sourcerer setup --config sourcerer.yml` reads the config's `hosts:` section
   and generates one citation skill per host so the agent formats links correctly for each
   provider. Run `setup` again whenever you add or customize a host.
+
+### Upgrading from v2 to v3
+
+v3.0.0 adds incremental (ref-addressed) branch indexing (`update: incremental`, see above). This
+is a breaking change to the backing indices, with no config schema change:
+
+- **Indices**: backing indices are renamed `sourcerer-v2-*` to `sourcerer-v3-*`. There is no
+  automatic migration - run `sourcerer setup` to create the v3 templates, then re-index every
+  source. The old `sourcerer-v2-*` indices can be deleted once you have re-indexed.
+- **Agent Builder tools**: content tools (`sourcerer.code.*`, `sourcerer.files.*`) replace their
+  `git_commit` param with `git_ref` (a commit SHA or a branch/tag name); `git_commit` survives
+  as an optional post-join consistency guard. Run `sourcerer setup` again to push the updated
+  tool definitions.

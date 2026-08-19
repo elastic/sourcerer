@@ -1,7 +1,7 @@
 # sourcerer/commands/index/markers.py
 # Refs-index idempotency: content-addressing a ref's indexed state, the guards that decide
 # whether a ref needs (re)indexing, and writing the completion marker. Reads use the sourcerer
-# aliases; writes use sourcerer-v2-refs and the physical per-repo content indices;
+# aliases; writes use sourcerer-v3-refs and the physical per-repo content indices;
 # broader read-only queries across the whole cluster live in sourcerer/queries.py.
 
 # Standard packages

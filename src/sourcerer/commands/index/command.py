@@ -75,27 +75,27 @@ def _load_template_mapping(name: str) -> dict | None:
 
 
 def _load_refs_mapping() -> dict | None:
-    return _load_template_mapping("sourcerer-v2-refs.json")
+    return _load_template_mapping("sourcerer-v3-refs.json")
 
 
 def _load_files_mapping() -> dict | None:
-    return _load_template_mapping("sourcerer-v2-files.json")
+    return _load_template_mapping("sourcerer-v3-files.json")
 
 
 def _load_lines_mapping() -> dict | None:
-    return _load_template_mapping("sourcerer-v2-lines.json")
+    return _load_template_mapping("sourcerer-v3-lines.json")
 
 
 def _run_uniqueness_gate(es: Elasticsearch, host: str, org: str, repo: str) -> bool:
     """Post-index uniqueness gate (INV-011): every distinct `git.ref_key` in this repo's
-    content must resolve to exactly one `sourcerer-v2-refs` join doc. Prints the offending
+    content must resolve to exactly one `sourcerer-v3-refs` join doc. Prints the offending
     ref_key(s) to stderr and returns False on any violation; True (silent) when the invariant
     holds."""
     offending = check_ref_key_uniqueness(es, host, org, repo)
     if offending:
         click.echo(
             f"Error: {host}/{org}/{repo}: {len(offending)} git.ref_key value(s) missing or "
-            f"duplicated in sourcerer-v2-refs: {', '.join(offending)}",
+            f"duplicated in sourcerer-v3-refs: {', '.join(offending)}",
             err=True,
         )
         return False

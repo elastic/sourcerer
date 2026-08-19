@@ -1,5 +1,5 @@
 """Unit tests for the index-name builders in sourcerer.indices, including a round-trip
-check against planner.parse_index_name (their documented inverse). v2 names carry a leading
+check against planner.parse_index_name (their documented inverse). v3 names carry a leading
 git.host segment."""
 
 # App packages
@@ -15,54 +15,54 @@ class TestIndexNameBuilders:
             "sourcerer-refs",
         )
 
-    def test_refs_index_is_v2(self):
-        assert REFS_INDEX == "sourcerer-v2-refs"
+    def test_refs_index_is_v3(self):
+        assert REFS_INDEX == "sourcerer-v3-refs"
 
     def test_files_index_shape(self):
         assert files_index("github", "elastic", "elasticsearch") == \
-            "sourcerer-v2-files~github~elastic~elasticsearch"
+            "sourcerer-v3-files~github~elastic~elasticsearch"
 
     def test_lines_index_shape(self):
         assert lines_index("github", "elastic", "elasticsearch") == \
-            "sourcerer-v2-lines~github~elastic~elasticsearch"
+            "sourcerer-v3-lines~github~elastic~elasticsearch"
 
     def test_host_org_repo_lowercased(self):
         assert files_index("GitHub", "Elastic", "ElasticSearch") == \
-            "sourcerer-v2-files~github~elastic~elasticsearch"
+            "sourcerer-v3-files~github~elastic~elasticsearch"
         assert lines_index("MyGitea", "ACME", "Widgets") == \
-            "sourcerer-v2-lines~mygitea~acme~widgets"
+            "sourcerer-v3-lines~mygitea~acme~widgets"
 
     def test_same_org_repo_distinct_hosts_differ(self):
         assert files_index("github", "acme", "w") != files_index("gitlab", "acme", "w")
 
     def test_level_host(self):
-        assert files_index("github", "elastic", "kibana", level="host") == "sourcerer-v2-files~github"
+        assert files_index("github", "elastic", "kibana", level="host") == "sourcerer-v3-files~github"
 
     def test_level_org(self):
-        assert files_index("github", "Elastic", "Kibana", level="org") == "sourcerer-v2-files~github~elastic"
+        assert files_index("github", "Elastic", "Kibana", level="org") == "sourcerer-v3-files~github~elastic"
 
     def test_level_commit_requires_commit(self):
         assert lines_index("github", "elastic", "kibana", commit="ABC123", level="commit") == \
-            "sourcerer-v2-lines~github~elastic~kibana~abc123"
+            "sourcerer-v3-lines~github~elastic~kibana~abc123"
         import pytest
         with pytest.raises(ValueError):
             files_index("github", "elastic", "kibana", level="commit")  # no commit
 
     def test_suffix_appended_with_caret(self):
         assert files_index("github", "elastic", "kibana", suffix="deploy") == \
-            "sourcerer-v2-files~github~elastic~kibana^deploy"
+            "sourcerer-v3-files~github~elastic~kibana^deploy"
 
     def test_suffix_lowercased(self):
         assert files_index("github", "elastic", "kibana", suffix="Deploy") == \
-            "sourcerer-v2-files~github~elastic~kibana^deploy"
+            "sourcerer-v3-files~github~elastic~kibana^deploy"
 
     def test_empty_suffix_is_no_suffix(self):
         assert files_index("github", "elastic", "kibana", suffix="") == \
-            "sourcerer-v2-files~github~elastic~kibana"
+            "sourcerer-v3-files~github~elastic~kibana"
 
     def test_level_and_suffix_combine(self):
         assert files_index("github", "elastic", "kibana", commit="abc", level="commit", suffix="deploy") == \
-            "sourcerer-v2-files~github~elastic~kibana~abc^deploy"
+            "sourcerer-v3-files~github~elastic~kibana~abc^deploy"
 
 
 class TestRoundTripWithParseIndexName:
@@ -80,30 +80,30 @@ class TestRoundTripWithParseIndexName:
         assert parse_index_name(REFS_INDEX) is None
 
     def test_host_only_granularity(self):
-        parsed = parse_index_name("sourcerer-v2-files~github")
+        parsed = parse_index_name("sourcerer-v3-files~github")
         assert (parsed.host, parsed.org, parsed.repo, parsed.commit) == ("github", None, None, None)
 
     def test_host_org_repo_commit_granularity(self):
-        parsed = parse_index_name("sourcerer-v2-files~github~acme~w~abc123")
+        parsed = parse_index_name("sourcerer-v3-files~github~acme~w~abc123")
         assert (parsed.host, parsed.org, parsed.repo, parsed.commit) == ("github", "acme", "w", "abc123")
 
     def test_too_many_segments_rejected(self):
-        assert parse_index_name("sourcerer-v2-files~a~b~c~d~e") is None
+        assert parse_index_name("sourcerer-v3-files~a~b~c~d~e") is None
 
     def test_empty_segment_rejected(self):
-        assert parse_index_name("sourcerer-v2-files~github~~repo") is None
+        assert parse_index_name("sourcerer-v3-files~github~~repo") is None
 
     def test_suffix_parsed_and_identity_suffix_blind(self):
-        parsed = parse_index_name("sourcerer-v2-files~github~acme~widgets^deploy")
+        parsed = parse_index_name("sourcerer-v3-files~github~acme~widgets^deploy")
         assert (parsed.host, parsed.org, parsed.repo, parsed.commit, parsed.suffix) == \
             ("github", "acme", "widgets", None, "deploy")
 
     def test_commit_level_with_suffix(self):
-        parsed = parse_index_name("sourcerer-v2-lines~github~acme~w~abc123^deploy")
+        parsed = parse_index_name("sourcerer-v3-lines~github~acme~w~abc123^deploy")
         assert (parsed.repo, parsed.commit, parsed.suffix) == ("w", "abc123", "deploy")
 
     def test_trailing_caret_is_malformed(self):
-        assert parse_index_name("sourcerer-v2-files~github~acme~widgets^") is None
+        assert parse_index_name("sourcerer-v3-files~github~acme~widgets^") is None
 
     def test_round_trip_invariant_all_levels_and_suffix(self):
         """The builder <-> parser contract: parse_index_name(files_index(...)) recovers the inputs

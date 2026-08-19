@@ -248,7 +248,7 @@ def enumerate_content_ref_keys(es: Elasticsearch, host: str, org: str, repo: str
     """Every distinct `git.ref_key` present in this repo's content (files + lines aliases), via
     a paginated composite aggregation scoped to (host, org, repo). Feeds the post-upgrade
     uniqueness gate (INV-011): every value this returns must resolve to exactly one
-    `sourcerer-v2-refs` join doc. Returns an empty set if neither alias has any matching docs."""
+    `sourcerer-v3-refs` join doc. Returns an empty set if neither alias has any matching docs."""
     filters = [
         {"term": {"git.host": host}},
         {"term": {"git.org": org}},
@@ -286,7 +286,7 @@ def enumerate_content_ref_keys(es: Elasticsearch, host: str, org: str, repo: str
 
 def check_ref_key_uniqueness(es: Elasticsearch, host: str, org: str, repo: str) -> list[str]:
     """The post-upgrade uniqueness gate (INV-011): every distinct `git.ref_key` in this repo's
-    content must resolve to EXACTLY ONE `sourcerer-v2-refs` join doc. Returns the sorted list of
+    content must resolve to EXACTLY ONE `sourcerer-v3-refs` join doc. Returns the sorted list of
     offending ref_keys (missing entirely, or matched by more than one join doc) -- empty means
     the invariant holds. A single aggregation query counts join docs per ref_key; a key absent
     from the buckets has zero matches (missing)."""

@@ -2,7 +2,7 @@
 delete_index and execute_orphan_deletions (the orphan sweep), and execute_deletions
 (retention). Every ES call is mocked -- these assert the shape of the requests (wildcard-free
 deletes, query filters, single combined refs query), not against a real cluster. Repo tuples
-are keyed (host, org, repo); index names are v2 and carry a leading host segment."""
+are keyed (host, org, repo); index names are v3 and carry a leading host segment."""
 
 # Standard packages
 from unittest.mock import MagicMock
@@ -25,26 +25,26 @@ def _not_found() -> NotFoundError:
 class TestDeleteIndex:
     def test_deletes_by_exact_name_no_wildcard(self):
         es = MagicMock()
-        assert delete_index(es, "sourcerer-v2-files~github~acme~widgets") is True
-        es.indices.delete.assert_called_once_with(index="sourcerer-v2-files~github~acme~widgets")
+        assert delete_index(es, "sourcerer-v3-files~github~acme~widgets") is True
+        es.indices.delete.assert_called_once_with(index="sourcerer-v3-files~github~acme~widgets")
 
     def test_missing_index_returns_false_not_raise(self):
         es = MagicMock()
         es.indices.delete.side_effect = _not_found()
-        assert delete_index(es, "sourcerer-v2-files~github~acme~widgets") is False
+        assert delete_index(es, "sourcerer-v3-files~github~acme~widgets") is False
 
 
 class TestExecuteOrphanDeletions:
     def test_deletes_indices_first(self):
         es = MagicMock()
         plan = OrphanPlan(
-            orphan_index_names=["sourcerer-v2-files~github~ghostorg"],
+            orphan_index_names=["sourcerer-v3-files~github~ghostorg"],
             orphan_content={},
             orphan_marker_commits={},
         )
         indices_deleted, content_dropped, markers_dropped, stale_dropped, empty_deleted = execute_orphan_deletions(es, plan)
         assert (indices_deleted, content_dropped, markers_dropped, stale_dropped, empty_deleted) == (1, 0, 0, 0, 0)
-        es.indices.delete.assert_called_once_with(index="sourcerer-v2-files~github~ghostorg")
+        es.indices.delete.assert_called_once_with(index="sourcerer-v3-files~github~ghostorg")
         es.delete_by_query.assert_not_called()
 
     def test_content_delete_by_query_targets_both_content_indices_with_terms_and_host_filter(self):
@@ -98,12 +98,12 @@ class TestExecuteOrphanDeletions:
         es = MagicMock()
         plan = OrphanPlan(
             orphan_index_names=[], orphan_content={}, orphan_marker_commits={},
-            empty_index_names=["sourcerer-v2-files~github~acme~widgets^olddeploy"],
+            empty_index_names=["sourcerer-v3-files~github~acme~widgets^olddeploy"],
         )
         _, _, _, _, empty_deleted = execute_orphan_deletions(es, plan)
         assert empty_deleted == 1
         es.indices.delete.assert_called_once_with(
-            index="sourcerer-v2-files~github~acme~widgets^olddeploy")
+            index="sourcerer-v3-files~github~acme~widgets^olddeploy")
         es.delete_by_query.assert_not_called()
 
 

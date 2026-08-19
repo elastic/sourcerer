@@ -1,7 +1,7 @@
 # sourcerer/commands/index/schedule.py
 # Schedule-gating logic for `sourcerer index --config`: determines which sources are due for
 # indexing based on their configured schedule and the state of refs already indexed in
-# sourcerer-v2-refs (last completed-at and any active in-progress indexing runs).
+# sourcerer-v3-refs (last completed-at and any active in-progress indexing runs).
 #
 # The gate runs BEFORE the expensive ls-remote / clone / ingest pipeline, so a source whose
 # schedule hasn't fired since its last indexed run is dropped before any network I/O.

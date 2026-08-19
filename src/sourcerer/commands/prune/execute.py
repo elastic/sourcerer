@@ -173,7 +173,7 @@ def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, 
     indices and Class E empty indices -- both near-instant), then the per-repo content
     delete_by_query (Class B -- expensive, one call per content index per repo), then the
     per-index stale-location delete_by_query (Class D -- the index.level/suffix migration backstop,
-    one call per index holding stale docs), then a single delete_by_query against sourcerer-v2-refs
+    one call per index holding stale docs), then a single delete_by_query against sourcerer-v3-refs
     covering every orphaned marker tuple across every repo (Class C -- refs is tiny, so one
     combined query costs one merge cycle instead of one per repo). Repo keys are (host, org, repo).
     Returns (indices_deleted, content_commits_dropped, marker_commits_dropped,

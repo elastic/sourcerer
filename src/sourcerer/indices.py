@@ -6,11 +6,12 @@
 # command's logic.
 #
 # v2 (multi-host): content index names carry a leading git.host segment, so the same org/repo on
-# two different hosts lands in distinct backing indices. See sourcerer/hosts.py.
+# two different hosts lands in distinct backing indices. See sourcerer/hosts.py. Bumped to v3 for
+# incremental (ref-addressed) branch indexing.
 
-FILES_INDEX_PREFIX = "sourcerer-v2-files"
-LINES_INDEX_PREFIX = "sourcerer-v2-lines"
-REFS_INDEX = "sourcerer-v2-refs"
+FILES_INDEX_PREFIX = "sourcerer-v3-files"
+LINES_INDEX_PREFIX = "sourcerer-v3-lines"
+REFS_INDEX = "sourcerer-v3-refs"
 
 # Read aliases span all versioned backing indices of their respective kinds. Writes, updates,
 # and deletes deliberately use the physical names above so a future index version can coexist
@@ -56,7 +57,7 @@ def files_index(
     commit: str | None = None, level: str = "repo", suffix: str | None = None,
 ) -> str:
     """Files index name for a source's `index.level`/`index.suffix`. The 3-arg call reproduces the
-    historical repo-level name, e.g. sourcerer-v2-files~github~elastic~elasticsearch."""
+    historical repo-level name, e.g. sourcerer-v3-files~github~elastic~elasticsearch."""
     return _content_index(FILES_INDEX_PREFIX, host, org, repo, commit, level, suffix)
 
 
@@ -65,5 +66,5 @@ def lines_index(
     commit: str | None = None, level: str = "repo", suffix: str | None = None,
 ) -> str:
     """Lines index name for a source's `index.level`/`index.suffix`. The 3-arg call reproduces the
-    historical repo-level name, e.g. sourcerer-v2-lines~github~elastic~elasticsearch."""
+    historical repo-level name, e.g. sourcerer-v3-lines~github~elastic~elasticsearch."""
     return _content_index(LINES_INDEX_PREFIX, host, org, repo, commit, level, suffix)

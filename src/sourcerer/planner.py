@@ -175,15 +175,15 @@ def content_delete_set(decisions: list[Decision]) -> set[str]:
 #   C. orphan marker   -- a commit marker in refs with no content docs at all in either
 #                          content index (content manually deleted, or a whole content
 #                          index/repo/org vanished without its markers being cleaned up).
-#                          -> delete_by_query on sourcerer-v2-refs.
+#                          -> delete_by_query on sourcerer-v3-refs.
 #
 # Today the CLI only ever produces host~org~repo-granularity indices (see files_index/lines_index
 # in sourcerer/indices.py); parse_index_name and orphan_indices also recognize the host-only,
 # host~org, and host~org~repo~commit levels so detection keeps working if a future granularity is
 # introduced, even though only one level is exercised in practice right now.
 
-_FILES_PREFIX_DEFAULT = "sourcerer-v2-files"
-_LINES_PREFIX_DEFAULT = "sourcerer-v2-lines"
+_FILES_PREFIX_DEFAULT = "sourcerer-v3-files"
+_LINES_PREFIX_DEFAULT = "sourcerer-v3-lines"
 
 
 @dataclass(frozen=True)
@@ -205,7 +205,7 @@ def parse_index_name(
     """Inverse of files_index()/lines_index() (sourcerer/indices.py), extended to also recognize
     the host-only, host~org, and host~org~repo~commit granularities those builders don't produce
     today, plus an optional trailing `^{suffix}` (index.suffix). Returns None for anything that
-    doesn't fit the scheme (sourcerer-v2-refs, an unrelated index, or a malformed/empty segment) so
+    doesn't fit the scheme (sourcerer-v3-refs, an unrelated index, or a malformed/empty segment) so
     callers skip it rather than risk misclassifying it as an orphan.
 
     The `^suffix` is split off BEFORE the `~` segments so it can't corrupt the last segment
@@ -312,7 +312,7 @@ def orphan_markers(
     This single per-commit check also covers a whole repo/org's content having vanished
     entirely (every one of that repo's ref commits shows up as "missing"), so it subsumes what
     would otherwise be separate org- and repo-level refs sweeps -- one combined delete_by_query
-    against sourcerer-v2-refs handles all of it. `skip_repos` excludes repos already going away
+    against sourcerer-v3-refs handles all of it. `skip_repos` excludes repos already going away
     via a Class-A index DELETE (their markers are dropped as part of that, not here). Repo keys
     are (host, org, repo)."""
     out: dict[tuple[str, str, str], set[str]] = {}

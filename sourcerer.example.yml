@@ -240,7 +240,7 @@ sources:
   match: deploy@{major}
   index:
     level: repo                   # host | org | repo (default) | commit
-    suffix: deploy                # -> sourcerer-v2-*~github~elastic~elasticsearch^deploy
+    suffix: deploy                # -> sourcerer-v3-*~github~elastic~elasticsearch^deploy
 
 # A second host hosting a same-named org/repo is a distinct instance:
 - git:

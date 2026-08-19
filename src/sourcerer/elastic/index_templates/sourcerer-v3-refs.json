@@ -3,7 +3,7 @@
     "description": "sourcerer-refs"
   },
   "index_patterns": [
-    "sourcerer-v2-refs*"
+    "sourcerer-v3-refs*"
   ],
   "template": {
     "aliases": {
