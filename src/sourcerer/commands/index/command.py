@@ -53,7 +53,7 @@ from .markers import (
     fully_indexed_counts, markers_status_by_id, _needs_index, pre_clone_skip,
     read_incremental_ref, recorded_routing, refresh_incremental_content, should_index,
     write_incremental_failed, write_incremental_indexing, write_incremental_ready,
-    write_indexing_marker, write_ref_marker, write_snapshot_join_doc,
+    write_indexing_marker, write_ref_marker,
 )
 from .report import dry_run_config
 from .schedule import filter_config_by_schedule
@@ -258,18 +258,14 @@ def index_ref_in_dir(
     # write-new -> FLIP MARKER -> delete-old: the marker now points at the new location before any
     # old copy is deleted, so a crash between here and the delete below leaves stale (not missing)
     # data that the prune stale-location sweep reclaims.
+    # refresh=True so the post-index uniqueness gate (_run_uniqueness_gate, INV-011) sees the
+    # git.ref_key carrier immediately instead of racing the refs index's default (~1s) refresh
+    # interval: the bulk context manager refreshes the CONTENT indices on exit but not refs, so an
+    # unrefreshed write here would make the gate read this ref_key's content but miss its carrier
+    # and false-fail "missing". Mirrors write_incremental_ready (refresh=True).
     write_ref_marker(es, host, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso,
-                     files_count, lines_count, index_level=level, index_suffix=suffix)
-    # Every snapshot unit -- whether freshly indexed or reusing a sibling's already-indexed
-    # content -- must have its `_id = commit` refs join doc so the universal join query resolves
-    # a commit for this content regardless of which ref reached it (INV-004).
-    # refresh=True so the post-index uniqueness gate (_run_uniqueness_gate, INV-011) sees this join
-    # doc immediately instead of racing the refs index's default (~1s) refresh interval: the bulk
-    # context manager refreshes the CONTENT indices on exit but not refs, so an unrefreshed write
-    # here would make the gate read this ref_key's content but miss its join doc and false-fail
-    # "missing". Mirrors write_incremental_ready (refresh=True) and backfill_refs_join_docs.
-    write_snapshot_join_doc(es, host, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso,
-                            refresh=True)
+                     files_count, lines_count, index_level=level, index_suffix=suffix,
+                     refresh=True)
     if migrating:
         # Reconstruct the OLD index name from the prior marker's routing and drop this commit's
         # stale copy there. Commit-safety (another surviving ref sharing the commit) is respected

@@ -379,23 +379,30 @@ creates one index/shard per commit — see `specs/sourcerer-yml.md` for the cave
 
 Every content doc (file and line, both `update` modes) carries a `git.ref_key` keyword field:
 the bare commit SHA for `snapshot` content, or `{host}~{org}~{repo}~{ref}` for `incremental`
-content (see `update: <mode>` above; `build_ref_key` in `src/sourcerer/utils.py`). A second,
-distinct kind of `sourcerer-v3-refs` document -- a **refs join doc**, `_id = git.ref_key`
-(exactly one per key) -- carries the citable `git.commit`: one per commit for snapshot content,
-one per branch (holding the live HEAD) for incremental content. This is a different id space
-from the hashed, append-only `build_ref_id` ref-name markers described above (those still drive
-`since`/retention history and are untouched by this).
+content (see `update: <mode>` above; `build_ref_key` in `src/sourcerer/utils.py`). The refs doc
+that carries `git.commit` for the join is:
+
+- **Snapshot:** the `build_ref_id`-keyed **ref-name marker** itself. `write_ref_marker` sets
+  `git.ref_key = commit_sha` on the marker (one doc per snapshot source). There is no separate
+  shadow join doc for snapshot content.
+- **Incremental:** a dedicated refs join doc at `_id = git.ref_key = {host}~{org}~{repo}~{ref}`,
+  holding the live HEAD commit and advanced two-phase (INV-006). One doc per branch.
+
+INV-004: exactly one `sourcerer-v3-refs` doc per `git.ref_key` value. For snapshot content this
+is the marker (one per ref+commit); for incremental it is the branch's join doc. Because ES|QL
+`LOOKUP JOIN` fans out on duplicate right-side keys, having >1 doc with the same `git.ref_key`
+would multiply content rows — the uniqueness gate (`_run_uniqueness_gate`, INV-011) guards this.
 
 #### `status` field values
 
-Every `sourcerer-v3-refs` document — ref-name markers (keyed by `build_ref_id`) and refs join
-docs (keyed by `ref_key`) alike — carries a `status` field drawn from a shared two-value
-vocabulary, so the scheduler and `sourcerer.refs.list` can query both families uniformly:
+Every `sourcerer-v3-refs` document — snapshot ref-name markers and incremental join docs alike
+— carries a `status` field drawn from a shared two-value vocabulary, so the scheduler and
+`sourcerer.refs.list` can query both families uniformly:
 
 | Value | Meaning |
 |---|---|
-| `indexing` | A run is mid-flight. `indexing_started_at` is set; `indexed_at` is absent/null. Present on both ref-name markers (written by `write_indexing_marker` just before snapshot ingest) and incremental join docs (written by `write_incremental_indexing` just before incremental ingest). A stale `indexing` doc whose `indexing_started_at` is older than the retry window (default 6 h) marks a crashed run and is treated as due for re-indexing. |
-| `complete` | Fully indexed and ready to query. `indexed_at` is set; `indexing_started_at` is absent/null (the terminal write drops it). Written by `write_ref_marker` (snapshot ref-name markers), `write_snapshot_join_doc` (snapshot join docs), and `write_incremental_ready` (incremental join docs). The scheduler's "last indexed" aggregation and `sourcerer.refs.list`'s default `?status == "complete"` filter both use this value. |
+| `indexing` | A run is mid-flight. `indexing_started_at` is set; `indexed_at` is absent/null. Present on snapshot ref-name markers (written by `write_indexing_marker` just before ingest) and incremental join docs (written by `write_incremental_indexing`). A stale `indexing` doc whose `indexing_started_at` is older than the retry window (default 6 h) marks a crashed run and is treated as due for re-indexing. |
+| `complete` | Fully indexed and ready to query. `indexed_at` is set; `indexing_started_at` is absent/null (the terminal write drops it). Written by `write_ref_marker` (snapshot markers) and `write_incremental_ready` (incremental join docs). The scheduler's "last indexed" aggregation and `sourcerer.refs.list`'s default `?status == "complete"` filter both use this value. |
 
 Every Agent Builder content tool (`sourcerer.code.*`, `sourcerer.files.*`) therefore runs the
 same query shape regardless of mode -- and `git.ref_key` is NEVER an agent-facing param, only
@@ -435,7 +442,7 @@ serves content only from a ref whose latest index is complete, excluding the tor
 window while an incremental branch is mid-reindex -- during a HEAD advance the branch's refs join
 doc is `status: indexing` and its content is being mutated in place, so a query joining to it
 would otherwise read a half-applied mix of the old and new commits. It is a no-op for snapshot
-content (whose join doc is always `status: complete`). Trade-off: a *failed* incremental run
+content (snapshot markers are always `status: complete`). Trade-off: a *failed* incremental run
 leaves the join doc at `status: indexing` with the prior commit's content still fully consistent;
 the guard hides that content until the next successful run republishes `status: complete`. Note
 this guard is about intra-update consistency, not inter-query staleness: because incremental

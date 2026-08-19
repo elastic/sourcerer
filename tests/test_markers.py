@@ -29,7 +29,6 @@ from sourcerer.commands.index.markers import (
     write_incremental_indexing,
     write_incremental_ready,
     write_ref_marker,
-    write_snapshot_join_doc,
 )
 from sourcerer.indices import FILES_ALIAS, REFS_ALIAS, REFS_INDEX
 from sourcerer.utils import build_ref_key
@@ -404,39 +403,47 @@ def _indexed_doc(es):
     return es.index.call_args.kwargs["document"]
 
 
-class TestSnapshotJoinDoc:
-    def test_join_doc_id_and_ref_key_are_the_commit(self):
+class TestWriteRefMarker:
+    """write_ref_marker is the single refs doc per snapshot source; it carries git.ref_key so
+    the LOOKUP JOIN resolves git.commit without a separate shadow join doc (INV-004)."""
+
+    def test_marker_carries_ref_key_equal_to_commit(self):
         es = MagicMock()
-        write_snapshot_join_doc(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None)
-        call = es.index.call_args.kwargs
-        assert call["id"] == OLD
-        assert call["index"] == REFS_INDEX
-        doc = call["document"]
+        write_ref_marker(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None,
+                         files_count=10, lines_count=200)
+        doc = es.index.call_args.kwargs["document"]
         assert doc["git"]["ref_key"] == OLD
         assert doc["git"]["commit"] == OLD
-        assert doc["update_mode"] == "snapshot"
-        assert doc["status"] == "complete"
 
-    def test_join_doc_idempotent_rewrite_same_id(self):
-        first = MagicMock()
-        second = MagicMock()
-        write_snapshot_join_doc(first, "github", "acme", "widgets", "branch", "main", OLD, None)
-        write_snapshot_join_doc(second, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None)
-        assert first.index.call_args.kwargs["id"] == second.index.call_args.kwargs["id"]
+    def test_marker_id_is_hashed_not_the_commit(self):
+        # _id is build_ref_id (BLAKE2b hash) -- one per (ref, commit), NOT the bare commit SHA.
+        es = MagicMock()
+        write_ref_marker(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None,
+                         files_count=10, lines_count=200)
+        call = es.index.call_args.kwargs
+        assert call["index"] == REFS_INDEX
+        assert call["id"] != OLD  # hashed, not the bare commit
+        assert call["id"] == build_ref_id("github", "acme", "widgets", "tag", "v1.0.0", OLD)
 
     def test_default_write_does_not_refresh(self):
         es = MagicMock()
-        write_snapshot_join_doc(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None)
-        assert es.index.call_args.kwargs["refresh"] is False
+        write_ref_marker(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None,
+                         files_count=1, lines_count=1)
+        assert es.index.call_args.kwargs.get("refresh") is False
 
     def test_refresh_true_is_propagated(self):
-        # The snapshot indexing path (command.index_one) passes refresh=True so the post-index
-        # uniqueness gate (INV-011) doesn't race the refs index's async refresh and false-fail
-        # "git.ref_key missing". Guards that the write actually threads the flag to es.index.
+        # command.py passes refresh=True so the post-index uniqueness gate (INV-011) sees the
+        # ref_key carrier immediately rather than racing the refs index's async refresh.
         es = MagicMock()
-        write_snapshot_join_doc(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None,
-                                refresh=True)
+        write_ref_marker(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None,
+                         files_count=1, lines_count=1, refresh=True)
         assert es.index.call_args.kwargs["refresh"] is True
+
+    def test_marker_status_complete(self):
+        es = MagicMock()
+        write_ref_marker(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None,
+                         files_count=5, lines_count=100)
+        assert es.index.call_args.kwargs["document"]["status"] == "complete"
 
 
 class TestIncrementalRefKeyIdentity:

@@ -450,6 +450,7 @@ def write_ref_marker(
     lines_count: int,
     index_level: str = "repo",
     index_suffix: str | None = None,
+    refresh: bool = False,
 ) -> None:
     # (ref, ref_type) replaces the old git.branch/git.tag fields: those were write-only and
     # fully reconstructable as `git.ref filtered by git.ref_type`. git.tag was an array that
@@ -462,9 +463,14 @@ def write_ref_marker(
     # stays correct and prune/migration can find (and clean up) exactly where content lives.
     # Legacy markers written before this feature omit both; readers fall back to the "repo"/None
     # defaults, which reconstruct to the historical repo-level name where that content actually is.
+    #
+    # git.ref_key = commit_sha folds the snapshot join doc into this single marker: it lets the
+    # content tools' LOOKUP JOIN sourcerer-refs ON git.ref_key resolve git.commit without a
+    # separate _id=commit shadow doc. One snapshot source → one refs doc (INV-004).
     ref_id = build_ref_id(host, org, repo, ref_type, ref, commit_sha)
     doc = {
         "git": {
+            "ref_key": commit_sha,
             "host": host,
             "org": org,
             "repo": repo,
@@ -480,7 +486,7 @@ def write_ref_marker(
         "index_level": index_level,
         "index_suffix": index_suffix,
     }
-    es.index(index=REFS_INDEX, id=ref_id, document=doc)
+    es.index(index=REFS_INDEX, id=ref_id, document=doc, refresh=refresh)
 
 
 def pre_clone_skip(
@@ -536,48 +542,19 @@ def pre_clone_skip(
     return False, ref_for_id, remote_sha
 
 
-# --- refs join docs (git.ref_key), keyed by `_id = ref_key` -------------------------------
-# One document per `ref_key` (INV-004): snapshot content's join doc lives at `_id = <commit>`;
-# an incremental branch's single join doc lives at `_id = {host}~{org}~{repo}~{ref}` and its
-# `git.commit` is the branch's live HEAD, advanced only by a two-phase indexing -> complete
-# publication (INV-006). These are a DISTINCT id space from `build_ref_id`'s hashed, append-only
-# ref-name markers above (untouched -- they still drive `since`/retention history); a join doc's
-# `_id` is a plain, unhashed `ref_key` string, which a `build_ref_id` hash can never collide with.
+# --- incremental refs join docs (git.ref_key), keyed by `_id = ref_key` -------------------
+# One document per incremental branch (INV-004): the branch's single join doc lives at
+# `_id = {host}~{org}~{repo}~{ref}` and its `git.commit` is the branch's live HEAD, advanced
+# only by a two-phase indexing -> complete publication (INV-006). This is a DISTINCT id space
+# from `build_ref_id`'s hashed, append-only ref-name markers above; a join doc's `_id` is a
+# plain, unhashed `ref_key` string, which a `build_ref_id` hash can never collide with.
+#
+# Snapshot mode no longer writes a separate join doc: `write_ref_marker` now carries
+# `git.ref_key = commit_sha` directly on the hashed marker (one doc per snapshot source,
+# INV-004). Legacy `_id = commit` snapshot join docs written before this change are cleaned
+# up by `backfill_refs_join_docs` / the migration `backfill_repo` step.
 
 ERROR_MAX_LEN = 2000  # bound stored failure text so a giant git/ES error can't bloat the doc
-
-
-def write_snapshot_join_doc(
-    es: Elasticsearch,
-    host: str,
-    org: str,
-    repo: str,
-    ref_type: str,
-    ref: str,
-    commit_sha: str,
-    commit_date_iso: str | None,
-    refresh: bool = False,
-) -> None:
-    """Write (or idempotently re-write) the snapshot refs join doc: `_id = commit_sha`,
-    `git.ref_key = commit_sha`, `git.commit = commit_sha` (the commit is its own citable
-    identity). `ref`/`ref_type` record the ref that produced this write (informational only --
-    multiple refs resolving to the same commit all write the same doc, so re-writes are a
-    no-op change)."""
-    doc = {
-        "git": {
-            "ref_key": commit_sha,
-            "host": host,
-            "org": org,
-            "repo": repo,
-            "ref": ref,
-            "ref_type": ref_type,
-            "commit": commit_sha,
-            "commit_date": commit_date_iso,
-        },
-        "update_mode": "snapshot",
-        "status": "complete",
-    }
-    es.index(index=REFS_INDEX, id=commit_sha, document=doc, refresh=refresh)
 
 
 def read_incremental_ref(es: Elasticsearch, host: str, org: str, repo: str, ref: str) -> dict | None:
@@ -907,34 +884,43 @@ def distinct_commits_for_repo(es: Elasticsearch, host: str, org: str, repo: str)
     return {b["key"] for b in resp["aggregations"]["commits"]["buckets"]}
 
 
-def commits_with_join_doc(es: Elasticsearch, commits: set[str]) -> set[str]:
-    """The subset of `commits` that already have a `_id = commit` refs join doc. A batched
-    ids lookup, the join-doc analogue of `commits_with_content`."""
+def commits_with_ref_key_carrier(es: Elasticsearch, commits: set[str]) -> set[str]:
+    """The subset of `commits` for which a refs doc already carries `git.ref_key == commit`
+    (i.e. has a snapshot ref_key carrier). Used by `backfill_refs_join_docs` to skip commits
+    whose marker already carries the ref_key from a normal index run, so the backfill is a
+    no-op on up-to-date repos (INV-009). A terms query on `git.ref_key` covers both the
+    hashed-marker carrier (new) and any legacy `_id = commit` shadow docs (old)."""
     if not commits:
         return set()
     try:
         resp = es.search(
-            index=REFS_ALIAS, size=len(commits), query={"ids": {"values": sorted(commits)}},
-            source_includes=[],
+            index=REFS_ALIAS, size=0,
+            query={"terms": {"git.ref_key": sorted(commits)}},
+            aggs={"carriers": {"terms": {"field": "git.ref_key", "size": len(commits)}}},
         )
     except NotFoundError:
         return set()
-    return {hit["_id"] for hit in resp["hits"]["hits"]}
+    return {b["key"] for b in resp["aggregations"]["carriers"]["buckets"]}
+
+
+# Keep the old name as an alias so external callers (if any) and tests can migrate gradually.
+commits_with_join_doc = commits_with_ref_key_carrier
 
 
 def backfill_refs_join_docs(es: Elasticsearch, host: str, org: str, repo: str) -> int:
-    """Ensure a snapshot `_id = commit` join doc exists for every distinct content commit in
-    this repo (INV-010). For each missing commit, an existing `build_ref_id` marker (if any)
-    supplies the ref/ref_type/commit_date it was originally indexed under; falls back to
-    generic values if none is found (the content is authoritative either way -- the join doc's
-    ref/ref_type are informational). Returns the number of join docs created; 0 on a repeat run
-    (INV-009)."""
+    """Ensure every distinct content commit for this repo has a refs doc carrying
+    `git.ref_key = commit` (INV-010). For each commit lacking a carrier, stamps `git.ref_key`
+    onto its existing complete `build_ref_id` marker (the normal post-collapse shape) by
+    partially updating that doc. Falls back to writing a minimal `_id = commit` carrier doc if
+    no marker is found (orphan content). Returns the number of carriers stamped/created; 0 on a
+    repeat run (INV-009)."""
     commits = distinct_commits_for_repo(es, host, org, repo)
     if not commits:
         return 0
-    missing = commits - commits_with_join_doc(es, commits)
-    created = 0
+    missing = commits - commits_with_ref_key_carrier(es, commits)
+    stamped = 0
     for commit_sha in missing:
+        # Look for the existing complete marker for this commit (build_ref_id key space).
         query = {
             "bool": {
                 "filter": [
@@ -943,6 +929,9 @@ def backfill_refs_join_docs(es: Elasticsearch, host: str, org: str, repo: str) -
                     {"term": {"git.repo": repo}},
                     {"term": {"git.commit": commit_sha}},
                     {"term": {"status": "complete"}},
+                    # Only hashed markers (no ref_key yet); legacy shadow docs (update_mode:
+                    # "snapshot") are already carriers and handled by commits_with_ref_key_carrier.
+                    {"bool": {"must_not": {"exists": {"field": "git.ref_key"}}}},
                 ]
             }
         }
@@ -952,22 +941,52 @@ def backfill_refs_join_docs(es: Elasticsearch, host: str, org: str, repo: str) -
             resp = {"hits": {"hits": []}}
         hits = resp["hits"]["hits"]
         if hits:
-            src_git = hits[0]["_source"].get("git", {})
+            # Stamp git.ref_key onto the existing marker in place. We use es.update with a
+            # partial doc rather than a full re-index to avoid touching the counts/timestamps.
+            marker_id = hits[0]["_id"]
+            es.update(index=REFS_INDEX, id=marker_id, doc={"git": {"ref_key": commit_sha}})
+        else:
+            # No marker exists (orphan content): write a minimal carrier doc so the gate passes.
+            src_git = {}
+            try:
+                # Try to derive informational ref/ref_type from any refs doc for this commit.
+                any_resp = es.search(
+                    index=REFS_ALIAS, size=1,
+                    query={"bool": {"filter": [
+                        {"term": {"git.host": host}},
+                        {"term": {"git.org": org}},
+                        {"term": {"git.repo": repo}},
+                        {"term": {"git.commit": commit_sha}},
+                    ]}},
+                )
+                if any_resp["hits"]["hits"]:
+                    src_git = any_resp["hits"]["hits"][0]["_source"].get("git", {})
+            except NotFoundError:
+                pass
             ref = src_git.get("ref") or commit_sha
             ref_type = src_git.get("ref_type") or "commit"
             commit_date_iso = src_git.get("commit_date")
-        else:
-            ref, ref_type, commit_date_iso = commit_sha, "commit", None
-        write_snapshot_join_doc(es, host, org, repo, ref_type, ref, commit_sha, commit_date_iso)
-        created += 1
-    if created:
-        # Refresh so a uniqueness gate run immediately afterward (see command._run_uniqueness_gate)
-        # sees every join doc just created rather than racing the refs index's refresh interval.
+            es.index(
+                index=REFS_INDEX, id=commit_sha,
+                document={
+                    "git": {
+                        "ref_key": commit_sha,
+                        "host": host, "org": org, "repo": repo,
+                        "ref": ref, "ref_type": ref_type,
+                        "commit": commit_sha, "commit_date": commit_date_iso,
+                    },
+                    "status": "complete",
+                },
+            )
+        stamped += 1
+    if stamped:
+        # Refresh so a uniqueness gate run immediately afterward sees every carrier just written
+        # rather than racing the refs index's default refresh interval.
         try:
             es.indices.refresh(index=REFS_INDEX)
         except NotFoundError:
             pass
-    return created
+    return stamped
 
 
 def apply_refs_index_mapping(es: Elasticsearch, mapping: dict) -> None:
@@ -1005,16 +1024,48 @@ def backfill_repo(
     """Run the full one-time upgrade for one repo: apply the updated content/refs index
     mappings (once, if given -- must happen BEFORE the content update so the new field lands
     typed correctly rather than dynamically guessed), stamp `ref_key` onto pre-existing
-    snapshot content (idempotent), and create a join doc for every already-indexed
-    commit that lacks one. Returns a small summary dict for reporting; every field is 0 on a
-    repeat run (INV-009)."""
+    snapshot content (idempotent), stamp `git.ref_key` onto existing snapshot markers that
+    predate the one-doc-per-source change, and delete any now-redundant legacy `_id = commit`
+    shadow join docs (those written by the old write_snapshot_join_doc path). Returns a small
+    summary dict for reporting; every field is 0 on a repeat run (INV-009)."""
     if files_mapping is not None and lines_mapping is not None:
         apply_content_index_mapping(es, files_mapping, lines_mapping)
     if refs_mapping is not None:
         apply_refs_index_mapping(es, refs_mapping)
     updated = backfill_snapshot_ref_keys(es, host, org, repo)
-    created = backfill_refs_join_docs(es, host, org, repo)
-    return {"content_updated": updated, "join_docs_created": created}
+    # Stamp git.ref_key onto existing markers that lack it; this also covers repos that were
+    # indexed before the one-doc-per-source change where markers had no ref_key.
+    stamped = backfill_refs_join_docs(es, host, org, repo)
+    # Delete legacy standalone `_id = commit` shadow docs (update_mode: "snapshot", written by
+    # the old write_snapshot_join_doc). Ordered AFTER the backfill stamp + implicit refresh so
+    # every commit always has at least one carrier (the marker) before the shadow is removed.
+    deleted = _delete_legacy_snapshot_join_docs(es, host, org, repo)
+    return {"content_updated": updated, "carriers_stamped": stamped, "shadow_docs_deleted": deleted}
+
+
+def _delete_legacy_snapshot_join_docs(es: Elasticsearch, host: str, org: str, repo: str) -> int:
+    """Delete legacy `_id = commit` snapshot join docs written by the old write_snapshot_join_doc
+    path (distinguishable by update_mode == "snapshot"). These are now superseded by the
+    git.ref_key field on the hashed ref-name markers. Safe to call only AFTER backfill_refs_join_docs
+    has stamped ref_key onto all markers (so no commit loses its carrier). Returns 0 if none exist."""
+    query = {
+        "bool": {
+            "filter": [
+                {"term": {"git.host": host}},
+                {"term": {"git.org": org}},
+                {"term": {"git.repo": repo}},
+                {"term": {"update_mode": "snapshot"}},
+            ]
+        }
+    }
+    try:
+        resp = es.delete_by_query(
+            index=REFS_INDEX, query=query,
+            wait_for_completion=True, conflicts="proceed", refresh=True,
+        )
+        return resp.get("deleted", 0)
+    except NotFoundError:
+        return 0
 
 
 def resolve_head(es: Elasticsearch, host: str, org: str, repo: str, ref_type: str, ref: str) -> dict | None:
