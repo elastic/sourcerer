@@ -16,6 +16,7 @@ from ...planner import OrphanPlan, content_delete_set, plan_orphans
 from ...queries import (
     empty_content_indices, enumerate_ref_tuples, fetch_complete_commits_for_repo,
     fetch_stale_markers, gather_content_by_index, gather_content_commit_tuples,
+    gather_incremental_content_by_index, gather_intended_incremental_index_by_ref,
     gather_intended_index_by_commit, list_sourcerer_indices,
 )
 
@@ -219,13 +220,19 @@ def plan_orphans_now(es: Elasticsearch) -> OrphanPlan:
     # detection (the index.level/suffix migration backstop).
     content_by_index = gather_content_by_index(es, index_names)
     intended_by_commit = gather_intended_index_by_commit(es)
+    # Class D-I: incremental (ref-addressed, commit-less) stale-location detection -- the
+    # incremental mirror of Class D, since the commit-keyed sweep can't see incremental docs.
+    incremental_content_by_index = gather_incremental_content_by_index(es, index_names)
+    intended_incremental_by_ref = gather_intended_incremental_index_by_ref(es)
     # Class E: content indices already drained to zero docs (a fully-pruned repo, or a suffix
     # a->b migration that emptied ~repo^a while its identity still has markers at ~repo^b).
     empty = empty_content_indices(es, index_names)
     return plan_orphans(index_names, ref_tuples, content_tuples,
                         content_by_index_commit=content_by_index,
                         intended_index_by_commit=intended_by_commit,
-                        empty_index_names=empty)
+                        empty_index_names=empty,
+                        incremental_content_by_index=incremental_content_by_index,
+                        intended_incremental_index_by_ref=intended_incremental_by_ref)
 
 
 def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, int, int, int, int]:
@@ -290,6 +297,29 @@ def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, 
             )
         except NotFoundError:
             pass
+
+    # Class D-I: stale-location incremental content (ref-addressed, no git.commit). Mirrors Class D
+    # but keyed on (host, org, repo, ref) tuples -- the commit-keyed filter above cannot match
+    # incremental docs whose git.commit is absent.
+    for index_name, ref_tuples in plan.orphan_stale_incremental.items():
+        stale_dropped += len(ref_tuples)
+        for (host, org, repo, ref) in ref_tuples:
+            try:
+                es.delete_by_query(
+                    index=index_name,
+                    query={"bool": {"filter": [
+                        {"term": {"git.host": host}},
+                        {"term": {"git.org": org}},
+                        {"term": {"git.repo": repo}},
+                        {"term": {"git.ref": ref}},
+                    ]}},
+                    conflicts="proceed",
+                    refresh=False,
+                    scroll_size=5000,
+                    wait_for_completion=False,
+                )
+            except NotFoundError:
+                pass
 
     markers_dropped = sum(len(commits) for commits in plan.orphan_marker_commits.values())
     if plan.orphan_marker_commits:

@@ -143,3 +143,99 @@ class TestIncrementalIndexFailure:
             assert mocks["write_incremental_failed"].call_args.kwargs["completed_commit"] == OLD
         finally:
             _stop(patchers)
+
+
+class TestIncrementalIndexRoutingMigration:
+    """When index.level or index.suffix changes on an already-indexed branch the run must:
+    1. NOT return no-changes even when the commit hasn't advanced.
+    2. Do a full rebuild into the NEW routing.
+    3. After the ready marker flips, delete the old-routing copy (write-new -> flip -> delete-old).
+    """
+
+    def _prior_at_routing(self, level="repo", suffix=None):
+        """A completed incremental join doc recorded at the given routing."""
+        doc = {"git": {"commit": NEW}, "index_level": level}
+        if suffix is not None:
+            doc["index_suffix"] = suffix
+        return doc
+
+    def test_suffix_change_forces_full_rebuild_and_old_copy_delete(self):
+        """repo -> repo^deploy: full rebuild at new routing, then delete at old routing."""
+        prior = self._prior_at_routing(level="repo", suffix=None)
+        patchers, mocks = _patch_common(prior=prior)
+        try:
+            es = MagicMock()
+            unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
+                       update="incremental", index_level="repo", index_suffix="deploy")
+            index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
+                                            reporter=ProgressReporter(), unit=unit)
+            # Full rebuild path: delete_incremental_branch called at new routing, full tree indexed.
+            assert mocks["delete_incremental_branch"].call_count == 2, (
+                "Expected 2 calls to delete_incremental_branch: one for new routing (rebuild), "
+                "one for old routing (migration cleanup)"
+            )
+            call_kwargs_list = [c.kwargs for c in mocks["delete_incremental_branch"].call_args_list]
+            # First call: full rebuild at new (repo^deploy) routing.
+            assert call_kwargs_list[0].get("index_level") == "repo"
+            assert call_kwargs_list[0].get("index_suffix") == "deploy"
+            # Second call: delete old (repo, no suffix) routing.
+            assert call_kwargs_list[1].get("index_level") == "repo"
+            assert call_kwargs_list[1].get("index_suffix") is None
+            # Ready marker was published.
+            mocks["write_incremental_ready"].assert_called_once()
+        finally:
+            _stop(patchers)
+
+    def test_level_change_forces_full_rebuild_and_old_copy_delete(self):
+        """repo -> org level: full rebuild at org routing, then delete at repo routing."""
+        prior = self._prior_at_routing(level="repo", suffix=None)
+        patchers, mocks = _patch_common(prior=prior)
+        try:
+            es = MagicMock()
+            unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
+                       update="incremental", index_level="org", index_suffix=None)
+            index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
+                                            reporter=ProgressReporter(), unit=unit)
+            assert mocks["delete_incremental_branch"].call_count == 2
+            call_kwargs_list = [c.kwargs for c in mocks["delete_incremental_branch"].call_args_list]
+            assert call_kwargs_list[0].get("index_level") == "org"
+            assert call_kwargs_list[1].get("index_level") == "repo"
+            mocks["write_incremental_ready"].assert_called_once()
+        finally:
+            _stop(patchers)
+
+    def test_no_changes_with_routing_change_still_migrates(self):
+        """Commit unchanged but routing changed: must NOT return no-changes; must migrate."""
+        # prior already at NEW sha, but at old routing
+        prior = self._prior_at_routing(level="repo", suffix=None)
+        prior["git"]["commit"] = NEW  # same commit as what resolve_commit returns
+        patchers, mocks = _patch_common(prior=prior)
+        try:
+            es = MagicMock()
+            unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
+                       update="incremental", index_level="repo", index_suffix="v2")
+            index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
+                                            reporter=ProgressReporter(), unit=unit)
+            # Must NOT skip even though old_sha == new_sha.
+            mocks["write_incremental_indexing"].assert_called_once()
+            mocks["write_incremental_ready"].assert_called_once()
+            # Old routing must be cleaned up.
+            assert mocks["delete_incremental_branch"].call_count == 2
+        finally:
+            _stop(patchers)
+
+    def test_same_routing_no_old_copy_delete(self):
+        """When routing is unchanged a delta run must not call delete_incremental_branch at all."""
+        prior = self._prior_at_routing(level="repo", suffix=None)
+        plan = ChangePlan(delete_paths=[], index_paths=["changed.txt"])
+        patchers, mocks = _patch_common(prior=prior, plan=plan)
+        try:
+            es = MagicMock()
+            unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
+                       update="incremental", index_level="repo", index_suffix=None)
+            index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
+                                            reporter=ProgressReporter(), unit=unit)
+            # Delta run: no full rebuild (delete_incremental_branch not called), no extra delete.
+            mocks["delete_incremental_branch"].assert_not_called()
+        finally:
+            _stop(patchers)

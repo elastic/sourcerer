@@ -360,6 +360,40 @@ def orphan_stale_content(
     return out
 
 
+def orphan_stale_incremental_content(
+    incremental_content_by_index: dict[str, set[tuple[str, str, str, str]]],
+    intended_incremental_index_by_ref: dict[tuple[str, str, str, str], set[str]],
+    skip_indices: set[str],
+) -> dict[str, set[tuple[str, str, str, str]]]:
+    """Class D-I orphans: incremental content docs sitting in a physical index that the branch's
+    join doc no longer intends.  This is the incremental migration backstop -- an index.level/suffix
+    change re-homes a branch's content to a new index and flips its join doc there; if a crash
+    happens before the old copy is deleted, the old-location docs survive with no join doc
+    referencing that location.
+
+    `incremental_content_by_index` maps a physical index name -> the set of (host, org, repo, ref)
+    tuples with incremental content docs in it.  `intended_incremental_index_by_ref` maps a ref
+    tuple -> the set of index names its join doc intends (reconstructed from index_level/index_suffix
+    with commit=None).  `skip_indices` excludes indices already going away via a Class-A whole-index
+    DELETE.
+
+    Returns {index_name -> set of (host, org, repo, ref) tuples to delete-by-query from that index}.
+    A ref with NO join doc at all is not flagged here -- that is a different category; this class is
+    specifically 'has a join doc, but content lives somewhere the join doc doesn't intend'."""
+    out: dict[str, set[tuple[str, str, str, str]]] = {}
+    for index_name, ref_tuples in incremental_content_by_index.items():
+        if index_name in skip_indices:
+            continue
+        for ref_tuple in ref_tuples:
+            intended = intended_incremental_index_by_ref.get(ref_tuple)
+            # No join doc for this ref at all -> different sweep; leave it alone.
+            if not intended:
+                continue
+            if index_name not in intended:
+                out.setdefault(index_name, set()).add(ref_tuple)
+    return out
+
+
 @dataclass
 class OrphanPlan:
     orphan_index_names: list[str]                              # Class A -> DELETE {index}
@@ -374,6 +408,12 @@ class OrphanPlan:
     # identity still has markers at ~repo^b). Disjoint from orphan_index_names (Class A). Defaults
     # empty so callers/tests without empty-index data don't need to supply it.
     empty_index_names: list[str] = field(default_factory=list)
+    # Class D-I -> delete_by_query per index for incremental (ref-addressed, commit-less) content
+    # sitting in a physical index its branch's join doc no longer intends.  The incremental mirror
+    # of Class D, since the commit-keyed Class-D sweep cannot see incremental docs.  Value is
+    # {index_name -> set of (host, org, repo, ref) tuples to reclaim from that index}.  Defaults
+    # empty so callers/tests without incremental location data don't need to supply it.
+    orphan_stale_incremental: dict[str, set[tuple[str, str, str, str]]] = field(default_factory=dict)
 
 
 def plan_orphans(
@@ -383,6 +423,8 @@ def plan_orphans(
     content_by_index_commit: dict[str, set[tuple[str, str, str, str]]] | None = None,
     intended_index_by_commit: dict[tuple[str, str, str, str], set[str]] | None = None,
     empty_index_names: list[str] | None = None,
+    incremental_content_by_index: dict[str, set[tuple[str, str, str, str]]] | None = None,
+    intended_incremental_index_by_ref: dict[tuple[str, str, str, str], set[str]] | None = None,
 ) -> OrphanPlan:
     """Combine the orphan classes into one plan from cheap snapshots: the physical index names, the
     distinct (host, org, repo, commit) tuples in refs, and the distinct (host, org, repo, commit)
@@ -392,7 +434,13 @@ def plan_orphans(
     `content_by_index_commit` (index name -> content commit tuples in it) and
     `intended_index_by_commit` (commit tuple -> index names its markers intend) enable Class-D
     stale-location detection (the index.level/suffix migration backstop). When omitted, Class D is
-    empty -- back-compat for callers that don't supply per-index location data."""
+    empty -- back-compat for callers that don't supply per-index location data.
+
+    `incremental_content_by_index` (index name -> incremental ref tuples in it) and
+    `intended_incremental_index_by_ref` (ref tuple -> index names its join doc intends) enable
+    Class-D-I stale-location detection for incremental (ref-addressed, commit-less) content -- the
+    incremental mirror of Class D since the commit-keyed sweep can't see incremental docs.  When
+    omitted, Class D-I is empty -- back-compat for callers without incremental location data."""
     ref_orgs = {(host, org) for host, org, _, _ in ref_commit_tuples}
     ref_repos = {(host, org, repo) for host, org, repo, _ in ref_commit_tuples}
 
@@ -422,8 +470,19 @@ def plan_orphans(
             content_by_index_commit, intended_index_by_commit, skip_indices=orphaned_names,
         )
 
+    # Class D-I: stale-location incremental content (ref-addressed, no git.commit). Mirrors Class D
+    # but keyed on (host, org, repo, ref) tuples from the branch's join doc. Also skip Class-A
+    # indices since they'll be deleted whole.
+    orphan_stale_incremental: dict[str, set[tuple[str, str, str, str]]] = {}
+    if incremental_content_by_index is not None and intended_incremental_index_by_ref is not None:
+        orphan_stale_incremental = orphan_stale_incremental_content(
+            incremental_content_by_index, intended_incremental_index_by_ref,
+            skip_indices=orphaned_names,
+        )
+
     # Class E: empty content indices. Exclude any already slated for a Class-A DELETE (an index
     # that is both empty AND identity-orphaned only needs to be deleted once).
     empty = [n for n in (empty_index_names or []) if n not in orphaned_names]
 
-    return OrphanPlan(orphan_index_names, orphan_content, orphan_marker_commits, orphan_stale, empty)
+    return OrphanPlan(orphan_index_names, orphan_content, orphan_marker_commits, orphan_stale,
+                      empty, orphan_stale_incremental)

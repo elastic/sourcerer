@@ -239,6 +239,80 @@ class TestOrphanStaleContent:
         assert plan.orphan_stale == {"sourcerer-v3-files~github~acme~widgets": {"abc"}}
 
 
+class TestOrphanStaleIncrementalContent:
+    """Class D-I: incremental (ref-addressed, commit-less) content in an index that the branch's
+    join doc no longer intends.  Mirrors Class D but keyed on (host, org, repo, ref) tuples."""
+
+    def test_incremental_content_at_unintended_index_is_stale(self):
+        from sourcerer.planner import orphan_stale_incremental_content
+        rt = ("github", "acme", "widgets", "main")
+        content_by_index = {
+            "sourcerer-v3-files~github~acme~widgets": {rt},         # old copy from a suffix migration
+            "sourcerer-v3-files~github~acme~widgets^deploy": {rt},  # new (intended) copy
+        }
+        intended = {rt: {"sourcerer-v3-files~github~acme~widgets^deploy"}}
+        stale = orphan_stale_incremental_content(content_by_index, intended, skip_indices=set())
+        assert stale == {"sourcerer-v3-files~github~acme~widgets": {rt}}
+
+    def test_intended_index_not_flagged(self):
+        from sourcerer.planner import orphan_stale_incremental_content
+        rt = ("github", "acme", "widgets", "main")
+        content_by_index = {"sourcerer-v3-files~github~acme~widgets^deploy": {rt}}
+        intended = {rt: {"sourcerer-v3-files~github~acme~widgets^deploy"}}
+        assert orphan_stale_incremental_content(content_by_index, intended, set()) == {}
+
+    def test_ref_without_join_doc_is_not_class_di(self):
+        """No join doc for this ref -> different sweep, not stale-location."""
+        from sourcerer.planner import orphan_stale_incremental_content
+        rt = ("github", "acme", "widgets", "main")
+        content_by_index = {"sourcerer-v3-files~github~acme~widgets": {rt}}
+        assert orphan_stale_incremental_content(content_by_index, {}, set()) == {}
+
+    def test_skip_indices_excluded(self):
+        from sourcerer.planner import orphan_stale_incremental_content
+        rt = ("github", "acme", "widgets", "main")
+        content_by_index = {"sourcerer-v3-files~github~acme~widgets": {rt}}
+        intended = {rt: {"sourcerer-v3-files~github~acme~widgets^deploy"}}
+        # Index is already going away via a Class-A whole-index DELETE.
+        assert orphan_stale_incremental_content(
+            content_by_index, intended, {"sourcerer-v3-files~github~acme~widgets"}
+        ) == {}
+
+    def test_plan_orphans_wires_class_di(self):
+        """plan_orphans exposes orphan_stale_incremental when location data is supplied."""
+        rt = ("github", "acme", "widgets", "main")
+        ct = ("github", "acme", "widgets", "abc")
+        names = [
+            "sourcerer-v3-files~github~acme~widgets",
+            "sourcerer-v3-files~github~acme~widgets^deploy",
+        ]
+        # One snapshot commit ref present so Class A/B/C don't fire on the identity.
+        ref_tuples = {ct}
+        content_tuples = {ct}
+        incremental_content_by_index = {
+            "sourcerer-v3-files~github~acme~widgets": {rt},         # stale copy
+            "sourcerer-v3-files~github~acme~widgets^deploy": {rt},  # intended
+        }
+        intended_incremental_by_ref = {rt: {"sourcerer-v3-files~github~acme~widgets^deploy"}}
+        plan = plan_orphans(
+            names, ref_tuples, content_tuples,
+            incremental_content_by_index=incremental_content_by_index,
+            intended_incremental_index_by_ref=intended_incremental_by_ref,
+        )
+        assert plan.orphan_stale_incremental == {
+            "sourcerer-v3-files~github~acme~widgets": {rt},
+        }
+
+    def test_plan_orphans_class_di_empty_when_not_supplied(self):
+        """Back-compat: callers that omit incremental location data get an empty Class D-I."""
+        ct = ("github", "acme", "widgets", "abc")
+        plan = plan_orphans(
+            ["sourcerer-v3-files~github~acme~widgets"],
+            {ct}, {ct},
+        )
+        assert plan.orphan_stale_incremental == {}
+
+
 class TestEmptyIndexSweep:
     """Class E: an empty content index is deleted even when its git identity still has markers
     (the suffix a->b migration case), and is de-duped against Class-A orphans."""

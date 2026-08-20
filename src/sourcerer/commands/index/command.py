@@ -48,10 +48,10 @@ from .git import (
 from .markers import (
     build_ref_id, commits_with_content, content_present,
     count_incremental_branch_docs, delete_incremental_branch, delete_incremental_paths,
-    fully_indexed_counts, mark_snapshot_markers_stale, markers_status_by_id, _needs_index,
-    pre_clone_skip, read_incremental_ref, recorded_routing, refresh_incremental_content,
-    should_index, write_incremental_failed, write_incremental_indexing, write_incremental_ready,
-    write_indexing_marker, write_ref_marker,
+    fully_indexed_counts, mark_snapshot_markers_stale, marker_routing, markers_status_by_id,
+    _needs_index, pre_clone_skip, read_incremental_ref, recorded_routing,
+    refresh_incremental_content, should_index, write_incremental_failed,
+    write_incremental_indexing, write_incremental_ready, write_indexing_marker, write_ref_marker,
 )
 from .report import dry_run_config
 from .schedule import filter_config_by_schedule
@@ -288,19 +288,25 @@ def index_incremental_branch_in_dir(
     prior = read_incremental_ref(es, host, org, repo, branch)
     old_sha = None if force else (prior.get("git", {}).get("commit") if prior else None)
 
-    if old_sha == new_sha and not force:
-        reporter.finish(unit, "no-changes")
-        return
-
     level = unit.index_level
     suffix = unit.index_suffix
+
+    # Detect a routing (index.level / index.suffix) change from the prior completed run. When the
+    # routing changes we must migrate even if the commit hasn't advanced -- so routing_changed
+    # bypasses the no-changes early-return and forces a full rebuild into the new index (below).
+    old_routing = marker_routing(prior) if prior else None
+    routing_changed = old_routing is not None and old_routing != (level, suffix)
+
+    if old_sha == new_sha and not force and not routing_changed:
+        reporter.finish(unit, "no-changes")
+        return
 
     reporter.set_stage(unit, "indexing")
     write_incremental_indexing(es, host, org, repo, branch, completed_commit=old_sha,
                                target_commit=new_sha, prior=prior,
                                index_level=level, index_suffix=suffix)
     try:
-        full_rebuild = old_sha is None or force
+        full_rebuild = old_sha is None or force or routing_changed
         if not full_rebuild:
             plan = plan_changes(repo_dir, old_sha, new_sha)
             full_rebuild = plan.base_missing
@@ -335,6 +341,16 @@ def index_incremental_branch_in_dir(
         write_incremental_ready(es, host, org, repo, branch, new_sha, commit_date_iso,
                                 files_count, lines_count,
                                 index_level=level, index_suffix=suffix)
+        # Migration cleanup (write-new -> flip join doc -> delete-old): now that the join doc is
+        # complete and points at the new routing, delete this branch's docs from the old physical
+        # index.  Scoped to the exact (host,org,repo,ref) 4-term filter so a sibling source that
+        # still lives in the old index is never touched.  A crash between the ready write above
+        # and this delete leaves stale-location incremental docs in the old index; prune's
+        # incremental stale-location sweep (Class D-I) reclaims them.
+        if routing_changed:
+            old_level, old_suffix = old_routing
+            delete_incremental_branch(es, host, org, repo, branch,
+                                      index_level=old_level, index_suffix=old_suffix)
     except KeyboardInterrupt:
         write_incremental_failed(es, host, org, repo, branch, completed_commit=old_sha,
                                  target_commit=new_sha, error="interrupted", prior=prior,
