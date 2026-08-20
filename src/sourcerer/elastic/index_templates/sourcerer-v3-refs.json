@@ -56,8 +56,7 @@
               "normalizer": "lowercase"
             },
             "ref": {
-              "type": "keyword",
-              "normalizer": "lowercase"
+              "type": "keyword"
             },
             "ref_type": {
               "type": "keyword",
