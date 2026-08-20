@@ -50,41 +50,48 @@ _CONTENT_TOOL_IDS = (
 
 
 def test_content_tools_use_universal_ref_join_query():
-    # INV-005: every content tool scopes to a set of git.ref_key values resolved from the small
-    # sourcerer-refs table via a subquery (`git.ref_key IN (FROM sourcerer-refs | WHERE ... (git.commit
-    # LIKE ?git_commit_ish OR git.ref LIKE ?git_commit_ish) | KEEP git.ref_key)`) rather than a
-    # per-row LIKE/OR wildcard match on the (far larger) content index, with no update_mode/mode
-    # conditional. It then joins sourcerer-refs on git.ref_key (a purely internal field -- never an
-    # agent-facing param) to resolve the commit for both snapshot and incremental content.
-    # git_commit_ish is the single scoping param (LIKE, so it supports wildcards); there is no
-    # separate git_commit param. A post-join `status == "complete"` guard excludes torn/partial
-    # reads while an incremental branch is mid-reindex (a no-op for always-complete snapshot content).
+    # Every content tool uses a two-OR'd-IN subquery to scope rows to matching
+    # refs (git.commit OR git.ref), then a FORK to handle the two content shapes
+    # separately without fan-out:
+    #  - Snapshot arm (git.commit IS NOT NULL): EVAL status = "complete" -- no join needed; the
+    #    commit already lives on the content row, and status was pre-confirmed by the subquery.
+    #  - Incremental arm (git.ref IS NOT NULL AND git.commit IS NULL): LOOKUP JOIN sourcerer-refs
+    #    ON (host,org,repo,ref) to resolve status from the incremental join doc.
+    # Ref scoping uses three separate params: git_commit, git_ref, git_ref_type.
     tools = _tools()
     for tid in _CONTENT_TOOL_IDS:
         query = tools[tid]["configuration"]["query"]
         params = tools[tid]["configuration"]["params"]
         assert "update_mode" not in query, f"{tid} query has an update_mode conditional"
-        # The commit-or-ref match resolves inside the sourcerer-refs subquery, keyed by git.ref_key.
-        assert "git.ref_key IN (" in query, f"{tid} missing the ref_key subquery scope"
-        assert "git.commit LIKE ?git_commit_ish" in query, f"{tid} missing the commit-or-ref filter"
-        assert "git.ref LIKE ?git_commit_ish" in query, f"{tid} missing the commit-or-ref filter"
-        assert "| LOOKUP JOIN sourcerer-refs ON git.ref_key" in query, f"{tid} missing the universal join"
+        # git.ref_key must not be used as a field or join key (comments may reference it by name)
+        assert "git.ref_key" not in query, f"{tid} still uses git.ref_key as a field"
+        assert "ON git.ref_key" not in query, f"{tid} still joins on git.ref_key"
+        # The membership subquery uses two OR'd IN paths (one for snapshot commits, one for
+        # incremental refs), scoped by git_commit, git_ref, and git_ref_type params.
+        assert "git.commit LIKE ?git_commit" in query, f"{tid} missing git.commit LIKE ?git_commit"
+        assert "git.ref LIKE ?git_ref" in query, f"{tid} missing git.ref LIKE ?git_ref"
+        assert "git.ref_type LIKE ?git_ref_type" in query, f"{tid} missing git.ref_type LIKE ?git_ref_type"
+        # Snapshot arm: no join; asserts status = "complete" inline.
+        assert "git.commit IS NOT NULL" in query, f"{tid} missing snapshot FORK arm (git.commit IS NOT NULL)"
+        assert 'EVAL status = "complete"' in query, f"{tid} missing EVAL status = \"complete\" in snapshot arm"
+        # Incremental arm: join on the 4-tuple (no ref_key).
+        assert "git.ref IS NOT NULL" in query, f"{tid} missing incremental FORK arm (git.ref IS NOT NULL)"
+        assert "LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref" in query, \
+            f"{tid} missing the incremental join on (host,org,repo,ref)"
+        # No ref_key param or join shape.
         assert "git_ref_key" not in params, f"{tid} still exposes git_ref_key as a param"
         assert "?git_ref_key" not in query, f"{tid} still references ?git_ref_key"
-        # git_commit_ish is optional with a "*" default: an unpinned query matches all indexed
-        # refs. Every content tool keeps this safe by carrying git.commit through to output (and,
-        # where it aggregates, grouping BY git.commit) so multi-ref matches stay attributable and
-        # are never summed across refs.
-        assert params["git_commit_ish"]["optional"] is True
-        assert params["git_commit_ish"]["defaultValue"] == "*"
-        # The old standalone git_commit guard param is gone: git_commit_ish is the sole scoping
-        # param, and the consistency guard is now the automatic, no-param `status == "complete"`.
-        # (Match on word boundary so ?git_commit_ish / git_commit_ish don't false-positive.)
-        assert not re.search(r"\bgit_commit\b", "\n".join(params)), f"{tid} still exposes git_commit as a param"
-        assert not re.search(r"\?git_commit\b", query), f"{tid} still references ?git_commit"
-        # The status guard must appear AFTER the join (status lives only on the refs doc the join
-        # brings in, never on the raw content doc).
-        assert '| WHERE status == "complete"' in query, f"{tid} missing the post-join status guard"
+        # git_commit, git_ref, git_ref_type are all optional with a "*" default.
+        for p in ("git_commit", "git_ref", "git_ref_type"):
+            assert p in params, f"{tid} missing param {p}"
+            assert params[p]["optional"] is True, f"{tid} param {p} is not optional"
+            assert params[p]["defaultValue"] == "*", f"{tid} param {p} defaultValue != '*'"
+        # No collapsed git_commit_ish param.
+        assert "git_commit_ish" not in params, f"{tid} still exposes git_commit_ish as a param"
+        assert "?git_commit_ish" not in query, f"{tid} still references ?git_commit_ish"
+        # The post-FORK status guard must appear after the join (defense-in-depth; free no-op for
+        # snapshot arm since status is already "complete" from the EVAL).
+        assert '| WHERE status == "complete"' in query, f"{tid} missing the post-FORK status guard"
         assert query.index("LOOKUP JOIN sourcerer-refs") < query.index('WHERE status == "complete"')
 
 
@@ -120,11 +127,11 @@ def test_output_keeps_git_host():
 
 
 def test_content_tool_aggregation_is_ref_scoped():
-    # git_commit_ish defaults to "*", so a content query can match more than one ref at once.
-    # That is only safe if aggregation never blends refs: every STATS in a content tool must carry
-    # git.commit in its BY grouping key, so per-ref counts/bytes/line-blobs stay separate rather
-    # than being summed or interleaved across commits. Guards the files.ls-style regression where a
-    # `BY name` grouping silently summed file counts across every matching ref.
+    # git_commit/git_ref/git_ref_type all default to "*", so a content query can match more than
+    # one ref at once. That is only safe if aggregation never blends refs: every STATS in a content
+    # tool must carry git.commit in its BY grouping key, so per-ref counts/bytes/line-blobs stay
+    # separate rather than being summed or interleaved across commits. Guards the files.ls-style
+    # regression where a `BY name` grouping silently summed file counts across every matching ref.
     tools = _tools()
     for tid in _CONTENT_TOOL_IDS:
         query = tools[tid]["configuration"]["query"]
@@ -143,8 +150,8 @@ def test_content_tool_aggregation_is_ref_scoped():
             assert " BY " in block_text, f"{tid} has a STATS with no BY grouping"
             by_clause = block_text.split(" BY ", 1)[1]
             assert "git.commit" in by_clause, (
-                f"{tid} STATS groups without git.commit -- would blend refs when git_commit_ish "
-                f"matches more than one ref"
+                f"{tid} STATS groups without git.commit -- would blend refs when git_commit/git_ref "
+                f"params match more than one ref"
             )
 
 

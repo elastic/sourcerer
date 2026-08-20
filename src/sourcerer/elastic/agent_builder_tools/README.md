@@ -13,8 +13,69 @@ Query snippet:
 | WHERE git.host LIKE ?git_host
     AND git.org LIKE ?git_org
     AND git.repo LIKE ?git_repo
-    AND git.commit LIKE ?git_commit
+    AND (
+    // Resolve git_commit, git_ref, and git_ref_type against the small
+    // sourcerer-refs index first, rather than evaluating the wildcard
+    // match per line against this (far larger) content index.
+    // Content docs come in two disjoint shapes:
+    //   1. Commit snapshots have git.commit and no git.ref
+    //   2. Incremental refs have git.ref and no git.commit
+    // So resolution yields two membership sets off the same match:
+    //   1. Matching commits, checked against snapshot-shaped rows
+    //   2. Matching refs, checked against incremental-shaped rows
+    // Includes a consistency guard by only retrieving content from refs
+    // whose indexing is complete.
+    (git.commit IS NOT NULL AND git.commit IN (
+        // Commit snapshots
+        FROM sourcerer-refs
+        | WHERE git.host LIKE ?git_host
+            AND git.org LIKE ?git_org
+            AND git.repo LIKE ?git_repo
+            AND git.commit LIKE ?git_commit
+            AND git.ref LIKE ?git_ref
+            AND git.ref_type LIKE ?git_ref_type
+            AND status == "complete"
+        | KEEP git.commit
+        ))
+    OR
+    (git.ref IS NOT NULL AND git.commit IS NULL AND git.ref IN (
+        // Incremental refs
+        FROM sourcerer-refs
+        | WHERE git.host LIKE ?git_host
+            AND git.org LIKE ?git_org
+            AND git.repo LIKE ?git_repo
+            AND git.commit LIKE ?git_commit
+            AND git.ref LIKE ?git_ref
+            AND git.ref_type LIKE ?git_ref_type
+            AND status == "complete"
+        | KEEP git.ref
+        ))
+    )
     // other filters
+
+// Branch by content-doc shape:
+//   1. Content for commit snapshots already carry git.commit, and status
+//      was confirmed by the membership subquery above (status=="complete"),
+//      so the snapshot arm needs no join; it just asserts status to match
+//      the incremental arm's column.
+//   2. Content for incremental refs carry only git.ref. The join resolves
+//      the ref's current status from its join doc. This join assumes at
+//      most one doc per (host,org,repo,ref). That assumption requires a
+//      "one update mode owns a ref name" invariant (no repo may have both
+//      a snapshot and incremental source targeting the same ref name),
+//      which must be enforced separately (e.g. at config-validation time);
+//      nothing in this query itself enforces it.
+| FORK
+    ( WHERE git.commit IS NOT NULL
+        | EVAL status = "complete" )
+    ( WHERE git.ref IS NOT NULL AND git.commit IS NULL
+        | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref )
+
+// Consistency guard: Only retrieve from a ref whose indexing is complete.
+// Excludes torn/partial-read windows when an incrementally indexed ref is
+// in the middle of an update. This is a no-op for the commit snapshot arm,
+// whose status is always "complete" from the EVAL above.
+| WHERE status == "complete"
 
 // rest of query
 ```
@@ -43,6 +104,16 @@ params:
       description: Filter by git commit(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
+    git_ref:
+      type: string
+      description: Filter by ref name(s), e.g. "main" or "v1.*" (supports * and ? wildcards)
+      optional: true
+      defaultValue: "*"
+    git_ref_type:
+      type: string
+      description: Filter by ref type (can be "branch", "tag", "commit", or any with "*")
+      optional: true
+      defaultValue: "*"
 ```
 
 ## Glob matching `file.path`
@@ -57,7 +128,7 @@ Query snippet:
 | WHERE git.host LIKE ?git_host
     AND git.org LIKE ?git_org
     AND git.repo LIKE ?git_repo
-    AND git.commit LIKE ?git_commit
+    // filter by git_commit, git_ref, and git_ref_type
     AND file.path LIKE ?file_path
     // other filters
 

@@ -268,18 +268,10 @@ def setup(url, api_key, username, password, kb_url, config_path, include_experim
     "run (skip re-indexing it); older markers are treated as stuck and re-indexed. Also "
     "drives the schedule gate's stuck-run detection. Duration like 30m, 1h, 6h, 1d. Default 1h.",
 )
-@click.option(
-    "--no-backfill",
-    is_flag=True,
-    default=False,
-    help="Skip the one-time upgrade backfill that stamps git.ref_key onto "
-    "pre-existing snapshot content and migrates the refs index (default: run it, idempotently, "
-    "on every invocation).",
-)
 @env_option
 @insecure_option
 @auth_options
-def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window, no_backfill, url, api_key, username, password, insecure):
+def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window, url, api_key, username, password, insecure):
     """Index a remote GitHub repo's git-tracked files into Elasticsearch.
 
     Provide a REPO_SPEC ('<host>/<org>/<repo>') for a single repo, or --config to index multiple
@@ -292,7 +284,7 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
     if config_path:
         if repo_spec or branch or tag or commit:
             raise click.UsageError("--config cannot be combined with REPO_SPEC or -b/-t/-c")
-        index_cmd.run_config(config_path, url, api_key, username, password, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window=retry_window, insecure=insecure, no_backfill=no_backfill)
+        index_cmd.run_config(config_path, url, api_key, username, password, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window=retry_window, insecure=insecure)
     else:
         if prune:
             raise click.UsageError("--prune requires --config (there is no retention policy for a single ref)")
@@ -300,7 +292,7 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
             raise click.UsageError("--dry-run requires --config")
         if not repo_spec:
             raise click.UsageError("provide a REPO_SPEC ('<host>/<org>/<repo>') or --config")
-        index_cmd.run(repo_spec, branch, tag, commit, url, api_key, username, password, force, quiet, cache_dir, ephemeral, retry_window=retry_window, insecure=insecure, no_backfill=no_backfill)
+        index_cmd.run(repo_spec, branch, tag, commit, url, api_key, username, password, force, quiet, cache_dir, ephemeral, retry_window=retry_window, insecure=insecure)
 
 
 @cli.command()

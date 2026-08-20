@@ -78,8 +78,8 @@ class TestBuildFileDoc:
         p = tmp_path / "a.txt"
         p.write_text("hello")
         _id, doc = build_file_doc("github", "acme", "widgets", "deadbeef", "a.txt", p)
-        assert doc["git"] == {"host": "github", "org": "acme", "repo": "widgets", "commit": "deadbeef",
-                              "ref_key": "deadbeef"}
+        assert doc["git"] == {"host": "github", "org": "acme", "repo": "widgets", "commit": "deadbeef"}
+        assert "ref_key" not in doc["git"]
 
     def test_host_changes_id(self, tmp_path):
         p = tmp_path / "a.txt"
@@ -130,10 +130,12 @@ class TestBuildFileDoc:
 
 
 class TestIterLineDocs:
-    def test_snapshot_ref_key(self):
+    def test_snapshot_no_ref_key(self):
+        # Snapshot line docs carry git.commit but no git.ref_key (field removed).
         docs = list(iter_line_docs("github", "acme", "widgets", "deadbeef", "a.txt", "one"))
         _id, doc = docs[0]
-        assert doc["git"]["ref_key"] == "deadbeef"
+        assert doc["git"]["commit"] == "deadbeef"
+        assert "ref_key" not in doc["git"]
 
     def test_line_numbering_starts_at_one(self):
         docs = list(iter_line_docs("github", "acme", "widgets", "deadbeef", "a.txt", "one\ntwo\nthree"))
@@ -178,11 +180,13 @@ class TestIterLineDocs:
 
 
 class TestIncrementalDocs:
-    def test_ref_key_is_tilde_joined(self, tmp_path):
+    def test_ref_field_set_no_ref_key(self, tmp_path):
+        # Incremental docs carry git.ref (the branch name) but no git.ref_key (field removed).
         p = tmp_path / "a.txt"
         p.write_text("hello")
         _id, doc = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
-        assert doc["git"]["ref_key"] == "github~acme~widgets~main"
+        assert doc["git"]["ref"] == "main"
+        assert "ref_key" not in doc["git"]
 
     def test_no_commit_field(self, tmp_path):
         p = tmp_path / "a.txt"
@@ -207,18 +211,21 @@ class TestIncrementalDocs:
         incr_id, _ = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
         assert snap_id != incr_id
 
-    def test_line_docs_ref_key_and_no_commit(self):
+    def test_line_docs_ref_and_no_commit_no_ref_key(self):
+        # Incremental line docs carry git.ref, no git.commit, no git.ref_key.
         docs = list(iter_incremental_line_docs("github", "acme", "widgets", "main", "a.txt", "one\ntwo"))
         for _id, d in docs:
-            assert d["git"]["ref_key"] == "github~acme~widgets~main"
+            assert d["git"]["ref"] == "main"
             assert "commit" not in d["git"]
+            assert "ref_key" not in d["git"]
 
     def test_worker_ctx_routes_to_incremental_builders(self, tmp_path):
         (tmp_path / "a.txt").write_text("one\ntwo\n")
         _set_worker_ctx_incremental("github", "acme", "widgets", "main", tmp_path)
         actions = _build_one_file_actions("a.txt")
-        assert actions[0]["_source"]["git"]["ref_key"] == "github~acme~widgets~main"
+        assert actions[0]["_source"]["git"]["ref"] == "main"
         assert "commit" not in actions[0]["_source"]["git"]
+        assert "ref_key" not in actions[0]["_source"]["git"]
 
 
 class TestFileAttributes:

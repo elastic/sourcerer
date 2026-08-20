@@ -548,7 +548,7 @@ def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
     if raw.get("index") is not None:
         index_level, index_suffix = _parse_index(raw["index"], ctx)
     if update == "incremental" and index_level == "commit":
-        # Incremental content carries no git.commit of its own (see build_ref_key), so a
+        # Incremental content is ref-addressed (no git.commit on content docs), so a
         # commit-level index name -- which requires a commit sha -- can never be built for it.
         raise ValueError(f"{ctx}: 'update: incremental' cannot be combined with 'index.level: commit'")
 

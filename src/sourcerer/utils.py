@@ -18,14 +18,16 @@ ID_DIGEST_SIZE = 16
 
 
 def build_ref_key(host: str, org: str, repo: str, ref: str) -> str:
-    """Deterministic incremental ref_key: `{host}~{org}~{repo}~{ref}` (host/org/repo lowercased,
-    ref case-preserved).
+    """Deterministic `_id` string for incremental join docs: `{host}~{org}~{repo}~{ref}`
+    (host/org/repo lowercased, ref case-preserved).
+
+    Used exclusively as the Elasticsearch `_id` for the incremental refs join doc. Not a stored
+    field -- `git.ref_key` was removed from all index mappings and content builders. The string
+    is opaque to queries; the join uses `(git.host, git.org, git.repo, git.ref)` natively.
 
     `~` is safe as a delimiter because it is illegal in git ref names (see
-    `git check-ref-format`) and is already the index-name segment delimiter used for
-    host/org/repo elsewhere (see `indices.py`), so it cannot collide with any of the joined
-    values. Snapshot content instead uses the bare commit SHA as its `ref_key` -- this helper
-    is only for the incremental (ref-addressed) shape.
+    `git check-ref-format`) and matches the index-name segment delimiter used for
+    host/org/repo elsewhere (see `indices.py`), so it cannot collide with any joined value.
     """
     return "~".join((host.lower(), org.lower(), repo.lower(), ref))
 

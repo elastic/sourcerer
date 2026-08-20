@@ -73,8 +73,9 @@ Once a ref is resolved above, pass the value straight through:
   itself as `git_commit_ish` (e.g. `main`) -- no commit needed, the query always resolves to whatever
   commit that branch is CURRENTLY at.
 
-`git.ref_key` is an internal storage/join detail (`LOOKUP JOIN sourcerer-refs ON git.ref_key`
-inside the tool) -- it is never a param you construct or a value `refs.list` returns.
+Internally, each tool resolves the citable commit via a FORK that branches on content-doc shape:
+a `LOOKUP JOIN` on (`git.host`, `git.org`, `git.repo`, `git.commit`) for snapshot-shaped rows, or
+on (`git.host`, `git.org`, `git.repo`, `git.ref`) for incremental-shaped rows.
 
 Read the resolved `git.commit` back from each result row (the content query's own join supplies
 it) for citations. Because incremental content overwrites in place, a branch query always returns

@@ -98,9 +98,6 @@
               "type": "keyword",
               "normalizer": "lowercase"
             },
-            "ref_key": {
-              "type": "keyword"
-            },
             "ref": {
               "type": "keyword"
             }

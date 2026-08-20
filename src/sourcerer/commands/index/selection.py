@@ -33,6 +33,12 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
     # Phase 2's pre-clone skip check.
     fetched: dict[str, dict[str, str] | None] = {}
     seen: set[tuple[str, str]] = set()
+    # Maps (ref_type, name) -> update mode for the winning selector, so we can detect when a
+    # second selector of a DIFFERENT mode also claims the same ref. Mixed-mode refs are unsafe:
+    # the incremental LOOKUP JOIN ON git.ref requires exactly one refs doc per (host,org,repo,ref),
+    # but a snapshot marker and an incremental join doc would both be present (fan-out).
+    seen_mode: dict[tuple[str, str], str] = {}
+    mode_conflicts: list[tuple[str, str, str, str]] = []  # (ref_type, name, mode_a, mode_b)
     units: list[Unit] = []
     for sel in cfg.selectors:
         rt = sel.ref_type
@@ -44,6 +50,7 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
                 if (rt, prefix) in seen:
                     continue
                 seen.add((rt, prefix))
+                seen_mode[(rt, prefix)] = sel.update
                 units.append(Unit(
                     host=cfg.host, org=cfg.org, repo=cfg.repo, ref=prefix, kind=rt,
                     index_level=sel.index_level, index_suffix=sel.index_suffix, update=sel.update,
@@ -56,19 +63,37 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
             continue  # ls-remote failed for this ref type, skip
         floor = sel.since_version_floor()  # version-based `since: {ref}`, name-only
         for name in sorted(ref_map):
-            if (rt, name) in seen:
-                continue
             v = sel.matches(rt, name)
             if v is None:
                 continue
             if floor is not None and v.components < floor:
                 continue  # below the since version floor
-            seen.add((rt, name))
+            key = (rt, name)
+            if key in seen:
+                # Already claimed by an earlier selector: check for a mode conflict.
+                prior_mode = seen_mode[key]
+                if prior_mode != sel.update:
+                    mode_conflicts.append((rt, name, prior_mode, sel.update))
+                continue
+            seen.add(key)
+            seen_mode[key] = sel.update
             units.append(Unit(
                 host=cfg.host, org=cfg.org, repo=cfg.repo, ref=name, kind=rt,
                 remote_sha=ref_map[name],
                 index_level=sel.index_level, index_suffix=sel.index_suffix, update=sel.update,
             ))
+
+    if mode_conflicts:
+        conflicts_str = ", ".join(
+            f"{rt}/{name} ({mode_a} vs {mode_b})"
+            for rt, name, mode_a, mode_b in mode_conflicts
+        )
+        click.echo(
+            f"Warning: {cfg.org}/{cfg.repo}: selectors claim the same ref(s) with different "
+            f"update modes -- skipping all units for this repo to avoid fan-out: {conflicts_str}",
+            err=True,
+        )
+        return []
 
     failed_kinds = sorted(k for k, v in fetched.items() if v is None)
     if failed_kinds:

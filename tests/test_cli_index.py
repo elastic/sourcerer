@@ -68,7 +68,7 @@ class TestInsecureOption:
 
         def fake_run(repo_spec, branch, tag, commit, url, api_key, username, password,
                      force=False, quiet=False, cache_dir=None, ephemeral=False,
-                     retry_window=None, insecure=False, no_backfill=False):
+                     retry_window=None, insecure=False):
             captured["insecure"] = insecure
 
         with patch("sourcerer.commands.index.command.run", side_effect=fake_run):
@@ -86,7 +86,7 @@ class TestInsecureOption:
 
         def fake_run(repo_spec, branch, tag, commit, url, api_key, username, password,
                      force=False, quiet=False, cache_dir=None, ephemeral=False,
-                     retry_window=None, insecure=False, no_backfill=False):
+                     retry_window=None, insecure=False):
             captured["insecure"] = insecure
 
         with patch("sourcerer.commands.index.command.run", side_effect=fake_run):
@@ -96,43 +96,3 @@ class TestInsecureOption:
             ], env={}, catch_exceptions=False)
 
         assert captured.get("insecure") is False
-
-
-class TestNoBackfillOption:
-    def test_help_shows_no_backfill(self):
-        runner = CliRunner()
-        result = runner.invoke(index, ["--help"])
-        assert result.exit_code == 0
-        assert "--no-backfill" in result.output
-
-    def test_no_backfill_flag_forwarded_to_run(self):
-        runner = CliRunner()
-        captured = {}
-
-        def fake_run(repo_spec, branch, tag, commit, url, api_key, username, password,
-                     force=False, quiet=False, cache_dir=None, ephemeral=False,
-                     retry_window=None, insecure=False, no_backfill=False):
-            captured["no_backfill"] = no_backfill
-
-        with patch("sourcerer.commands.index.command.run", side_effect=fake_run):
-            runner.invoke(index, [
-                "--url", "http://es:9200", "--no-backfill", "github/org/repo",
-            ], catch_exceptions=False)
-
-        assert captured.get("no_backfill") is True
-
-    def test_default_is_backfill_enabled(self):
-        runner = CliRunner()
-        captured = {}
-
-        def fake_run(repo_spec, branch, tag, commit, url, api_key, username, password,
-                     force=False, quiet=False, cache_dir=None, ephemeral=False,
-                     retry_window=None, insecure=False, no_backfill=False):
-            captured["no_backfill"] = no_backfill
-
-        with patch("sourcerer.commands.index.command.run", side_effect=fake_run):
-            runner.invoke(index, [
-                "--url", "http://es:9200", "github/org/repo",
-            ], catch_exceptions=False)
-
-        assert captured.get("no_backfill") is False

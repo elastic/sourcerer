@@ -11,8 +11,6 @@
 
 # Standard packages
 import datetime
-import json
-import pathlib
 import subprocess
 import sys
 import threading
@@ -28,7 +26,7 @@ from ...hosts import resolve_hosts
 from ...planner import Marker, plan_repo
 from ...progress import ProgressReporter, Unit, make_reporter
 from ...indices import files_index, lines_index
-from ...queries import check_ref_key_uniqueness
+from ...queries import check_join_uniqueness
 from ...utils import ES_ERRORS, make_client
 from ..prune import command as prune_cmd
 from ..prune.execute import delete_commit_from_indices
@@ -48,11 +46,11 @@ from .git import (
     _rev_info,
 )
 from .markers import (
-    backfill_repo, build_ref_id, commits_with_content, content_present,
+    build_ref_id, commits_with_content, content_present,
     count_incremental_branch_docs, delete_incremental_branch, delete_incremental_paths,
-    fully_indexed_counts, markers_status_by_id, _needs_index, pre_clone_skip,
-    read_incremental_ref, recorded_routing, refresh_incremental_content, should_index,
-    write_incremental_failed, write_incremental_indexing, write_incremental_ready,
+    fully_indexed_counts, mark_snapshot_markers_stale, markers_status_by_id, _needs_index,
+    pre_clone_skip, read_incremental_ref, recorded_routing, refresh_incremental_content,
+    should_index, write_incremental_failed, write_incremental_indexing, write_incremental_ready,
     write_indexing_marker, write_ref_marker,
 )
 from .report import dry_run_config
@@ -61,41 +59,18 @@ from .runtime import _aborted, _tuning, bulk_indexing_settings, handle_interrupt
 from .selection import _effective_since_floor, _load_config, _resolve_entry
 
 
-# The index template files, reused by the upgrade backfill to migrate the mapping of EXISTING
-# physical indices (a put_index_template change alone only affects indices created afterward).
-_INDEX_TEMPLATES_DIR = pathlib.Path(__file__).resolve().parents[2] / "elastic" / "index_templates"
-
-
-def _load_template_mapping(name: str) -> dict | None:
-    try:
-        body = json.loads((_INDEX_TEMPLATES_DIR / name).read_text())
-    except OSError:
-        return None
-    return body.get("template", {}).get("mappings")
-
-
-def _load_refs_mapping() -> dict | None:
-    return _load_template_mapping("sourcerer-v3-refs.json")
-
-
-def _load_files_mapping() -> dict | None:
-    return _load_template_mapping("sourcerer-v3-files.json")
-
-
-def _load_lines_mapping() -> dict | None:
-    return _load_template_mapping("sourcerer-v3-lines.json")
-
-
 def _run_uniqueness_gate(es: Elasticsearch, host: str, org: str, repo: str) -> bool:
-    """Post-index uniqueness gate (INV-011): every distinct `git.ref_key` in this repo's
-    content must resolve to exactly one `sourcerer-v3-refs` join doc. Prints the offending
-    ref_key(s) to stderr and returns False on any violation; True (silent) when the invariant
-    holds."""
-    offending = check_ref_key_uniqueness(es, host, org, repo)
+    """Post-index join-uniqueness gate (INV-011 backstop): every distinct content commit/ref in
+    this repo must resolve to a complete refs join doc. For snapshot content (git.commit IS NOT
+    NULL) each commit must have at least one complete refs doc; for incremental (git.ref IS NOT
+    NULL) each ref must have exactly one incremental join doc. Prints offenders to stderr and
+    returns False; True (silent) when the invariant holds."""
+    offending = check_join_uniqueness(es, host, org, repo)
     if offending:
         click.echo(
-            f"Error: {host}/{org}/{repo}: {len(offending)} git.ref_key value(s) missing or "
-            f"duplicated in sourcerer-v3-refs: {', '.join(offending)}",
+            f"Warning: {host}/{org}/{repo}: {len(offending)} content key(s) with join-doc "
+            f"mismatch in sourcerer-v3-refs (run prune to clean stale markers): "
+            f"{', '.join(offending)}",
             err=True,
         )
         return False
@@ -258,14 +233,8 @@ def index_ref_in_dir(
     # write-new -> FLIP MARKER -> delete-old: the marker now points at the new location before any
     # old copy is deleted, so a crash between here and the delete below leaves stale (not missing)
     # data that the prune stale-location sweep reclaims.
-    # refresh=True so the post-index uniqueness gate (_run_uniqueness_gate, INV-011) sees the
-    # git.ref_key carrier immediately instead of racing the refs index's default (~1s) refresh
-    # interval: the bulk context manager refreshes the CONTENT indices on exit but not refs, so an
-    # unrefreshed write here would make the gate read this ref_key's content but miss its carrier
-    # and false-fail "missing". Mirrors write_incremental_ready (refresh=True).
     write_ref_marker(es, host, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso,
-                     files_count, lines_count, index_level=level, index_suffix=suffix,
-                     refresh=True)
+                     files_count, lines_count, index_level=level, index_suffix=suffix)
     if migrating:
         # Reconstruct the OLD index name from the prior marker's routing and drop this commit's
         # stale copy there. Commit-safety (another surviving ref sharing the commit) is respected
@@ -299,8 +268,8 @@ def index_incremental_branch_in_dir(
         the whole branch namespace, then index every currently-tracked path, or
       - does a delta update: `git diff --name-status` (via `plan_changes`) between the prior and
         new commit, deleting only the paths git reports removed/changed and (re)indexing only the
-        paths git reports added/changed (INV-008 -- scoped by the exact `ref_key`, never a whole
-        namespace sweep).
+        paths git reports added/changed (INV-008 -- scoped by the exact (host,org,repo,ref) tuple,
+        never a whole namespace sweep).
     The refs join doc is published `indexing` before any mutation and `complete` only after the
     content deletes/indexes and a refresh all succeed (INV-006); a raised exception instead
     records `write_incremental_failed` and leaves the completed pointer untouched, then
@@ -328,7 +297,8 @@ def index_incremental_branch_in_dir(
 
     reporter.set_stage(unit, "indexing")
     write_incremental_indexing(es, host, org, repo, branch, completed_commit=old_sha,
-                               target_commit=new_sha, prior=prior)
+                               target_commit=new_sha, prior=prior,
+                               index_level=level, index_suffix=suffix)
     try:
         full_rebuild = old_sha is None or force
         if not full_rebuild:
@@ -357,15 +327,23 @@ def index_incremental_branch_in_dir(
         files_count, lines_count = count_incremental_branch_docs(
             es, host, org, repo, branch, index_level=level, index_suffix=suffix,
         )
+        # Mode-switch: flip any complete snapshot markers for this (host,org,repo,ref) to
+        # "stale" BEFORE publishing the incremental join doc as "complete". This ensures the
+        # two-complete-docs fan-out window (one snapshot + one incremental marker both matching
+        # LOOKUP JOIN ON git.ref) never opens. Stale content is reclaimed by prune.
+        mark_snapshot_markers_stale(es, host, org, repo, branch)
         write_incremental_ready(es, host, org, repo, branch, new_sha, commit_date_iso,
-                                files_count, lines_count)
+                                files_count, lines_count,
+                                index_level=level, index_suffix=suffix)
     except KeyboardInterrupt:
         write_incremental_failed(es, host, org, repo, branch, completed_commit=old_sha,
-                                 target_commit=new_sha, error="interrupted", prior=prior)
+                                 target_commit=new_sha, error="interrupted", prior=prior,
+                                 index_level=level, index_suffix=suffix)
         raise
     except Exception as e:
         write_incremental_failed(es, host, org, repo, branch, completed_commit=old_sha,
-                                 target_commit=new_sha, error=str(e), prior=prior)
+                                 target_commit=new_sha, error=str(e), prior=prior,
+                                 index_level=level, index_suffix=suffix)
         raise
     reporter.finish(unit, "indexed", indexed_files, indexed_lines)
 
@@ -444,7 +422,6 @@ def run(
     ephemeral: bool = False,
     retry_window: datetime.timedelta | None = None,
     insecure: bool = False,
-    no_backfill: bool = False,
 ) -> None:
     parts = repo_spec.split("/", 2)
     if len(parts) != 3 or not all(parts):
@@ -467,12 +444,6 @@ def run(
 
     es = make_client(url, api_key, username, password, insecure=insecure)
     cache_root = None if ephemeral else resolve_cache_root(cache_dir)
-
-    if not no_backfill:
-        backfill_repo(
-            es, host, org, repo, refs_mapping=_load_refs_mapping(),
-            files_mapping=_load_files_mapping(), lines_mapping=_load_lines_mapping(),
-        )
 
     kind = "branch" if branch else "tag" if tag else "commit" if commit else "default"
     unit = Unit(host=host, org=org, repo=repo, ref=branch or tag or commit, kind=kind)
@@ -516,7 +487,6 @@ def run_config(
     dry_run: bool = False,
     retry_window: datetime.timedelta | None = None,
     insecure: bool = False,
-    no_backfill: bool = False,
 ) -> None:
     """
     Index every (repo, ref) the config selects. First list the remote branches and tags for
@@ -541,19 +511,6 @@ def run_config(
     hosts = config.hosts
     es = make_client(url, api_key, username, password, insecure=insecure)
     cache_root = None if ephemeral else resolve_cache_root(cache_dir)
-
-    # One-time upgrade backfill (default-on; --no-backfill opts out; skipped on --dry-run,
-    # which promises no ES writes). Runs once per distinct (host, org, repo) in the config,
-    # before the schedule gate, so it applies regardless of which sources are due this tick.
-    if not no_backfill and not dry_run:
-        refs_mapping = _load_refs_mapping()
-        files_mapping = _load_files_mapping()
-        lines_mapping = _load_lines_mapping()
-        for repo_cfg in config.repos:
-            backfill_repo(
-                es, repo_cfg.host, repo_cfg.org, repo_cfg.repo, refs_mapping=refs_mapping,
-                files_mapping=files_mapping, lines_mapping=lines_mapping,
-            )
 
     # Schedule gate: determine which sources are due for indexing based on their configured
     # schedule and the refs index's record of when they were last indexed. Sources with no

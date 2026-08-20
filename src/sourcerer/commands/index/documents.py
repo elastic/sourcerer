@@ -18,7 +18,7 @@ from elasticsearch.helpers import parallel_bulk as es_parallel_bulk
 
 # App packages
 from ...indices import files_index, lines_index
-from ...utils import build_ref_key, make_doc_id
+from ...utils import make_doc_id
 from .git import get_symlink_paths, iter_tracked_files
 from .runtime import _aborted, _tuning
 
@@ -91,9 +91,6 @@ def build_file_doc(
             "org": org,
             "repo": repo,
             "commit": commit_sha,
-            # Snapshot ref_key is the bare commit -- the content is addressed by commit, so the
-            # commit itself is the stable join key (see build_ref_key for the incremental shape).
-            "ref_key": commit_sha,
         },
         "file": file_fields,
     }
@@ -141,7 +138,6 @@ def iter_line_docs(
             "org": org,
             "repo": repo,
             "commit": commit_sha,
-            "ref_key": commit_sha,
         },
         "file": file_fields,
     }
@@ -163,10 +159,9 @@ def build_incremental_file_doc(
     target_path: str | None = None,
     target_size: int | None = None,
 ) -> tuple[str, dict]:
-    """Ref-addressed (incremental) file doc: no `git.commit`; `git.ref_key` is the tilde-joined
-    `build_ref_key(host, org, repo, ref)` and `_id` is stable across commits (derived from the
-    branch name, not the commit), so a modified file's doc overwrites in place on the next
-    HEAD advance rather than minting a new id."""
+    """Ref-addressed (incremental) file doc: carries `git.ref` but no `git.commit`; `_id` is
+    stable across commits (derived from the branch name, not the commit), so a modified file's
+    doc overwrites in place on the next HEAD advance rather than minting a new id."""
     p = pathlib.PurePosixPath(rel_path)
     directory = "" if str(p.parent) == "." else str(p.parent)
     extension = p.suffix.lstrip(".") or None
@@ -203,7 +198,6 @@ def build_incremental_file_doc(
             "org": org,
             "repo": repo,
             "ref": ref,
-            "ref_key": build_ref_key(host, org, repo, ref),
         },
         "file": file_fields,
     }
@@ -248,7 +242,6 @@ def iter_incremental_line_docs(
             "org": org,
             "repo": repo,
             "ref": ref,
-            "ref_key": build_ref_key(host, org, repo, ref),
         },
         "file": file_fields,
     }
@@ -492,8 +485,8 @@ def index_incremental_paths(
     diff base is unavailable). A given `rel_paths` list indexes only those paths -- the delta
     indexer's changed/added set (see `commands/index/git.py:plan_changes`), which is what makes
     an incremental HEAD advance only touch the files git reports changed. Deletions for removed
-    paths are the caller's responsibility (see `markers.delete_by_ref_key`) since they need no
-    doc generation. Mirrors `index_repo`'s worker-pool ingest loop.
+    paths are the caller's responsibility (see `markers.delete_incremental_paths`) since they
+    need no doc generation. Mirrors `index_repo`'s worker-pool ingest loop.
     """
     files_count = 0
     lines_count = 0

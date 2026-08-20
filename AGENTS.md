@@ -61,14 +61,11 @@ config's `sources:` is a YAML list, one entry per (host, org, repo, ref_type). S
 
 #### `update: <mode>` (snapshot vs. incremental)
 
-`snapshot` (default): content is commit-addressed, as always -- `git.ref_key` on every content
-doc equals its `git.commit`, and a HEAD advance on a branch indexes a whole new snapshot under
-the new commit.
+`snapshot` (default): content is commit-addressed. A HEAD advance on a branch
+indexes a whole new snapshot under the new commit.
 
 `incremental` (branch-only; rejects `since`/`retain` -- there is no per-commit history for either
-to apply to): content is ref-addressed instead. `git.ref_key` is
-`{host}~{org}~{repo}~{ref}` and carries no `git.commit` of its own; the branch's live commit
-lives only on its refs join doc (`_id = git.ref_key`). A HEAD advance runs `git diff
+to apply to): content is ref-addressed instead. A HEAD advance runs `git diff
 --name-status` between the previously-completed commit and the new tip and only deletes/
 reindexes the paths git reports changed -- add/modify/delete/rename/copy -- instead of
 reindexing the whole tree. A missing diff base (force-push, GC'd, or the first index) rebuilds
@@ -375,90 +372,113 @@ creates one index/shard per commit — see `specs/sourcerer-yml.md` for the cave
   resolve it to a commit via the refs index (the `sourcerer.refs.list` tool), then filter
   content by `git.host` + `git.commit`.
 
-### `git.ref_key` and the universal join query
+### Universal join query
 
-Every content doc (file and line, both `update` modes) carries a `git.ref_key` keyword field:
-the bare commit SHA for `snapshot` content, or `{host}~{org}~{repo}~{ref}` for `incremental`
-content (see `update: <mode>` above; `build_ref_key` in `src/sourcerer/utils.py`). The refs doc
-that carries `git.commit` for the join is:
+Content docs come in two disjoint shapes depending on how they were indexed:
 
-- **Snapshot:** the `build_ref_id`-keyed **ref-name marker** itself. `write_ref_marker` sets
-  `git.ref_key = commit_sha` on the marker (one doc per snapshot source). There is no separate
-  shadow join doc for snapshot content.
-- **Incremental:** a dedicated refs join doc at `_id = git.ref_key = {host}~{org}~{repo}~{ref}`,
-  holding the live HEAD commit and advanced two-phase (INV-006). One doc per branch.
+- **Snapshot** (`update: snapshot`): content docs carry `git.commit` and no `git.ref`. The ref-name
+  marker in `sourcerer-v3-refs` (keyed by `build_ref_id`, one per snapshot source) carries the commit
+  and status. `git.commit` on the content row is already the answer; no join is needed to resolve it.
+- **Incremental** (`update: incremental`): content docs carry `git.ref` and no `git.commit`. A
+  dedicated refs join doc at `_id = build_ref_key(host,org,repo,ref)` (one per branch) holds the
+  live HEAD commit and is advanced two-phase (INV-006). The join resolves `git.commit` from this doc.
 
-INV-004: exactly one `sourcerer-v3-refs` doc per `git.ref_key` value. For snapshot content this
-is the marker (one per ref+commit); for incremental it is the branch's join doc. Because ES|QL
-`LOOKUP JOIN` fans out on duplicate right-side keys, having >1 doc with the same `git.ref_key`
-would multiply content rows — the uniqueness gate (`_run_uniqueness_gate`, INV-011) guards this.
+Every Agent Builder content tool (`sourcerer.code.*`, `sourcerer.files.*`) uses
+the same shape that handles both modes without fan-out:
+
+```esql
+FROM sourcerer-lines
+| WHERE git.host LIKE ?git_host AND ...
+    AND (
+      // Resolve git_commit, git_ref, and git_ref_type against the small sourcerer-refs
+      // index first (content docs carry no git.ref_type); the two membership sets handle
+      // both content-doc shapes in one pass.
+      (git.commit IS NOT NULL AND git.commit IN (
+          FROM sourcerer-refs
+          | WHERE git.host LIKE ?git_host AND ... AND status == "complete"
+              AND git.commit LIKE ?git_commit
+              AND git.ref LIKE ?git_ref
+              AND git.ref_type LIKE ?git_ref_type
+          | KEEP git.commit
+          ))
+      OR
+      (git.ref IS NOT NULL AND git.commit IS NULL AND git.ref IN (
+          FROM sourcerer-refs
+          | WHERE git.host LIKE ?git_host AND ... AND status == "complete"
+              AND git.commit LIKE ?git_commit
+              AND git.ref LIKE ?git_ref
+              AND git.ref_type LIKE ?git_ref_type
+          | KEEP git.ref
+          ))
+      )
+// Branch by content-doc shape: snapshot rows already carry git.commit and status was
+// pre-confirmed by the membership subquery above (status=="complete"), so the snapshot
+// arm needs no join -- it just asserts status to match the incremental arm's column.
+// Incremental rows carry only git.ref; the join resolves the ref's current status from
+// its join doc. Safety of the incremental join (one doc per (host,org,repo,ref)) is
+// enforced by the "one update mode owns a ref name" invariant at index time.
+| FORK
+    ( WHERE git.commit IS NOT NULL
+        | EVAL status = "complete" )
+    ( WHERE git.ref IS NOT NULL AND git.commit IS NULL
+        | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref )
+| WHERE status == "complete"
+```
+
+**Snapshot arm**: no join needed. The commit already lives on the content row and was pre-confirmed
+`complete` by the membership subquery; `EVAL status = "complete"` asserts the column so it matches
+the incremental arm's shape. Critically, the snapshot arm never touches `sourcerer-refs`, so two
+complete markers sharing the same commit (branch + same-named tag) do NOT fan out — they just produce
+one row each in the pre-FORK membership filter, which deduplicates naturally.
+
+**Incremental arm**: joins `sourcerer-refs ON (git.host, git.org, git.repo, git.ref)`. This join is
+safe (no fan-out) because there is always exactly one incremental join doc per `(host,org,repo,ref)`:
+all three incremental writers use `_id = build_ref_key(...)` (overwrite-in-place), the runtime
+mode-conflict guard in `selection.py` prevents two selectors of different modes from claiming the same
+ref name simultaneously, and the flip-status switchover marks any old snapshot marker `"stale"` BEFORE
+the incremental join doc is published as `"complete"` — so the two-complete-docs window never opens.
+
+**Scoping params** (`git_commit`, `git_ref`, `git_ref_type`) are all optional (default `"*"`) and
+support `*`/`?` wildcards (filters use `LIKE`). For a normal content question, resolve a ref first
+(see `src/sourcerer/skills/ref-resolution/SKILL.md`), then pass the result through the appropriate
+param: a commit SHA goes to `git_commit`; a branch or tag name goes to `git_ref` (optionally narrow
+further with `git_ref_type: branch` or `git_ref_type: tag`). Leaving all three at `"*"` matches
+content across all refs at once; because every content tool carries `git.commit` through to output
+(and aggregations group `BY git.commit`), unpinned results stay attributable per commit rather than
+being blended — but a version-specific answer should still pin a ref.
+
+**The post-FORK `| WHERE status == "complete"`** is an automatic consistency guard (no param): it
+serves content only from a ref whose latest index is complete. For incremental content this excludes
+the torn/partial-read window while a branch is mid-reindex — during a HEAD advance the branch's refs
+join doc is `status: indexing` and its content is being mutated in place. For snapshot content this
+is a no-op (status is already `"complete"` from the `EVAL` above). Trade-off: a *failed* incremental
+run leaves the join doc at `status: indexing` with the prior commit's content still fully consistent;
+the guard hides that content until the next successful run republishes `status: complete`.
 
 #### `status` field values
 
 Every `sourcerer-v3-refs` document — snapshot ref-name markers and incremental join docs alike
-— carries a `status` field drawn from a shared two-value vocabulary, so the scheduler and
-`sourcerer.refs.list` can query both families uniformly:
+— carries a `status` field drawn from a three-value vocabulary:
 
 | Value | Meaning |
 |---|---|
 | `indexing` | A run is mid-flight. `indexing_started_at` is set; `indexed_at` is absent/null. Present on snapshot ref-name markers (written by `write_indexing_marker` just before ingest) and incremental join docs (written by `write_incremental_indexing`). A stale `indexing` doc whose `indexing_started_at` is older than the retry window (default 6 h) marks a crashed run and is treated as due for re-indexing. |
 | `complete` | Fully indexed and ready to query. `indexed_at` is set; `indexing_started_at` is absent/null (the terminal write drops it). Written by `write_ref_marker` (snapshot markers) and `write_incremental_ready` (incremental join docs). The scheduler's "last indexed" aggregation and `sourcerer.refs.list`'s default `?status == "complete"` filter both use this value. |
+| `stale` | A snapshot marker superseded by a mode switch to incremental. Written by `mark_snapshot_markers_stale` (called BEFORE the incremental join doc is published as `complete`). Stale markers are invisible to all content tools (all gate on `status == "complete"`). The prune command reclaims their content and deletes the marker via `execute_stale_marker_deletions`. |
 
-Every Agent Builder content tool (`sourcerer.code.*`, `sourcerer.files.*`) therefore runs the
-same query shape regardless of mode -- and `git.ref_key` is NEVER an agent-facing param, only
-the internal join field:
+#### Uniqueness gate (INV-011 backstop)
 
-```esql
-FROM sourcerer-lines
-| WHERE ... AND git.ref_key IN (
-    // Resolve git_commit_ish against the small sourcerer-refs table once, then do a cheap
-    // membership check on the large content index (instead of a per-row LIKE/OR wildcard match).
-    FROM sourcerer-refs
-    | WHERE ... AND status == "complete"
-        AND (git.commit LIKE ?git_commit_ish OR git.ref LIKE ?git_commit_ish)
-    | KEEP git.ref_key
-  )
-| LOOKUP JOIN sourcerer-refs ON git.ref_key
-| WHERE status == "complete"
-```
+`_run_uniqueness_gate` (`commands/index/command.py`) runs after each index pass and calls
+`check_join_uniqueness` (`queries.py`) to verify:
 
-`git_commit_ish` is the single scoping param and supports `*`/`?` wildcards (the filter uses
-`LIKE`). It is optional (default `"*"`, matching every indexed ref), but for a normal content
-question resolve a ref first (see `src/sourcerer/skills/ref-resolution/SKILL.md`) and pass through
-whatever it resolved to: a snapshot ref's commit SHA, or an incremental branch's plain name (e.g.
-`main`) -- no construction, no `ref_key` involved. Leaving it at `"*"` matches content across all
-refs at once; because every content tool carries `git.commit` through to output (and any
-aggregation groups `BY git.commit`), unpinned results stay attributable per commit rather than
-being blended -- but a version-specific answer should still pin a ref. The subquery matches `git_commit_ish`
-against whichever field the ref actually carries (`git.commit` for snapshot, `git.ref` for
-incremental) and collapses it to a set of `git.ref_key` values; the outer query scopes content by
-membership in that set, so the same param and the same query shape work for both modes without the
-caller knowing which one it is. The join then adds/overwrites `git.commit` on every row, so
-snapshot content (which already carries its own, identical `git.commit`) is unaffected and
-incremental content (which has none) gets it from the join.
+- **Snapshot** (git.commit IS NOT NULL in content): each distinct commit must have ≥1 complete refs
+  doc (presence check — multi-ref-per-commit is legal).
+- **Incremental** (git.ref IS NOT NULL in content): each distinct ref must have **exactly one**
+  incremental join doc with `update_mode == "incremental"` (anti-fan-out guard for the surviving join).
 
-The post-join `| WHERE status == "complete"` is an automatic consistency guard (no param): it
-serves content only from a ref whose latest index is complete, excluding the torn/partial-read
-window while an incremental branch is mid-reindex -- during a HEAD advance the branch's refs join
-doc is `status: indexing` and its content is being mutated in place, so a query joining to it
-would otherwise read a half-applied mix of the old and new commits. It is a no-op for snapshot
-content (snapshot markers are always `status: complete`). Trade-off: a *failed* incremental run
-leaves the join doc at `status: indexing` with the prior commit's content still fully consistent;
-the guard hides that content until the next successful run republishes `status: complete`. Note
-this guard is about intra-update consistency, not inter-query staleness: because incremental
-content overwrites in place, only a branch's current HEAD is ever indexed, so a query always
-returns whatever commit the branch is at *now* -- to detect that a branch advanced since an
-earlier resolution, re-check `sourcerer.refs.list`.
-
-### Upgrade backfill (`--no-backfill`)
-
-`sourcerer index` runs a one-time, idempotent upgrade backfill by default on every invocation:
-an `_update_by_query` stamps `git.ref_key = git.commit` onto pre-existing snapshot content
-that predates this feature, the refs index's mapping is
-re-applied to the existing physical index (a template change alone only affects indices
-created afterward), and a snapshot refs join doc is created for every already-indexed commit
-that lacks one. Pass `--no-backfill` to skip it. Safe to run every time: a repeat run touches
-nothing (see `backfill_repo` in `src/sourcerer/commands/index/markers.py`).
+The gate is non-fatal (logs a warning, does not block): with the flip-status switchover in place,
+violations should only occur if a stale-flip was skipped or crashed mid-way; the next prune run
+reclaims the stale marker and resolves the violation automatically.
 
 ## Releases
 
