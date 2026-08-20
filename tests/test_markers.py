@@ -463,18 +463,18 @@ class TestWriteIncrementalIndexing:
     def test_incremental_marker_preserves_completed_commit_and_exposes_target(self):
         es = MagicMock()
         write_incremental_indexing(es, "github", "acme", "widgets", "main",
-                                    completed_commit=OLD, target_commit=NEW)
+                                    completed_commit=OLD, commit_target=NEW)
         doc = _indexed_doc(es)
         assert doc["status"] == "indexing"
         assert doc["git"]["commit"] == OLD  # completed pointer unchanged (INV-006)
-        assert doc["git"]["target_commit"] == NEW
+        assert doc["git"]["commit_target"] == NEW
         assert doc["index_strategy"] == "incremental"
         assert es.index.call_args.kwargs["index"] == REFS_INDEX
 
     def test_incremental_marker_first_index_has_no_completed_commit(self):
         es = MagicMock()
         write_incremental_indexing(es, "github", "acme", "widgets", "main",
-                                    completed_commit=None, target_commit=NEW)
+                                    completed_commit=None, commit_target=NEW)
         assert _indexed_doc(es)["git"]["commit"] is None
 
     def test_incremental_marker_carries_prior_counts(self):
@@ -510,7 +510,7 @@ class TestWriteIncrementalReady:
         doc = _indexed_doc(es)
         assert doc["status"] == "complete"
         assert doc["git"]["commit"] == NEW  # advances only after a successful run (INV-006)
-        assert doc["git"]["target_commit"] is None
+        assert doc["git"]["commit_target"] is None
         assert doc["error"] is None and doc["failed_at"] is None
         assert doc["files_count"] == 5 and doc["lines_count"] == 99
         assert es.index.call_args.kwargs["refresh"] is True  # publication boundary
@@ -529,11 +529,11 @@ class TestWriteIncrementalFailed:
     def test_incremental_marker_keeps_status_indexing_and_retains_old_pointer(self):
         es = MagicMock()
         write_incremental_failed(es, "github", "acme", "widgets", "main", completed_commit=OLD,
-                                  target_commit=NEW, error="boom")
+                                  commit_target=NEW, error="boom")
         doc = _indexed_doc(es)
         assert doc["status"] == "indexing"  # not advanced -- a failed run leaves the prior state
         assert doc["git"]["commit"] == OLD
-        assert doc["git"]["target_commit"] == NEW
+        assert doc["git"]["commit_target"] == NEW
         assert doc["error"] == "boom"
         assert doc["failed_at"] is not None
 

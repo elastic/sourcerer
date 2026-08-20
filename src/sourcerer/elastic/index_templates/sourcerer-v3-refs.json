@@ -68,6 +68,10 @@
             },
             "commit_date": {
               "type": "date"
+            },
+            "commit_target": {
+              "type": "keyword",
+              "normalizer": "lowercase"
             }
           }
         },

@@ -303,7 +303,7 @@ def index_incremental_branch_in_dir(
 
     reporter.set_stage(unit, "indexing")
     write_incremental_indexing(es, host, org, repo, branch, completed_commit=old_sha,
-                               target_commit=new_sha, prior=prior,
+                               commit_target=new_sha, prior=prior,
                                index_level=level, index_suffix=suffix)
     try:
         full_rebuild = old_sha is None or force or routing_changed
@@ -353,12 +353,12 @@ def index_incremental_branch_in_dir(
                                       index_level=old_level, index_suffix=old_suffix)
     except KeyboardInterrupt:
         write_incremental_failed(es, host, org, repo, branch, completed_commit=old_sha,
-                                 target_commit=new_sha, error="interrupted", prior=prior,
+                                 commit_target=new_sha, error="interrupted", prior=prior,
                                  index_level=level, index_suffix=suffix)
         raise
     except Exception as e:
         write_incremental_failed(es, host, org, repo, branch, completed_commit=old_sha,
-                                 target_commit=new_sha, error=str(e), prior=prior,
+                                 commit_target=new_sha, error=str(e), prior=prior,
                                  index_level=level, index_suffix=suffix)
         raise
     reporter.finish(unit, "indexed", indexed_files, indexed_lines)

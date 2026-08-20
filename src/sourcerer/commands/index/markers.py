@@ -573,7 +573,7 @@ def _build_incremental_join_doc(
     *,
     status: str,
     commit: str | None,
-    target_commit: str | None = None,
+    commit_target: str | None = None,
     commit_date_iso: str | None = None,
     files_count: int = 0,
     lines_count: int = 0,
@@ -592,7 +592,7 @@ def _build_incremental_join_doc(
             "ref": ref,
             "ref_type": "branch",
             "commit": commit,
-            "target_commit": target_commit,
+            "commit_target": commit_target,
             "commit_date": commit_date_iso,
         },
         "index_strategy": "incremental",
@@ -615,15 +615,15 @@ def write_incremental_indexing(
     repo: str,
     ref: str,
     completed_commit: str | None,
-    target_commit: str,
+    commit_target: str,
     prior: dict | None = None,
     refresh: bool = False,
     index_level: str = "repo",
     index_suffix: str | None = None,
 ) -> None:
     """Publish `status: indexing`: the completed pointer (`git.commit`) stays at the LAST
-    completed SHA (or None on a first index) while `git.target_commit` advertises the candidate
-    SHA the run is advancing to. A failed run never overwrites `git.commit` with `target_commit`
+    completed SHA (or None on a first index) while `git.commit_target` advertises the candidate
+    SHA the run is advancing to. A failed run never overwrites `git.commit` with `commit_target`
     (INV-006) -- only `write_incremental_ready` does that, after delete+index+refresh succeed."""
     prior = prior or {}
     pg = prior.get("git", {})
@@ -631,7 +631,7 @@ def write_incremental_indexing(
         host, org, repo, ref,
         status="indexing",
         commit=completed_commit,
-        target_commit=target_commit,
+        commit_target=commit_target,
         commit_date_iso=pg.get("commit_date"),
         files_count=prior.get("files_count", 0),
         lines_count=prior.get("lines_count", 0),
@@ -659,14 +659,14 @@ def write_incremental_ready(
     index_level: str = "repo",
     index_suffix: str | None = None,
 ) -> None:
-    """Publish `status: complete` at the NEW completed commit, clearing `target_commit` and any
+    """Publish `status: complete` at the NEW completed commit, clearing `commit_target` and any
     prior failure fields. This is the pointer-advancing publication boundary (INV-006): callers
     must delete+index+refresh the content indices FIRST, then call this."""
     doc = _build_incremental_join_doc(
         host, org, repo, ref,
         status="complete",
         commit=commit,
-        target_commit=None,
+        commit_target=None,
         commit_date_iso=commit_date_iso,
         files_count=files_count,
         lines_count=lines_count,
@@ -687,7 +687,7 @@ def write_incremental_failed(
     repo: str,
     ref: str,
     completed_commit: str | None,
-    target_commit: str | None,
+    commit_target: str | None,
     error: str,
     prior: dict | None = None,
     refresh: bool = False,
@@ -703,7 +703,7 @@ def write_incremental_failed(
         host, org, repo, ref,
         status="indexing",
         commit=completed_commit,
-        target_commit=target_commit,
+        commit_target=commit_target,
         commit_date_iso=pg.get("commit_date"),
         files_count=prior.get("files_count", 0),
         lines_count=prior.get("lines_count", 0),
