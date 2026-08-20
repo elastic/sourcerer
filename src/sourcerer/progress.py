@@ -67,10 +67,10 @@ class Unit:
     # unit's content docs are written to; defaults reproduce the historical repo-level name.
     index_level: str = "repo"
     index_suffix: str | None = None
-    # sources[i].update carried from the selector that emitted this unit: "snapshot" (default,
-    # commit-addressed) or "incremental" (ref-addressed, branch-only). Routes the unit to the
-    # incremental delta-index path instead of the snapshot pre-clone/skip/retention flow.
-    update: str = "snapshot"
+    # sources[i].index.strategy carried from the selector that emitted this unit: "snapshot"
+    # (default, commit-addressed) or "incremental" (ref-addressed, branch-only). Routes the
+    # unit to the incremental delta-index path instead of the snapshot pre-clone/skip/retention flow.
+    index_strategy: str = "snapshot"
 
     @property
     def label(self) -> str:

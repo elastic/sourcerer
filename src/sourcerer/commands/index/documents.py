@@ -268,7 +268,7 @@ def _init_worker(
     _WORKER_CTX.update(
         host=host, org=org, repo=repo, commit_sha=commit_sha, repo_dir=pathlib.Path(repo_dir),
         symlink_paths=symlink_paths, index_level=index_level, index_suffix=index_suffix,
-        mode="snapshot",
+        strategy="snapshot",
     )
 
 
@@ -277,12 +277,12 @@ def _init_worker_incremental(
     index_level: str = "repo", index_suffix: str | None = None,
 ) -> None:
     """Same as `_init_worker`, but for the incremental (ref-addressed) path: `ref` replaces
-    `commit_sha` and `mode` routes `_build_one_file_actions` to the incremental doc builders."""
+    `commit_sha` and `strategy` routes `_build_one_file_actions` to the incremental doc builders."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _WORKER_CTX.update(
         host=host, org=org, repo=repo, ref=ref, repo_dir=pathlib.Path(repo_dir),
         symlink_paths=symlink_paths, index_level=index_level, index_suffix=index_suffix,
-        mode="incremental",
+        strategy="incremental",
     )
 
 
@@ -303,7 +303,7 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
     text. Runs in a worker process (see _init_worker for the shared context). Mirrors the old
     inline generator -- a binary file or one that can't be read yields only its file doc."""
     ctx = _WORKER_CTX
-    incremental = ctx.get("mode", "snapshot") == "incremental"
+    incremental = ctx.get("strategy", "snapshot") == "incremental"
     host, org, repo = ctx["host"], ctx["org"], ctx["repo"]
     commit_sha = ctx.get("ref") if incremental else ctx["commit_sha"]
     level, suffix = ctx.get("index_level", "repo"), ctx.get("index_suffix")

@@ -282,14 +282,13 @@ class Selector:
     retain: Retain | None
     levels: tuple[str, ...] = ()           # numeric levels shared by the versioned match patterns
     schedule: Schedule | None = None       # per-source schedule override (sources[i].schedule)
-    # sources[i].index routing (see specs/sourcerer-yml.md): which physical files/lines index this
-    # source's content docs land in. Per-source, so two sources sharing a (host, org, repo) may
-    # route to different indices (e.g. kibana release tags -> ~repo, deploy tags -> ~repo^deploy).
+    # sources[i].index routing + strategy (see specs/sourcerer-yml.md): which physical
+    # files/lines index this source's content docs land in, and whether indexing is
+    # commit-addressed snapshots or ref-addressed incremental deltas. Per-source, so two
+    # sources sharing a (host, org, repo) may route differently.
     index_level: str = "repo"              # "host" | "org" | "repo" | "commit"
     index_suffix: str | None = None        # appended as ^{suffix}; None == no suffix
-    # sources[i].update: "snapshot" (default, commit-addressed content) or "incremental"
-    # (ref-addressed content, branch-only -- see specs/incremental-indexing.md).
-    update: str = "snapshot"
+    index_strategy: str = "snapshot"       # "snapshot" (default) or "incremental" (branch-only)
 
     def matches(self, ref_type: str, ref: str) -> Version | None:
         if self.ref_type != ref_type:
@@ -411,22 +410,25 @@ def _parse_commit_match(raw: dict, ctx: str) -> list[str]:
 
 _GIT_KEYS = {"host", "org", "repo", "ref_type"}
 _INDEX_LEVELS = ("host", "org", "repo", "commit")
-_UPDATE_MODES = ("snapshot", "incremental")
+_INDEX_STRATEGIES = ("snapshot", "incremental")
 # A suffix goes into a physical index name after a `^`, so it must be safe as an index-name
 # segment: the same characters forbidden in a host id, plus the `^` we use as the suffix delimiter.
 _FORBIDDEN_SUFFIX_CHARS = _FORBIDDEN_HOST_CHARS | {"^"}
 
 
-def _parse_index(raw: dict, ctx: str) -> tuple[str, str | None]:
-    """Validate a source's `index:` block and return (level, suffix). `level` defaults to "repo";
-    `suffix` defaults to None. An empty-string suffix is treated as omitted (per the spec). The
-    suffix charset mirrors the host-id rules (lowercase, no whitespace, no index-name-forbidden
-    chars) plus a ban on the `^` delimiter itself."""
+def _parse_index(raw: dict, ctx: str) -> tuple[str, str | None, str]:
+    """Validate a source's `index:` block and return (level, suffix, strategy).
+
+    `level` defaults to "repo"; `suffix` defaults to None; `strategy` defaults to "snapshot".
+    An empty-string suffix is treated as omitted (per the spec). The suffix charset mirrors the
+    host-id rules (lowercase, no whitespace, no index-name-forbidden chars) plus a ban on the `^`
+    delimiter itself. Strategy "incremental" is rejected with index.level "commit" here (within-
+    block check) because incremental content is ref-addressed and cannot form a commit-keyed name."""
     if not isinstance(raw, dict):
-        raise ValueError(f"{ctx} index: must be a mapping with 'level' and/or 'suffix'")
-    unknown = set(raw) - {"level", "suffix"}
+        raise ValueError(f"{ctx} index: must be a mapping with 'level', 'suffix', and/or 'strategy'")
+    unknown = set(raw) - {"level", "suffix", "strategy"}
     if unknown:
-        raise ValueError(f"{ctx} index: unknown keys {sorted(unknown)} (use 'level', 'suffix')")
+        raise ValueError(f"{ctx} index: unknown keys {sorted(unknown)} (use 'level', 'suffix', 'strategy')")
 
     level = "repo"
     if raw.get("level") is not None:
@@ -448,7 +450,19 @@ def _parse_index(raw: dict, ctx: str) -> tuple[str, str | None]:
             if any(c.isspace() for c in s):
                 raise ValueError(f"{ctx} index.suffix: {s!r} must not contain whitespace")
             suffix = s
-    return level, suffix
+
+    strategy = "snapshot"
+    if raw.get("strategy") is not None:
+        strategy = raw["strategy"]
+        if strategy not in _INDEX_STRATEGIES:
+            raise ValueError(f"{ctx} index.strategy: must be one of {list(_INDEX_STRATEGIES)} "
+                             f"(got {strategy!r})")
+    if strategy == "incremental" and level == "commit":
+        # Incremental content is ref-addressed (no git.commit on content docs), so a
+        # commit-level index name -- which requires a commit sha -- can never be built for it.
+        raise ValueError(f"{ctx} index.strategy: 'incremental' cannot be combined with "
+                         f"'index.level: commit'")
+    return level, suffix, strategy
 
 
 def _parse_git_scope(raw: dict, ctx: str) -> tuple[str, str, str, str]:
@@ -479,25 +493,28 @@ def _parse_git_scope(raw: dict, ctx: str) -> tuple[str, str, str, str]:
 def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
     """Parse one `sources[i]` entry into (host, org, repo, Selector). The ref_type comes from the
     `git` block; `match`/`since`/`retain` are top-level siblings."""
-    unknown = set(raw) - {"git", "match", "since", "retain", "schedule", "index", "update"}
+    unknown = set(raw) - {"git", "match", "since", "retain", "schedule", "index"}
     if unknown:
         raise ValueError(f"{ctx}: unknown keys {sorted(unknown)}")
     host, org, repo, ref_type = _parse_git_scope(raw, ctx)
 
-    update = raw.get("update", "snapshot")
-    if update not in _UPDATE_MODES:
-        raise ValueError(f"{ctx} update: must be one of {list(_UPDATE_MODES)} (got {update!r})")
-    if update == "incremental":
+    # Parse the index: block early so that index_strategy is available for the incremental
+    # constraints below (strategy and level are both validated inside _parse_index).
+    index_level, index_suffix, index_strategy = "repo", None, "snapshot"
+    if raw.get("index") is not None:
+        index_level, index_suffix, index_strategy = _parse_index(raw["index"], ctx)
+
+    if index_strategy == "incremental":
         if ref_type != "branch":
-            raise ValueError(f"{ctx} update: 'incremental' is only valid for git.ref_type: branch "
-                             f"(got ref_type {ref_type!r})")
+            raise ValueError(f"{ctx} index.strategy: 'incremental' is only valid for "
+                             f"git.ref_type: branch (got ref_type {ref_type!r})")
         # An incremental branch maintains a single mutable ref-addressed view with no per-commit
         # history for retention to trim and no inclusion floor to apply -- both since and retain
         # are meaningless here (see specs/incremental-indexing.md).
         if raw.get("since") is not None:
-            raise ValueError(f"{ctx}: 'update: incremental' cannot be combined with 'since'")
+            raise ValueError(f"{ctx}: 'index.strategy: incremental' cannot be combined with 'since'")
         if raw.get("retain") is not None:
-            raise ValueError(f"{ctx}: 'update: incremental' cannot be combined with 'retain'")
+            raise ValueError(f"{ctx}: 'index.strategy: incremental' cannot be combined with 'retain'")
 
     if ref_type == "commit":
         # A pinned commit has no enumerable name to pattern-match against (see selection.py),
@@ -544,17 +561,10 @@ def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
         except ValueError as e:
             raise ValueError(f"{ctx} schedule: {e}") from e
 
-    index_level, index_suffix = "repo", None
-    if raw.get("index") is not None:
-        index_level, index_suffix = _parse_index(raw["index"], ctx)
-    if update == "incremental" and index_level == "commit":
-        # Incremental content is ref-addressed (no git.commit on content docs), so a
-        # commit-level index name -- which requires a commit sha -- can never be built for it.
-        raise ValueError(f"{ctx}: 'update: incremental' cannot be combined with 'index.level: commit'")
-
     selector = Selector(ref_type=ref_type, raw_patterns=patterns, compiled=compiled,
                         since=since, retain=retain, levels=levels, schedule=schedule,
-                        index_level=index_level, index_suffix=index_suffix, update=update)
+                        index_level=index_level, index_suffix=index_suffix,
+                        index_strategy=index_strategy)
     return host, org, repo, selector
 
 

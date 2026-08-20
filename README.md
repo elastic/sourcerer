@@ -85,31 +85,30 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
 
 The [`sourcerer.yml` specification](specs/sourcerer-yml.md) has the full reference of fields supported by the configuration file.
 
-### Snapshot vs. incremental indexing (`update: <mode>`)
+### Snapshot vs. incremental indexing (`index.strategy`)
 
-Each source can set `update: snapshot` (the default) or `update: incremental` (branch-only).
-Every Agent Builder content tool takes the same `git_commit_ish` param either way (a commit SHA or
-a branch/tag name, `*`/`?` wildcards supported) and resolves a commit the same way regardless of
-mode; `git.ref_key` is an internal storage/join detail, never something the agent constructs or
-passes.
+Each source can set `index.strategy: snapshot` (the default) or `index.strategy: incremental`
+(branch-only). Every Agent Builder content tool takes the same `git_commit_ish` param either way
+(a commit SHA or a branch/tag name, `*`/`?` wildcards supported) and resolves a commit the same
+way regardless of strategy.
 
-- **`snapshot`** (default): content is commit-addressed, exactly as before. `git.ref_key` is the
-  commit SHA itself, so every ref (branch, tag, or pinned commit) that resolves to the same
-  commit collapses to one snapshot. A moving branch's HEAD advance indexes a brand-new snapshot
-  under the new commit.
-- **`incremental`** (branch-only): content is ref-addressed instead. `git.ref_key` is
-  `{host}~{org}~{repo}~{ref}` and content carries no `git.commit` of its own -- the branch's
-  current commit lives only on its refs join doc, resolved via the join above. A HEAD advance
-  re-indexes only the files `git diff --name-status` reports changed (add/modify/delete/rename),
-  not the whole tree, so staying current on a fast-moving branch (e.g. GitOps/IaC repos that
-  deploy off `main`) is cheap. `since` and `retain` don't apply to an incremental source (there is
-  no per-commit history to filter or retain) and are rejected if given.
+- **`snapshot`** (default): content is commit-addressed. Every ref (branch, tag, or pinned commit)
+  that resolves to the same commit collapses to one snapshot. A moving branch's HEAD advance indexes
+  a brand-new snapshot under the new commit.
+- **`incremental`** (branch-only): content is ref-addressed instead. Content docs carry `git.ref`
+  but no `git.commit` of their own — the branch's current commit lives only on its refs join doc,
+  resolved at query time via a LOOKUP JOIN. A HEAD advance re-indexes only the files
+  `git diff --name-status` reports changed (add/modify/delete/rename), not the whole tree, so
+  staying current on a fast-moving branch (e.g. GitOps/IaC repos that deploy off `main`) is cheap.
+  `since` and `retain` don't apply to an incremental source (there is no per-commit history to
+  filter or retain) and are rejected if given.
 
 ```yaml
 sources:
 - git: { host: "github", org: "elastic", repo: "serverless-gitops", ref_type: "branch" }
   match: "main"
-  update: incremental
+  index:
+    strategy: incremental
 ```
 
 Upgrading from a pre-`ref_key` install is automatic and invisible: every `index` run backfills

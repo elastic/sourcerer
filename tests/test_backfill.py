@@ -59,7 +59,7 @@ class TestApplyRefsIndexMapping:
 
 class TestStaleSnapshotMarkersForRef:
     def test_returns_complete_non_incremental_markers(self):
-        """Returns complete markers that are NOT update_mode=incremental (i.e. snapshot markers)."""
+        """Returns complete markers that are index_strategy=snapshot (i.e. snapshot markers)."""
         es = MagicMock()
         es.search.return_value = {"hits": {"hits": [
             {"_id": "abc123", "_source": {"git": {"commit": "deadbeef"}}},
@@ -84,6 +84,7 @@ class TestStaleSnapshotMarkersForRef:
         assert {"term": {"git.repo": "widgets"}} in filt
         assert {"term": {"git.ref": "main"}} in filt
         assert {"term": {"status": "complete"}} in filt
+        assert {"term": {"index_strategy": "snapshot"}} in filt
 
 
 class TestMarkSnapshotMarkersStale:

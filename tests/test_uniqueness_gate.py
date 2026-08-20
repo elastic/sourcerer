@@ -1,7 +1,7 @@
 """Tests for the post-index join-uniqueness gate: sourcerer.queries.check_join_uniqueness
 (INV-011) and its command.py wiring in _run_uniqueness_gate. Every ES call is mocked.
 
-The gate is split by content shape (no update_mode on content docs since d77726a):
+The gate is split by content shape (no index_strategy on content docs):
   - Snapshot (git.commit IS NOT NULL): each commit must have ≥1 complete refs doc.
   - Incremental (git.ref IS NOT NULL): each ref must have EXACTLY ONE incremental join doc.
 """

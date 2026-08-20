@@ -93,7 +93,7 @@
         "index_suffix": {
           "type": "keyword"
         },
-        "update_mode": {
+        "index_strategy": {
           "type": "keyword"
         }
       }

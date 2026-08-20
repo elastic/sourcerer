@@ -427,7 +427,7 @@ def write_indexing_marker(
             "commit": commit_sha,
             "commit_date": commit_date_iso,
         },
-        "update_mode": "snapshot",
+        "index_strategy": "snapshot",
         "status": "indexing",
         "indexing_started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "files_count": 0,
@@ -475,7 +475,7 @@ def write_ref_marker(
             "commit": commit_sha,
             "commit_date": commit_date_iso,
         },
-        "update_mode": "snapshot",
+        "index_strategy": "snapshot",
         "status": "complete",
         "files_count": files_count,
         "lines_count": lines_count,
@@ -595,7 +595,7 @@ def _build_incremental_join_doc(
             "target_commit": target_commit,
             "commit_date": commit_date_iso,
         },
-        "update_mode": "incremental",
+        "index_strategy": "incremental",
         "status": status,
         "files_count": files_count,
         "lines_count": lines_count,
@@ -866,19 +866,16 @@ def apply_content_index_mapping(es: Elasticsearch, files_mapping: dict, lines_ma
 def stale_snapshot_markers_for_ref(
     es: Elasticsearch, host: str, org: str, repo: str, ref: str,
 ) -> list[dict]:
-    """Return any complete snapshot ref-name markers (update_mode: "snapshot", status: "complete")
+    """Return any complete snapshot ref-name markers (index_strategy: "snapshot", status: "complete")
     for (host, org, repo, ref). Used by the incremental index path to detect and mark stale snapshot
-    markers left behind by a mode switch. The must_not form is kept as a fallback for legacy markers
-    written before update_mode was added to snapshot markers."""
+    markers left behind by an index strategy switch from snapshot to incremental."""
     query = {"bool": {"filter": [
         {"term": {"git.host": host}},
         {"term": {"git.org": org}},
         {"term": {"git.repo": repo}},
         {"term": {"git.ref": ref}},
         {"term": {"status": "complete"}},
-        # Exclude incremental join docs; matches update_mode="snapshot" and any legacy snapshot
-        # markers that predate the update_mode field.
-        {"bool": {"must_not": {"term": {"update_mode": "incremental"}}}},
+        {"term": {"index_strategy": "snapshot"}},
     ]}}
     try:
         resp = es.search(index=REFS_ALIAS, size=100, query=query, source_includes=["git.commit"])

@@ -50,6 +50,7 @@ performs its `setup`, `index`, and `prune` commands.
 |`sources[i].index`                     |Object               |No      ||
 |`sources[i].index.level`               |String               |No      ||
 |`sources[i].index.suffix`              |String               |No      ||
+|`sources[i].index.strategy`            |String               |No      ||
 
 Notes:
 - Fields can be expressed either in nested format or flat dotted format.
@@ -706,6 +707,18 @@ For instance:
   - Cannot contain these characters: `~`, `^`, `\`, `/`, `*`, `?`, `"`, `<`, `>`, `|`, `:`
   - Cannot contain uppercase characters or whitespace characters
   - An empty string (`""`) is treated as omitted (`null`)
+
+### `sources[i].index.strategy`
+
+Defines whether to index the content of each matching ref as an immutable commit
+snapshot (`"snapshot"`) or maintain a single ref-addressed view that is updated
+incrementally as the HEAD moves (`"incremental"`).
+
+- Required: No
+- Type: String
+- Default: `"snapshot"`
+- Validation:
+  - Must be one of: `"snapshot"`, `"incremental"`
 
 ## Example
 

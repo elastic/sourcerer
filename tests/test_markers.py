@@ -414,7 +414,7 @@ class TestWriteRefMarker:
         doc = es.index.call_args.kwargs["document"]
         assert doc["git"]["commit"] == OLD
         assert "ref_key" not in doc["git"]
-        assert doc["update_mode"] == "snapshot"
+        assert doc["index_strategy"] == "snapshot"
 
     def test_marker_id_is_hashed_not_the_commit(self):
         # _id is build_ref_id (BLAKE2b hash) -- one per (ref, commit), NOT the bare commit SHA.
@@ -468,7 +468,7 @@ class TestWriteIncrementalIndexing:
         assert doc["status"] == "indexing"
         assert doc["git"]["commit"] == OLD  # completed pointer unchanged (INV-006)
         assert doc["git"]["target_commit"] == NEW
-        assert doc["update_mode"] == "incremental"
+        assert doc["index_strategy"] == "incremental"
         assert es.index.call_args.kwargs["index"] == REFS_INDEX
 
     def test_incremental_marker_first_index_has_no_completed_commit(self):

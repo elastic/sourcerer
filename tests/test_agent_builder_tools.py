@@ -62,7 +62,7 @@ def test_content_tools_use_universal_ref_join_query():
     for tid in _CONTENT_TOOL_IDS:
         query = tools[tid]["configuration"]["query"]
         params = tools[tid]["configuration"]["params"]
-        assert "update_mode" not in query, f"{tid} query has an update_mode conditional"
+        assert "index_strategy" not in query, f"{tid} query has an index_strategy conditional"
         # git.ref_key must not be used as a field or join key (comments may reference it by name)
         assert "git.ref_key" not in query, f"{tid} still uses git.ref_key as a field"
         assert "ON git.ref_key" not in query, f"{tid} still joins on git.ref_key"
