@@ -88,13 +88,16 @@
           "type": "date"
         },
         "index_level": {
-          "type": "keyword"
+          "type": "keyword",
+          "normalizer": "lowercase"
         },
         "index_suffix": {
-          "type": "keyword"
+          "type": "keyword",
+          "normalizer": "lowercase"
         },
         "index_strategy": {
-          "type": "keyword"
+          "type": "keyword",
+          "normalizer": "lowercase"
         }
       }
     }

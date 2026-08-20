@@ -24,9 +24,11 @@
             "git.org",
             "git.repo",
             "git.commit",
+            "git.ref",
             "file.path"
           ],
           "order": [
+            "asc",
             "asc",
             "asc",
             "asc",

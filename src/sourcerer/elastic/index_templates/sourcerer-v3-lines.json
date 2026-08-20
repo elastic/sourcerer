@@ -24,10 +24,12 @@
             "git.org",
             "git.repo",
             "git.commit",
+            "git.ref",
             "file.path",
             "line.number"
           ],
           "order": [
+            "asc",
             "asc",
             "asc",
             "asc",
