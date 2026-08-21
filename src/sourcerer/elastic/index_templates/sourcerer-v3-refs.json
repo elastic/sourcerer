@@ -99,7 +99,7 @@
           "type": "keyword",
           "normalizer": "lowercase"
         },
-        "index_strategy": {
+        "mode": {
           "type": "keyword",
           "normalizer": "lowercase"
         }

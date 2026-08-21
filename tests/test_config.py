@@ -53,7 +53,7 @@ def _git(host="github", org="acme", repo="widgets", ref_type="branch"):
 
 
 def _source(host="github", org="acme", repo="widgets", ref_type="branch",
-            match="main", since=None, retain=None, omit_match=False, strategy=None, index=None):
+            match="main", since=None, retain=None, omit_match=False, mode=None, index=None):
     src = {"git": _git(host, org, repo, ref_type)}
     if not omit_match:
         src["match"] = match
@@ -61,12 +61,10 @@ def _source(host="github", org="acme", repo="widgets", ref_type="branch",
         src["since"] = since
     if retain is not None:
         src["retain"] = retain
-    # strategy is a convenience shim: merges {"strategy": ...} into the index: block.
-    if strategy is not None or index is not None:
-        merged = dict(index or {})
-        if strategy is not None:
-            merged["strategy"] = strategy
-        src["index"] = merged
+    if mode is not None:
+        src["mode"] = mode
+    if index is not None:
+        src["index"] = index
     return src
 
 
@@ -195,38 +193,38 @@ class TestParseSourceMatch:
         assert cfg.repos[0].selectors[0].levels == ("major", "minor", "patch")
 
 
-class TestParseIndexStrategy:
+class TestParseMode:
     def test_default_is_snapshot(self):
         cfg = _cfg([_source()])
-        assert cfg.repos[0].selectors[0].index_strategy == "snapshot"
+        assert cfg.repos[0].selectors[0].mode == "snapshot"
 
     def test_incremental_accepted_on_branch(self):
-        cfg = _cfg([_source(ref_type="branch", strategy="incremental")])
-        assert cfg.repos[0].selectors[0].index_strategy == "incremental"
+        cfg = _cfg([_source(ref_type="branch", mode="incremental")])
+        assert cfg.repos[0].selectors[0].mode == "incremental"
 
     def test_incremental_rejected_on_tag(self):
         with pytest.raises(ValueError, match="only valid for git.ref_type: branch"):
-            _cfg([_source(ref_type="tag", match="v1.0.0", strategy="incremental")])
+            _cfg([_source(ref_type="tag", match="v1.0.0", mode="incremental")])
 
     def test_incremental_rejected_on_commit(self):
         with pytest.raises(ValueError, match="only valid for git.ref_type: branch"):
-            _cfg([_source(ref_type="commit", match="cfefb3b", strategy="incremental")])
+            _cfg([_source(ref_type="commit", match="cfefb3b", mode="incremental")])
 
-    def test_invalid_strategy_raises(self):
+    def test_invalid_mode_raises(self):
         with pytest.raises(ValueError, match="must be one of"):
-            _cfg([_source(strategy="bogus")])
+            _cfg([_source(mode="bogus")])
 
     def test_incremental_with_since_raises(self):
         with pytest.raises(ValueError, match="cannot be combined with 'since'"):
-            _cfg([_source(ref_type="branch", strategy="incremental", since={"age": "1y"})])
+            _cfg([_source(ref_type="branch", mode="incremental", since={"age": "1y"})])
 
     def test_incremental_with_retain_raises(self):
         with pytest.raises(ValueError, match="cannot be combined with 'retain'"):
-            _cfg([_source(ref_type="branch", strategy="incremental", retain={"count": 5})])
+            _cfg([_source(ref_type="branch", mode="incremental", retain={"count": 5})])
 
     def test_incremental_with_commit_level_index_raises(self):
         with pytest.raises(ValueError, match="cannot be combined with 'index.level: commit'"):
-            _cfg([_source(ref_type="branch", strategy="incremental", index={"level": "commit"})])
+            _cfg([_source(ref_type="branch", mode="incremental", index={"level": "commit"})])
 
     def test_top_level_update_key_raises(self):
         with pytest.raises(ValueError, match="unknown keys"):
@@ -234,8 +232,8 @@ class TestParseIndexStrategy:
                    "match": "main", "update": "incremental"}])
 
     def test_incremental_with_repo_level_index_is_fine(self):
-        cfg = _cfg([_source(ref_type="branch", strategy="incremental", index={"level": "repo"})])
-        assert cfg.repos[0].selectors[0].index_strategy == "incremental"
+        cfg = _cfg([_source(ref_type="branch", mode="incremental", index={"level": "repo"})])
+        assert cfg.repos[0].selectors[0].mode == "incremental"
 
 
 class TestParseCommitSource:

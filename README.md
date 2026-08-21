@@ -85,12 +85,12 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
 
 The [`sourcerer.yml` specification](specs/sourcerer-yml.md) has the full reference of fields supported by the configuration file.
 
-### Snapshot vs. incremental indexing (`index.strategy`)
+### Snapshot vs. incremental indexing (`mode`)
 
-Each source can set `index.strategy: snapshot` (the default) or `index.strategy: incremental`
-(branch-only). Every Agent Builder content tool takes the same `git_commit_ish` param either way
-(a commit SHA or a branch/tag name, `*`/`?` wildcards supported) and resolves a commit the same
-way regardless of strategy.
+Each source can set `mode: snapshot` (the default) or `mode: incremental` (branch-only). Every
+Agent Builder content tool takes the same `git_commit_ish` param either way (a commit SHA or a
+branch/tag name, `*`/`?` wildcards supported) and resolves a commit the same way regardless of
+mode.
 
 - **`snapshot`** (default): content is commit-addressed. Every ref (branch, tag, or pinned commit)
   that resolves to the same commit collapses to one snapshot. A moving branch's HEAD advance indexes
@@ -107,8 +107,7 @@ way regardless of strategy.
 sources:
 - git: { host: "github", org: "elastic", repo: "serverless-gitops", ref_type: "branch" }
   match: "main"
-  index:
-    strategy: incremental
+  mode: incremental
 ```
 
 Upgrading from a pre-`ref_key` install is automatic and invisible: every `index` run backfills

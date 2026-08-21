@@ -31,6 +31,7 @@ performs its `setup`, `index`, and `prune` commands.
 |`sources[i].git.repo`                  |String               |Yes     ||
 |`sources[i].git.ref_type`              |String               |Yes     ||
 |`sources[i].match`                     |String, Array[String]|No      ||
+|`sources[i].mode`                      |String               |No      ||
 |`sources[i].since`                     |Object               |No      ||
 |`sources[i].since.age`                 |String               |No      ||
 |`sources[i].since.date`                |String               |No      ||
@@ -50,7 +51,6 @@ performs its `setup`, `index`, and `prune` commands.
 |`sources[i].index`                     |Object               |No      ||
 |`sources[i].index.level`               |String               |No      ||
 |`sources[i].index.suffix`              |String               |No      ||
-|`sources[i].index.strategy`            |String               |No      ||
 
 Notes:
 - Fields can be expressed either in nested format or flat dotted format.
@@ -413,6 +413,22 @@ for indexing if they don't also qualify for pruning.
 - Type: String or Array[String]
 - Default: `null` (omitted)
 
+### `sources[i].mode`
+
+Defines whether to index the content of each matching ref as an immutable commit
+snapshot (`"snapshot"`) or maintain a single ref-addressed view that is updated
+incrementally as the HEAD moves (`"incremental"`). Controls whether `since` and
+`retain` apply (both are rejected when `mode` is `"incremental"`).
+
+- Required: No
+- Type: String
+- Default: `"snapshot"`
+- Validation:
+  - Must be one of: `"snapshot"`, `"incremental"`
+  - `"incremental"` is only valid when `git.ref_type` is `"branch"`
+  - `"incremental"` cannot be combined with `since` or `retain`
+  - `"incremental"` cannot be combined with `index.level: commit`
+
 ### `sources[i].since`
 
 Sets the earliest point in commit history to index. Exactly one child field can
@@ -707,18 +723,6 @@ For instance:
   - Cannot contain these characters: `~`, `^`, `\`, `/`, `*`, `?`, `"`, `<`, `>`, `|`, `:`
   - Cannot contain uppercase characters or whitespace characters
   - An empty string (`""`) is treated as omitted (`null`)
-
-### `sources[i].index.strategy`
-
-Defines whether to index the content of each matching ref as an immutable commit
-snapshot (`"snapshot"`) or maintain a single ref-addressed view that is updated
-incrementally as the HEAD moves (`"incremental"`).
-
-- Required: No
-- Type: String
-- Default: `"snapshot"`
-- Validation:
-  - Must be one of: `"snapshot"`, `"incremental"`
 
 ## Example
 

@@ -33,13 +33,12 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
     # Phase 2's pre-clone skip check.
     fetched: dict[str, dict[str, str] | None] = {}
     seen: set[tuple[str, str]] = set()
-    # Maps (ref_type, name) -> index strategy for the winning selector, so we can detect when a
-    # second selector of a DIFFERENT strategy also claims the same ref. Mixed-strategy refs are
-    # unsafe: the incremental LOOKUP JOIN ON git.ref requires exactly one refs doc per
-    # (host,org,repo,ref), but a snapshot marker and an incremental join doc would both be present
-    # (fan-out).
-    seen_strategy: dict[tuple[str, str], str] = {}
-    strategy_conflicts: list[tuple[str, str, str, str]] = []  # (ref_type, name, strategy_a, strategy_b)
+    # Maps (ref_type, name) -> mode for the winning selector, so we can detect when a second
+    # selector of a DIFFERENT mode also claims the same ref. Mixed-mode refs are unsafe: the
+    # incremental LOOKUP JOIN ON git.ref requires exactly one refs doc per (host,org,repo,ref),
+    # but a snapshot marker and an incremental join doc would both be present (fan-out).
+    seen_mode: dict[tuple[str, str], str] = {}
+    mode_conflicts: list[tuple[str, str, str, str]] = []  # (ref_type, name, mode_a, mode_b)
     units: list[Unit] = []
     for sel in cfg.selectors:
         rt = sel.ref_type
@@ -51,11 +50,11 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
                 if (rt, prefix) in seen:
                     continue
                 seen.add((rt, prefix))
-                seen_strategy[(rt, prefix)] = sel.index_strategy
+                seen_mode[(rt, prefix)] = sel.mode
                 units.append(Unit(
                     host=cfg.host, org=cfg.org, repo=cfg.repo, ref=prefix, kind=rt,
                     index_level=sel.index_level, index_suffix=sel.index_suffix,
-                    index_strategy=sel.index_strategy,
+                    mode=sel.mode,
                 ))
             continue
         if rt not in fetched:
@@ -72,28 +71,28 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
                 continue  # below the since version floor
             key = (rt, name)
             if key in seen:
-                # Already claimed by an earlier selector: check for a strategy conflict.
-                prior_strategy = seen_strategy[key]
-                if prior_strategy != sel.index_strategy:
-                    strategy_conflicts.append((rt, name, prior_strategy, sel.index_strategy))
+                # Already claimed by an earlier selector: check for a mode conflict.
+                prior_mode = seen_mode[key]
+                if prior_mode != sel.mode:
+                    mode_conflicts.append((rt, name, prior_mode, sel.mode))
                 continue
             seen.add(key)
-            seen_strategy[key] = sel.index_strategy
+            seen_mode[key] = sel.mode
             units.append(Unit(
                 host=cfg.host, org=cfg.org, repo=cfg.repo, ref=name, kind=rt,
                 remote_sha=ref_map[name],
                 index_level=sel.index_level, index_suffix=sel.index_suffix,
-                index_strategy=sel.index_strategy,
+                mode=sel.mode,
             ))
 
-    if strategy_conflicts:
+    if mode_conflicts:
         conflicts_str = ", ".join(
-            f"{rt}/{name} ({strategy_a} vs {strategy_b})"
-            for rt, name, strategy_a, strategy_b in strategy_conflicts
+            f"{rt}/{name} ({mode_a} vs {mode_b})"
+            for rt, name, mode_a, mode_b in mode_conflicts
         )
         click.echo(
             f"Warning: {cfg.org}/{cfg.repo}: selectors claim the same ref(s) with different "
-            f"index strategies -- skipping all units for this repo to avoid fan-out: {conflicts_str}",
+            f"modes -- skipping all units for this repo to avoid fan-out: {conflicts_str}",
             err=True,
         )
         return []
