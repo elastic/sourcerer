@@ -68,7 +68,7 @@ class Unit:
     index_level: str = "repo"
     index_suffix: str | None = None
     # sources[i].mode carried from the selector that emitted this unit: "snapshot" (default,
-    # commit-addressed) or "head" (ref-addressed, branch-only). Routes the unit to the
+    # commit-addressed) or "delta" (ref-addressed, branch-only). Routes the unit to the
     # incremental delta-index path instead of the snapshot pre-clone/skip/retention flow.
     mode: str = "snapshot"
 

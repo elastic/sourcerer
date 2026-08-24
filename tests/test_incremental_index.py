@@ -52,7 +52,7 @@ class TestIncrementalIndexFirstRun:
         try:
             es = MagicMock()
             unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
-                       mode="head")
+                       mode="delta")
             index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
                                             reporter=ProgressReporter(), unit=unit)
             mocks["delete_incremental_branch"].assert_called_once()
@@ -75,7 +75,7 @@ class TestIncrementalIndexDeltaRun:
         try:
             es = MagicMock()
             unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
-                       mode="head")
+                       mode="delta")
             index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
                                             reporter=ProgressReporter(), unit=unit)
             mocks["delete_incremental_branch"].assert_not_called()
@@ -95,7 +95,7 @@ class TestIncrementalIndexDeltaRun:
         try:
             es = MagicMock()
             unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
-                       mode="head")
+                       mode="delta")
             index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
                                             reporter=ProgressReporter(), unit=unit)
             mocks["delete_incremental_branch"].assert_called_once()
@@ -110,7 +110,7 @@ class TestIncrementalIndexDeltaRun:
         try:
             es = MagicMock()
             unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
-                       mode="head")
+                       mode="delta")
             index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
                                             reporter=ProgressReporter(), unit=unit)
             mocks["index_incremental_paths"].assert_not_called()
@@ -130,7 +130,7 @@ class TestIncrementalIndexFailure:
         try:
             es = MagicMock()
             unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
-                       mode="head")
+                       mode="delta")
             try:
                 index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
                                                 reporter=ProgressReporter(), unit=unit)
@@ -166,7 +166,7 @@ class TestIncrementalIndexRoutingMigration:
         try:
             es = MagicMock()
             unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
-                       mode="head", index_level="repo", index_suffix="deploy")
+                       mode="delta", index_level="repo", index_suffix="deploy")
             index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
                                             reporter=ProgressReporter(), unit=unit)
             # Full rebuild path: delete_incremental_branch called at new routing, full tree indexed.
@@ -193,7 +193,7 @@ class TestIncrementalIndexRoutingMigration:
         try:
             es = MagicMock()
             unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
-                       mode="head", index_level="org", index_suffix=None)
+                       mode="delta", index_level="org", index_suffix=None)
             index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
                                             reporter=ProgressReporter(), unit=unit)
             assert mocks["delete_incremental_branch"].call_count == 2
@@ -213,7 +213,7 @@ class TestIncrementalIndexRoutingMigration:
         try:
             es = MagicMock()
             unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
-                       mode="head", index_level="repo", index_suffix="v2")
+                       mode="delta", index_level="repo", index_suffix="v2")
             index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
                                             reporter=ProgressReporter(), unit=unit)
             # Must NOT skip even though old_sha == new_sha.
@@ -232,7 +232,7 @@ class TestIncrementalIndexRoutingMigration:
         try:
             es = MagicMock()
             unit = Unit(host="github", org="acme", repo="widgets", ref="main", kind="branch",
-                       mode="head", index_level="repo", index_suffix=None)
+                       mode="delta", index_level="repo", index_suffix=None)
             index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
                                             reporter=ProgressReporter(), unit=unit)
             # Delta run: no full rebuild (delete_incremental_branch not called), no extra delete.

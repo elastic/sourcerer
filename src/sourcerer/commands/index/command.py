@@ -278,7 +278,7 @@ def index_incremental_branch_in_dir(
     if reporter is None:
         reporter = ProgressReporter()
     if unit is None:
-        unit = Unit(host=host, org=org, repo=repo, ref=branch, kind="branch", mode="head")
+        unit = Unit(host=host, org=org, repo=repo, ref=branch, kind="branch", mode="delta")
 
     reporter.set_stage(unit, "checkout")
     checkout_branch(repo_dir, branch)
@@ -626,8 +626,8 @@ def run_config(
             # reuse -- each is a standalone two-phase delta update against its own prior state
             # (see index_incremental_branch_in_dir). Processed here, before the snapshot-only
             # `group` continues below with incremental units filtered out.
-            incremental_units = [u for u in group if u.mode == "head"]
-            group = [u for u in group if u.mode != "head"]
+            incremental_units = [u for u in group if u.mode == "delta"]
+            group = [u for u in group if u.mode != "delta"]
             for unit in incremental_units:
                 reporter.start(unit)
             if incremental_units:

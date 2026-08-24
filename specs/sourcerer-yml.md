@@ -417,17 +417,17 @@ for indexing if they don't also qualify for pruning.
 
 Defines whether to index the content of each matching ref as an immutable commit
 snapshot (`"snapshot"`) or maintain a single ref-addressed view that is updated
-incrementally as the HEAD moves (`"head"`). Controls whether `since` and
-`retain` apply (both are rejected when `mode` is `"head"`).
+incrementally as the HEAD moves (`"delta"`). Controls whether `since` and
+`retain` apply (both are rejected when `mode` is `"delta"`).
 
 - Required: No
 - Type: String
 - Default: `"snapshot"`
 - Validation:
-  - Must be one of: `"snapshot"`, `"head"`
-  - `"head"` is only valid when `git.ref_type` is `"branch"`
-  - `"head"` cannot be combined with `since` or `retain`
-  - `"head"` cannot be combined with `index.level: commit`
+  - Must be one of: `"snapshot"`, `"delta"`
+  - `"delta"` is only valid when `git.ref_type` is `"branch"`
+  - `"delta"` cannot be combined with `since` or `retain`
+  - `"delta"` cannot be combined with `index.level: commit`
 
 ### `sources[i].since`
 
