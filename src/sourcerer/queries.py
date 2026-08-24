@@ -262,10 +262,10 @@ def gather_intended_incremental_index_by_ref(
 
     Feeds the incremental stale-location sweep (Class D-I): content for a branch sitting in an
     index NOT in this set is stale from a crashed migration and should be reclaimed.  Filters to
-    mode=="incremental" docs only, so snapshot markers (which always have git.commit) are
+    mode=="head" docs only, so snapshot markers (which always have git.commit) are
     not double-counted.  Returns {} if the refs index doesn't exist."""
     out: dict[tuple[str, str, str, str], set[str]] = {}
-    body = {"query": {"term": {"mode": "incremental"}}}
+    body = {"query": {"term": {"mode": "head"}}}
     src_fields = ["git.host", "git.org", "git.repo", "git.ref", "index_level", "index_suffix"]
     try:
         for hit in scan(es, index=REFS_ALIAS, query=body, _source=src_fields, preserve_order=False):
@@ -420,7 +420,7 @@ def check_join_uniqueness(es: Elasticsearch, host: str, org: str, repo: str) -> 
       (presence check -- multi-ref-per-commit is legal; the snapshot FORK arm no longer joins
       so the uniqueness requirement there is already removed).
     - Incremental (git.ref IS NOT NULL): each ref must resolve to EXACTLY ONE refs doc with
-      `mode == "incremental"` -- the anti-fan-out invariant for the surviving join.
+      `mode == "head"` -- the anti-fan-out invariant for the surviving join.
 
     Returns the sorted list of offending keys (commits/refs that fail their respective check);
     an empty list means the invariant holds."""
@@ -457,7 +457,7 @@ def check_join_uniqueness(es: Elasticsearch, host: str, org: str, repo: str) -> 
                     {"term": {"git.org": org}},
                     {"term": {"git.repo": repo}},
                     {"terms": {"git.ref": sorted(refs)}},
-                    {"term": {"mode": "incremental"}},
+                    {"term": {"mode": "head"}},
                 ]}},
                 aggs={"refs": {"terms": {"field": "git.ref", "size": len(refs)}}},
             )

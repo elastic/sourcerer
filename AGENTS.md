@@ -57,14 +57,14 @@ config's `sources:` is a YAML list, one entry per (host, org, repo, ref_type). S
 | `match` | yes | For `branch`/`tag`: pattern string or list of patterns matched against ref names (version DSL + glob), a ref matches if any pattern hits. For `commit`: a commit SHA/prefix string or list of them (see below). |
 | `since` | no | Index-side inclusion floor: the earliest commit to start indexing from. See below. Not valid for `git.ref_type: commit`. |
 | `retain` | no | Retention policy (see below). Omit to keep forever. For `git.ref_type: commit`, only `age` is valid. |
-| `mode` | no | `snapshot` (default) or `incremental` (branch-only). See below. |
+| `mode` | no | `snapshot` (default) or `head` (branch-only). See below. |
 
-#### `mode` (snapshot vs. incremental)
+#### `mode` (snapshot vs. head)
 
 `snapshot` (default): content is commit-addressed. A HEAD advance on a branch
 indexes a whole new snapshot under the new commit.
 
-`incremental` (branch-only; rejects `since`/`retain` -- there is no per-commit history for either
+`head` (branch-only; rejects `since`/`retain` -- there is no per-commit history for either
 to apply to): content is ref-addressed instead. A HEAD advance runs `git diff
 --name-status` between the previously-completed commit and the new tip and only deletes/
 reindexes the paths git reports changed -- add/modify/delete/rename/copy -- instead of
@@ -80,7 +80,7 @@ succeed, so a crash mid-update leaves the prior commit and content in place.
     repo: serverless-gitops
     ref_type: branch
   match: main
-  mode: incremental
+  mode: head
 ```
 
 #### `git.ref_type: commit` (pinning an explicit commit)
@@ -379,7 +379,7 @@ Content docs come in two disjoint shapes depending on how they were indexed:
 - **Snapshot** (`mode: snapshot`): content docs carry `git.commit` and no `git.ref`. The ref-name
   marker in `sourcerer-v3-refs` (keyed by `build_ref_id`, one per snapshot source) carries the commit
   and status. `git.commit` on the content row is already the answer; no join is needed to resolve it.
-- **Incremental** (`mode: incremental`): content docs carry `git.ref` and no `git.commit`. A
+- **Head** (`mode: head`): content docs carry `git.ref` and no `git.commit`. A
   dedicated refs join doc at `_id = build_ref_key(host,org,repo,ref)` (one per branch) holds the
   live HEAD commit and is advanced two-phase (INV-006). The join resolves `git.commit` from this doc.
 
@@ -465,7 +465,7 @@ Every `sourcerer-v3-refs` document — snapshot ref-name markers and incremental
 |---|---|
 | `indexing` | A run is mid-flight. `indexing_started_at` is set; `indexed_at` is absent/null. Present on snapshot ref-name markers (written by `write_indexing_marker` just before ingest) and incremental join docs (written by `write_incremental_indexing`). A stale `indexing` doc whose `indexing_started_at` is older than the retry window (default 6 h) marks a crashed run and is treated as due for re-indexing. |
 | `complete` | Fully indexed and ready to query. `indexed_at` is set; `indexing_started_at` is absent/null (the terminal write drops it). Written by `write_ref_marker` (snapshot markers) and `write_incremental_ready` (incremental join docs). The scheduler's "last indexed" aggregation and `sourcerer.refs.list`'s default `?status == "complete"` filter both use this value. |
-| `stale` | A snapshot marker superseded by a mode switch to incremental. Written by `mark_snapshot_markers_stale` (called BEFORE the incremental join doc is published as `complete`). Stale markers are invisible to all content tools (all gate on `status == "complete"`). The prune command reclaims their content and deletes the marker via `execute_stale_marker_deletions`. |
+| `stale` | A snapshot marker superseded by a mode switch to `head`. Written by `mark_snapshot_markers_stale` (called BEFORE the incremental join doc is published as `complete`). Stale markers are invisible to all content tools (all gate on `status == "complete"`). The prune command reclaims their content and deletes the marker via `execute_stale_marker_deletions`. |
 
 #### Uniqueness gate (INV-011 backstop)
 
@@ -474,8 +474,8 @@ Every `sourcerer-v3-refs` document — snapshot ref-name markers and incremental
 
 - **Snapshot** (git.commit IS NOT NULL in content): each distinct commit must have ≥1 complete refs
   doc (presence check — multi-ref-per-commit is legal).
-- **Incremental** (git.ref IS NOT NULL in content): each distinct ref must have **exactly one**
-  incremental join doc with `mode == "incremental"` (anti-fan-out guard for the surviving join).
+- **Head** (git.ref IS NOT NULL in content): each distinct ref must have **exactly one**
+  incremental join doc with `mode == "head"` (anti-fan-out guard for the surviving join).
 
 The gate is non-fatal (logs a warning, does not block): with the flip-status switchover in place,
 violations should only occur if a stale-flip was skipped or crashed mid-way; the next prune run

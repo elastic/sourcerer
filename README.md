@@ -85,9 +85,9 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
 
 The [`sourcerer.yml` specification](specs/sourcerer-yml.md) has the full reference of fields supported by the configuration file.
 
-### Snapshot vs. incremental indexing (`mode`)
+### Snapshot vs. head indexing (`mode`)
 
-Each source can set `mode: snapshot` (the default) or `mode: incremental` (branch-only). Every
+Each source can set `mode: snapshot` (the default) or `mode: head` (branch-only). Every
 Agent Builder content tool takes the same `git_commit_ish` param either way (a commit SHA or a
 branch/tag name, `*`/`?` wildcards supported) and resolves a commit the same way regardless of
 mode.
@@ -95,19 +95,19 @@ mode.
 - **`snapshot`** (default): content is commit-addressed. Every ref (branch, tag, or pinned commit)
   that resolves to the same commit collapses to one snapshot. A moving branch's HEAD advance indexes
   a brand-new snapshot under the new commit.
-- **`incremental`** (branch-only): content is ref-addressed instead. Content docs carry `git.ref`
+- **`head`** (branch-only): content is ref-addressed instead. Content docs carry `git.ref`
   but no `git.commit` of their own — the branch's current commit lives only on its refs join doc,
   resolved at query time via a LOOKUP JOIN. A HEAD advance re-indexes only the files
   `git diff --name-status` reports changed (add/modify/delete/rename), not the whole tree, so
   staying current on a fast-moving branch (e.g. GitOps/IaC repos that deploy off `main`) is cheap.
-  `since` and `retain` don't apply to an incremental source (there is no per-commit history to
+  `since` and `retain` don't apply to a head-mode source (there is no per-commit history to
   filter or retain) and are rejected if given.
 
 ```yaml
 sources:
 - git: { host: "github", org: "elastic", repo: "serverless-gitops", ref_type: "branch" }
   match: "main"
-  mode: incremental
+  mode: head
 ```
 
 Upgrading from a pre-`ref_key` install is automatic and invisible: every `index` run backfills

@@ -36,7 +36,7 @@ def _set_worker_ctx(host: str, org: str, repo: str, commit_sha: str, repo_dir, s
 def _set_worker_ctx_incremental(host: str, org: str, repo: str, ref: str, repo_dir, symlink_paths=frozenset()) -> None:
     documents._WORKER_CTX.update(
         host=host, org=org, repo=repo, ref=ref, repo_dir=pathlib.Path(repo_dir),
-        symlink_paths=symlink_paths, mode="incremental",
+        symlink_paths=symlink_paths, mode="head",
     )
 
 

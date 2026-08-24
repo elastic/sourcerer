@@ -282,7 +282,7 @@ def _init_worker_incremental(
     _WORKER_CTX.update(
         host=host, org=org, repo=repo, ref=ref, repo_dir=pathlib.Path(repo_dir),
         symlink_paths=symlink_paths, index_level=index_level, index_suffix=index_suffix,
-        mode="incremental",
+        mode="head",
     )
 
 
@@ -303,7 +303,7 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
     text. Runs in a worker process (see _init_worker for the shared context). Mirrors the old
     inline generator -- a binary file or one that can't be read yields only its file doc."""
     ctx = _WORKER_CTX
-    incremental = ctx.get("mode", "snapshot") == "incremental"
+    incremental = ctx.get("mode", "snapshot") == "head"
     host, org, repo = ctx["host"], ctx["org"], ctx["repo"]
     commit_sha = ctx.get("ref") if incremental else ctx["commit_sha"]
     level, suffix = ctx.get("index_level", "repo"), ctx.get("index_suffix")

@@ -468,7 +468,7 @@ class TestWriteIncrementalIndexing:
         assert doc["status"] == "indexing"
         assert doc["git"]["commit"] == OLD  # completed pointer unchanged (INV-006)
         assert doc["git"]["commit_target"] == NEW
-        assert doc["mode"] == "incremental"
+        assert doc["mode"] == "head"
         assert es.index.call_args.kwargs["index"] == REFS_INDEX
 
     def test_incremental_marker_first_index_has_no_completed_commit(self):

@@ -283,9 +283,9 @@ class Selector:
     levels: tuple[str, ...] = ()           # numeric levels shared by the versioned match patterns
     schedule: Schedule | None = None       # per-source schedule override (sources[i].schedule)
     # sources[i].mode: the indexing mode for this source -- "snapshot" (default, commit-addressed)
-    # or "incremental" (ref-addressed, branch-only). Controls whether since/retain apply and routes
+    # or "head" (ref-addressed, branch-only). Controls whether since/retain apply and routes
     # the unit to the incremental delta-index path instead of the snapshot flow.
-    mode: str = "snapshot"                 # "snapshot" (default) or "incremental" (branch-only)
+    mode: str = "snapshot"                 # "snapshot" (default) or "head" (branch-only)
     # sources[i].index routing (see specs/sourcerer-yml.md): which physical files/lines index this
     # source's content docs land in. Per-source, so two sources sharing a (host, org, repo) may
     # route differently.
@@ -412,7 +412,7 @@ def _parse_commit_match(raw: dict, ctx: str) -> list[str]:
 
 _GIT_KEYS = {"host", "org", "repo", "ref_type"}
 _INDEX_LEVELS = ("host", "org", "repo", "commit")
-_MODES = ("snapshot", "incremental")
+_MODES = ("snapshot", "head")
 # A suffix goes into a physical index name after a `^`, so it must be safe as an index-name
 # segment: the same characters forbidden in a host id, plus the `^` we use as the suffix delimiter.
 _FORBIDDEN_SUFFIX_CHARS = _FORBIDDEN_HOST_CHARS | {"^"}
@@ -499,21 +499,21 @@ def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
     if raw.get("index") is not None:
         index_level, index_suffix = _parse_index(raw["index"], ctx)
 
-    if mode == "incremental":
+    if mode == "head":
         if ref_type != "branch":
-            raise ValueError(f"{ctx} mode: 'incremental' is only valid for "
+            raise ValueError(f"{ctx} mode: 'head' is only valid for "
                              f"git.ref_type: branch (got ref_type {ref_type!r})")
-        # An incremental branch maintains a single mutable ref-addressed view with no per-commit
+        # A head-mode branch maintains a single mutable ref-addressed view with no per-commit
         # history for retention to trim and no inclusion floor to apply -- both since and retain
         # are meaningless here (see specs/incremental-indexing.md).
         if raw.get("since") is not None:
-            raise ValueError(f"{ctx}: 'mode: incremental' cannot be combined with 'since'")
+            raise ValueError(f"{ctx}: 'mode: head' cannot be combined with 'since'")
         if raw.get("retain") is not None:
-            raise ValueError(f"{ctx}: 'mode: incremental' cannot be combined with 'retain'")
+            raise ValueError(f"{ctx}: 'mode: head' cannot be combined with 'retain'")
         if index_level == "commit":
-            # Incremental content is ref-addressed (no git.commit on content docs), so a
+            # Head-mode content is ref-addressed (no git.commit on content docs), so a
             # commit-level index name -- which requires a commit sha -- can never be built for it.
-            raise ValueError(f"{ctx} mode: 'incremental' cannot be combined with "
+            raise ValueError(f"{ctx} mode: 'head' cannot be combined with "
                              f"'index.level: commit'")
 
     if ref_type == "commit":

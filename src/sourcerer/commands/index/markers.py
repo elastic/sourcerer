@@ -595,7 +595,7 @@ def _build_incremental_join_doc(
             "commit_target": commit_target,
             "commit_date": commit_date_iso,
         },
-        "mode": "incremental",
+        "mode": "head",
         "status": status,
         "files_count": files_count,
         "lines_count": lines_count,
