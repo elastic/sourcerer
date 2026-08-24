@@ -33,9 +33,11 @@ def _set_worker_ctx(host: str, org: str, repo: str, commit_sha: str, repo_dir, s
     )
 
 
-def _set_worker_ctx_incremental(host: str, org: str, repo: str, ref: str, repo_dir, symlink_paths=frozenset()) -> None:
+def _set_worker_ctx_incremental(host: str, org: str, repo: str, ref: str, repo_dir,
+                                symlink_paths=frozenset(), ref_type: str = "branch") -> None:
     documents._WORKER_CTX.update(
-        host=host, org=org, repo=repo, ref=ref, repo_dir=pathlib.Path(repo_dir),
+        host=host, org=org, repo=repo, ref_type=ref_type, ref=ref,
+        repo_dir=pathlib.Path(repo_dir),
         symlink_paths=symlink_paths, mode="delta",
     )
 
@@ -181,41 +183,51 @@ class TestIterLineDocs:
 
 class TestIncrementalDocs:
     def test_ref_field_set_no_ref_key(self, tmp_path):
-        # Incremental docs carry git.ref (the branch name) but no git.ref_key (field removed).
+        # Incremental docs carry git.ref (the ref name) and git.ref_type but no git.ref_key.
         p = tmp_path / "a.txt"
         p.write_text("hello")
-        _id, doc = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
+        _id, doc = build_incremental_file_doc("github", "acme", "widgets", "branch", "main", "a.txt", p)
         assert doc["git"]["ref"] == "main"
+        assert doc["git"]["ref_type"] == "branch"
         assert "ref_key" not in doc["git"]
 
     def test_no_commit_field(self, tmp_path):
         p = tmp_path / "a.txt"
         p.write_text("hello")
-        _id, doc = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
+        _id, doc = build_incremental_file_doc("github", "acme", "widgets", "branch", "main", "a.txt", p)
         assert "commit" not in doc["git"]
 
     def test_id_stable_across_commits(self, tmp_path):
         # The whole point of ref-addressing: the id does not depend on the commit, only the
-        # ref, so a modified file's doc overwrites in place rather than minting a new id.
+        # ref_type+ref, so a modified file's doc overwrites in place rather than minting a new id.
         p = tmp_path / "a.txt"
         p.write_text("hello")
-        id1, _ = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
+        id1, _ = build_incremental_file_doc("github", "acme", "widgets", "branch", "main", "a.txt", p)
         p.write_text("hello world -- content changed, same ref/path")
-        id2, _ = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
+        id2, _ = build_incremental_file_doc("github", "acme", "widgets", "branch", "main", "a.txt", p)
         assert id1 == id2
 
     def test_id_differs_from_snapshot_id(self, tmp_path):
         p = tmp_path / "a.txt"
         p.write_text("hello")
         snap_id, _ = build_file_doc("github", "acme", "widgets", "deadbeef", "a.txt", p)
-        incr_id, _ = build_incremental_file_doc("github", "acme", "widgets", "main", "a.txt", p)
+        incr_id, _ = build_incremental_file_doc("github", "acme", "widgets", "branch", "main", "a.txt", p)
         assert snap_id != incr_id
 
+    def test_branch_and_tag_same_name_have_distinct_ids(self, tmp_path):
+        # A same-named branch and tag in delta mode must produce distinct content ids (INV-004).
+        p = tmp_path / "a.txt"
+        p.write_text("hello")
+        branch_id, _ = build_incremental_file_doc("github", "acme", "widgets", "branch", "deploy", "a.txt", p)
+        tag_id, _ = build_incremental_file_doc("github", "acme", "widgets", "tag", "deploy", "a.txt", p)
+        assert branch_id != tag_id
+
     def test_line_docs_ref_and_no_commit_no_ref_key(self):
-        # Incremental line docs carry git.ref, no git.commit, no git.ref_key.
-        docs = list(iter_incremental_line_docs("github", "acme", "widgets", "main", "a.txt", "one\ntwo"))
+        # Incremental line docs carry git.ref and git.ref_type, no git.commit, no git.ref_key.
+        docs = list(iter_incremental_line_docs("github", "acme", "widgets", "branch", "main", "a.txt", "one\ntwo"))
         for _id, d in docs:
             assert d["git"]["ref"] == "main"
+            assert d["git"]["ref_type"] == "branch"
             assert "commit" not in d["git"]
             assert "ref_key" not in d["git"]
 
@@ -224,6 +236,7 @@ class TestIncrementalDocs:
         _set_worker_ctx_incremental("github", "acme", "widgets", "main", tmp_path)
         actions = _build_one_file_actions("a.txt")
         assert actions[0]["_source"]["git"]["ref"] == "main"
+        assert actions[0]["_source"]["git"]["ref_type"] == "branch"
         assert "commit" not in actions[0]["_source"]["git"]
         assert "ref_key" not in actions[0]["_source"]["git"]
 

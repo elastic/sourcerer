@@ -184,12 +184,12 @@ sources:
   retain:
     count: 5
 
-# Delta mode -- branch-only. Instead of a new commit-addressed snapshot on every HEAD
+# Delta mode -- branch or tag. Instead of a new commit-addressed snapshot on every HEAD
 # advance, content is keyed by git.ref and stays in place: a HEAD advance re-indexes only the
 # files `git diff` reports changed (a delta update), rather than the whole tree. Good for a
-# fast-moving branch that deploys off main, where staying current matters more than retaining
-# per-commit history. `since` and `retain` are not meaningful here (there is no per-commit
-# history to filter/retain) and are rejected if given.
+# fast-moving branch or force-updated tag (e.g. `deploy@8`-style Serverless promotion tags)
+# where staying current matters more than retaining per-commit history. `since` and `retain`
+# are not meaningful here (there is no per-commit history to filter/retain) and are rejected if given.
 - git:
     host: github
     org: elastic

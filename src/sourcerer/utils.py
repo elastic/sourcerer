@@ -17,19 +17,24 @@ ID_SEP = b"\x00"
 ID_DIGEST_SIZE = 16
 
 
-def build_ref_key(host: str, org: str, repo: str, ref: str) -> str:
-    """Deterministic `_id` string for incremental join docs: `{host}~{org}~{repo}~{ref}`
-    (host/org/repo lowercased, ref case-preserved).
+def build_ref_key(host: str, org: str, repo: str, ref_type: str, ref: str) -> str:
+    """Deterministic `_id` string for incremental join docs:
+    `{host}~{org}~{repo}~{ref_type}~{ref}` (host/org/repo lowercased, ref case-preserved).
+
+    `ref_type` is "branch" or "tag"; folding it in keeps a same-named branch and tag in delta
+    mode as two distinct join docs with non-overlapping id spaces (mirrors `build_ref_id` in
+    markers.py, which already includes ref_type for snapshot marker ids).
 
     Used exclusively as the Elasticsearch `_id` for the incremental refs join doc. Not a stored
     field -- `git.ref_key` was removed from all index mappings and content builders. The string
-    is opaque to queries; the join uses `(git.host, git.org, git.repo, git.ref)` natively.
+    is opaque to queries; the join uses `(git.host, git.org, git.repo, git.ref, git.ref_type)`
+    natively.
 
     `~` is safe as a delimiter because it is illegal in git ref names (see
     `git check-ref-format`) and matches the index-name segment delimiter used for
     host/org/repo elsewhere (see `indices.py`), so it cannot collide with any joined value.
     """
-    return "~".join((host.lower(), org.lower(), repo.lower(), ref))
+    return "~".join((host.lower(), org.lower(), repo.lower(), ref_type, ref))
 
 
 def make_doc_id(*parts: str) -> str:

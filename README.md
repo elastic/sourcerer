@@ -87,7 +87,7 @@ The [`sourcerer.yml` specification](specs/sourcerer-yml.md) has the full referen
 
 ### Snapshot vs. delta indexing (`mode`)
 
-Each source can set `mode: snapshot` (the default) or `mode: delta` (branch-only). Every
+Each source can set `mode: snapshot` (the default) or `mode: delta` (branch or tag). Every
 Agent Builder content tool takes the same `git_commit_ish` param either way (a commit SHA or a
 branch/tag name, `*`/`?` wildcards supported) and resolves a commit the same way regardless of
 mode.
@@ -95,13 +95,14 @@ mode.
 - **`snapshot`** (default): content is commit-addressed. Every ref (branch, tag, or pinned commit)
   that resolves to the same commit collapses to one snapshot. A moving branch's HEAD advance indexes
   a brand-new snapshot under the new commit.
-- **`delta`** (branch-only): content is ref-addressed instead. Content docs carry `git.ref`
-  but no `git.commit` of their own — the branch's current commit lives only on its refs join doc,
+- **`delta`** (branch or tag): content is ref-addressed instead. Content docs carry `git.ref`
+  but no `git.commit` of their own — the ref's current commit lives only on its refs join doc,
   resolved at query time via a LOOKUP JOIN. A HEAD advance re-indexes only the files
   `git diff --name-status` reports changed (add/modify/delete/rename), not the whole tree, so
-  staying current on a fast-moving branch (e.g. GitOps/IaC repos that deploy off `main`) is cheap.
-  `since` and `retain` don't apply to a delta-mode source (there is no per-commit history to
-  filter or retain) and are rejected if given.
+  staying current on a fast-moving branch or tag is cheap. Particularly useful for fast-moving
+  tags that are force-updated frequently (e.g. `deploy@8`-style Serverless promotion tags) where
+  snapshot mode would mint a full snapshot per move. `since` and `retain` don't apply to a
+  delta-mode source (there is no per-commit history to filter or retain) and are rejected if given.
 
 ```yaml
 sources:

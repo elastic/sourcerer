@@ -60,6 +60,9 @@
             },
             "ref": {
               "type": "keyword"
+            },
+            "ref_type": {
+              "type": "keyword"
             }
           }
         },

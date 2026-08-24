@@ -21,6 +21,7 @@ def _patch_common(prior=None, plan=None):
     returning the patcher context managers as a dict of MagicMocks keyed by name."""
     patchers = {
         "checkout_branch": patch("sourcerer.commands.index.command.checkout_branch"),
+        "checkout_ref": patch("sourcerer.commands.index.command.checkout_ref"),
         "resolve_commit": patch("sourcerer.commands.index.command.resolve_commit", return_value=NEW),
         "commit_date": patch("sourcerer.commands.index.command.commit_date", return_value="2026-01-01T00:00:00+00:00"),
         "read_incremental_ref": patch("sourcerer.commands.index.command.read_incremental_ref", return_value=prior),
@@ -55,6 +56,9 @@ class TestIncrementalIndexFirstRun:
                        mode="delta")
             index_incremental_branch_in_dir(es, "github", "acme", "widgets", "/repo", "main",
                                             reporter=ProgressReporter(), unit=unit)
+            # Branch: uses checkout_branch, NOT checkout_ref.
+            mocks["checkout_branch"].assert_called_once()
+            mocks["checkout_ref"].assert_not_called()
             mocks["delete_incremental_branch"].assert_called_once()
             mocks["index_incremental_paths"].assert_called_once()
             # rel_paths (4th positional after repo_dir/branch) is None -> full tree walk.
@@ -62,7 +66,9 @@ class TestIncrementalIndexFirstRun:
             assert call_args[0][6] is None
             mocks["delete_incremental_paths"].assert_not_called()
             mocks["write_incremental_ready"].assert_called_once()
-            assert mocks["write_incremental_ready"].call_args[0][5] == NEW
+            # write_incremental_ready(es, host, org, repo, ref_type, ref, commit, ...)
+            # ref_type at [4], ref at [5], commit (sha) at [6]
+            assert mocks["write_incremental_ready"].call_args[0][6] == NEW
         finally:
             _stop(patchers)
 
@@ -80,7 +86,9 @@ class TestIncrementalIndexDeltaRun:
                                             reporter=ProgressReporter(), unit=unit)
             mocks["delete_incremental_branch"].assert_not_called()
             mocks["delete_incremental_paths"].assert_called_once()
-            assert mocks["delete_incremental_paths"].call_args[0][5] == ["gone.txt"]
+            # delete_incremental_paths(es, host, org, repo, ref_type, ref, paths, ...)
+            # ref_type at [4], ref at [5], paths at [6]
+            assert mocks["delete_incremental_paths"].call_args[0][6] == ["gone.txt"]
             mocks["index_incremental_paths"].assert_called_once()
             call_args = mocks["index_incremental_paths"].call_args
             assert call_args[0][6] == ["new.txt"]
@@ -237,5 +245,105 @@ class TestIncrementalIndexRoutingMigration:
                                             reporter=ProgressReporter(), unit=unit)
             # Delta run: no full rebuild (delete_incremental_branch not called), no extra delete.
             mocks["delete_incremental_branch"].assert_not_called()
+        finally:
+            _stop(patchers)
+
+
+class TestIncrementalIndexTagFirstRun:
+    """Mirror of TestIncrementalIndexFirstRun / TestIncrementalIndexDeltaRun for tag Units.
+    Confirms that:
+    - checkout_ref is used instead of checkout_branch for tags (git.ref_type: tag)
+    - The overall orchestration path (first run → full rebuild; second run → delta) is identical.
+    """
+
+    def test_tag_first_index_uses_checkout_ref(self):
+        """First run for a tag Unit: checkout_ref called, full tree walk."""
+        patchers, mocks = _patch_common(prior=None)
+        try:
+            es = MagicMock()
+            unit = Unit(host="github", org="elastic", repo="kibana",
+                       ref="deploy@8", kind="tag", mode="delta")
+            index_incremental_branch_in_dir(
+                es, "github", "elastic", "kibana", "/repo", "deploy@8",
+                reporter=ProgressReporter(), unit=unit,
+            )
+            # Tag: uses checkout_ref, NOT checkout_branch.
+            mocks["checkout_ref"].assert_called_once()
+            mocks["checkout_branch"].assert_not_called()
+            mocks["delete_incremental_branch"].assert_called_once()
+            mocks["index_incremental_paths"].assert_called_once()
+            # Full tree walk: rel_paths arg is None.
+            call_args = mocks["index_incremental_paths"].call_args
+            assert call_args[0][6] is None
+            mocks["write_incremental_ready"].assert_called_once()
+            # write_incremental_ready(es, host, org, repo, ref_type, ref, commit, ...)
+            assert mocks["write_incremental_ready"].call_args[0][6] == NEW
+        finally:
+            _stop(patchers)
+
+    def test_tag_delta_run_indexes_only_changed_paths(self):
+        """Second run for a tag Unit: delta diff applied, full rebuild skipped."""
+        prior = {"git": {"commit": OLD}}
+        plan = ChangePlan(delete_paths=["gone.ts"], index_paths=["new.ts"])
+        patchers, mocks = _patch_common(prior=prior, plan=plan)
+        try:
+            es = MagicMock()
+            unit = Unit(host="github", org="elastic", repo="kibana",
+                       ref="deploy@8", kind="tag", mode="delta")
+            index_incremental_branch_in_dir(
+                es, "github", "elastic", "kibana", "/repo", "deploy@8",
+                reporter=ProgressReporter(), unit=unit,
+            )
+            mocks["checkout_ref"].assert_called_once()
+            mocks["checkout_branch"].assert_not_called()
+            mocks["delete_incremental_branch"].assert_not_called()
+            mocks["delete_incremental_paths"].assert_called_once()
+            # delete_incremental_paths(es, host, org, repo, ref_type, ref, paths, ...)
+            assert mocks["delete_incremental_paths"].call_args[0][6] == ["gone.ts"]
+            mocks["index_incremental_paths"].assert_called_once()
+            assert mocks["index_incremental_paths"].call_args[0][6] == ["new.ts"]
+            mocks["write_incremental_ready"].assert_called_once()
+        finally:
+            _stop(patchers)
+
+    def test_tag_missing_diff_base_triggers_full_rebuild(self):
+        """Force-moved tag whose old target is gone → base_missing → full rebuild (INV-007)."""
+        prior = {"git": {"commit": OLD}}
+        plan = ChangePlan(base_missing=True)
+        patchers, mocks = _patch_common(prior=prior, plan=plan)
+        try:
+            es = MagicMock()
+            unit = Unit(host="github", org="elastic", repo="kibana",
+                       ref="deploy@8", kind="tag", mode="delta")
+            index_incremental_branch_in_dir(
+                es, "github", "elastic", "kibana", "/repo", "deploy@8",
+                reporter=ProgressReporter(), unit=unit,
+            )
+            mocks["checkout_ref"].assert_called_once()
+            mocks["delete_incremental_branch"].assert_called_once()
+            assert mocks["index_incremental_paths"].call_args[0][6] is None
+        finally:
+            _stop(patchers)
+
+    def test_tag_ref_type_reaches_write_ready_call(self):
+        """ref_type='tag' flows through to write_incremental_ready positional args."""
+        patchers, mocks = _patch_common(prior=None)
+        try:
+            es = MagicMock()
+            unit = Unit(host="github", org="elastic", repo="kibana",
+                       ref="deploy@8", kind="tag", mode="delta")
+            index_incremental_branch_in_dir(
+                es, "github", "elastic", "kibana", "/repo", "deploy@8",
+                reporter=ProgressReporter(), unit=unit,
+            )
+            ready_args = mocks["write_incremental_ready"].call_args[0]
+            # write_incremental_ready(es, host, org, repo, ref_type, ref, sha, ...)
+            # positional index 4 is ref_type
+            assert ready_args[4] == "tag", (
+                f"Expected ref_type='tag' at pos 4 of write_incremental_ready call, got {ready_args}"
+            )
+            assert ready_args[5] == "deploy@8", (
+                f"Expected ref='deploy@8' at pos 5, got {ready_args}"
+            )
         finally:
             _stop(patchers)

@@ -57,21 +57,26 @@ config's `sources:` is a YAML list, one entry per (host, org, repo, ref_type). S
 | `match` | yes | For `branch`/`tag`: pattern string or list of patterns matched against ref names (version DSL + glob), a ref matches if any pattern hits. For `commit`: a commit SHA/prefix string or list of them (see below). |
 | `since` | no | Index-side inclusion floor: the earliest commit to start indexing from. See below. Not valid for `git.ref_type: commit`. |
 | `retain` | no | Retention policy (see below). Omit to keep forever. For `git.ref_type: commit`, only `age` is valid. |
-| `mode` | no | `snapshot` (default) or `delta` (branch-only). See below. |
+| `mode` | no | `snapshot` (default) or `delta` (branch or tag). See below. |
 
 #### `mode` (snapshot vs. delta)
 
 `snapshot` (default): content is commit-addressed. A HEAD advance on a branch
 indexes a whole new snapshot under the new commit.
 
-`delta` (branch-only; rejects `since`/`retain` -- there is no per-commit history for either
+`delta` (branch or tag; rejects `since`/`retain` -- there is no per-commit history for either
 to apply to): content is ref-addressed instead. A HEAD advance runs `git diff
 --name-status` between the previously-completed commit and the new tip and only deletes/
 reindexes the paths git reports changed -- add/modify/delete/rename/copy -- instead of
 reindexing the whole tree. A missing diff base (force-push, GC'd, or the first index) rebuilds
-the whole branch namespace. The refs join doc publishes `status: indexing` before any content
+the whole ref namespace. The refs join doc publishes `status: indexing` before any content
 change and `status: complete` (with the new commit) only after the deletes/indexes/refresh all
 succeed, so a crash mid-update leaves the prior commit and content in place.
+
+Delta mode is especially useful for fast-moving tags that are force-updated many times a day
+(e.g. `deploy@8`-style Serverless promotion tags): snapshot mode would mint a fresh full snapshot
+per force-update; delta mode diffs only what changed, keeping indexing cost proportional to the
+diff size regardless of tag-move frequency.
 
 ```yaml
 - git:

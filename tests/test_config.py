@@ -202,12 +202,12 @@ class TestParseMode:
         cfg = _cfg([_source(ref_type="branch", mode="delta")])
         assert cfg.repos[0].selectors[0].mode == "delta"
 
-    def test_delta_rejected_on_tag(self):
-        with pytest.raises(ValueError, match="only valid for git.ref_type: branch"):
-            _cfg([_source(ref_type="tag", match="v1.0.0", mode="delta")])
+    def test_delta_accepted_on_tag(self):
+        cfg = _cfg([_source(ref_type="tag", match="v1.0.0", mode="delta")])
+        assert cfg.repos[0].selectors[0].mode == "delta"
 
     def test_delta_rejected_on_commit(self):
-        with pytest.raises(ValueError, match="only valid for git.ref_type: branch"):
+        with pytest.raises(ValueError, match="only valid for git.ref_type: branch or tag"):
             _cfg([_source(ref_type="commit", match="cfefb3b", mode="delta")])
 
     def test_invalid_mode_raises(self):
@@ -218,13 +218,25 @@ class TestParseMode:
         with pytest.raises(ValueError, match="cannot be combined with 'since'"):
             _cfg([_source(ref_type="branch", mode="delta", since={"age": "1y"})])
 
+    def test_delta_tag_with_since_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'since'"):
+            _cfg([_source(ref_type="tag", match="v1.0.0", mode="delta", since={"age": "1y"})])
+
     def test_delta_with_retain_raises(self):
         with pytest.raises(ValueError, match="cannot be combined with 'retain'"):
             _cfg([_source(ref_type="branch", mode="delta", retain={"count": 5})])
 
+    def test_delta_tag_with_retain_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'retain'"):
+            _cfg([_source(ref_type="tag", match="v1.0.0", mode="delta", retain={"count": 5})])
+
     def test_delta_with_commit_level_index_raises(self):
         with pytest.raises(ValueError, match="cannot be combined with 'index.level: commit'"):
             _cfg([_source(ref_type="branch", mode="delta", index={"level": "commit"})])
+
+    def test_delta_tag_with_commit_level_index_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'index.level: commit'"):
+            _cfg([_source(ref_type="tag", match="v1.0.0", mode="delta", index={"level": "commit"})])
 
     def test_top_level_update_key_raises(self):
         with pytest.raises(ValueError, match="unknown keys"):
@@ -233,6 +245,10 @@ class TestParseMode:
 
     def test_delta_with_repo_level_index_is_fine(self):
         cfg = _cfg([_source(ref_type="branch", mode="delta", index={"level": "repo"})])
+        assert cfg.repos[0].selectors[0].mode == "delta"
+
+    def test_delta_tag_with_repo_level_index_is_fine(self):
+        cfg = _cfg([_source(ref_type="tag", match="v1.0.0", mode="delta", index={"level": "repo"})])
         assert cfg.repos[0].selectors[0].mode == "delta"
 
 

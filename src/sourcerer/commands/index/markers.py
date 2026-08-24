@@ -540,23 +540,27 @@ def pre_clone_skip(
 
 
 # --- incremental refs join docs, keyed by `_id = build_ref_key(...)` ----------------------
-# One document per incremental branch (INV-004): the branch's single join doc lives at
-# `_id = {host}~{org}~{repo}~{ref}` (constructed by build_ref_key, a plain tilde-joined
-# string -- not a stored field) and its `git.commit` is the branch's live HEAD, advanced
-# only by a two-phase indexing -> complete publication (INV-006). This is a DISTINCT id space
-# from `build_ref_id`'s hashed, append-only ref-name markers above; a join doc's `_id` is a
-# plain, unhashed build_ref_key() string, which a `build_ref_id` hash can never collide with.
-# build_ref_key is still used as the `_id` constructor even though git.ref_key is no longer
-# a stored field -- the id itself remains the stable overwrite key for each branch.
+# One document per incremental ref (INV-004): a delta-mode ref's single join doc lives at
+# `_id = {host}~{org}~{repo}~{ref_type}~{ref}` (constructed by build_ref_key, a plain
+# tilde-joined string -- not a stored field) and its `git.commit` is the ref's live target
+# commit, advanced only by a two-phase indexing -> complete publication (INV-006). ref_type
+# ("branch" or "tag") is part of the key so a same-named branch and tag each get a distinct
+# join doc. This is a DISTINCT id space from `build_ref_id`'s hashed, append-only ref-name
+# markers above; a join doc's `_id` is a plain, unhashed build_ref_key() string, which a
+# `build_ref_id` hash can never collide with. build_ref_key is still used as the `_id`
+# constructor even though git.ref_key is no longer a stored field -- the id itself remains the
+# stable overwrite key for each delta-mode ref.
 
 ERROR_MAX_LEN = 2000  # bound stored failure text so a giant git/ES error can't bloat the doc
 
 
-def read_incremental_ref(es: Elasticsearch, host: str, org: str, repo: str, ref: str) -> dict | None:
-    """The branch's incremental join doc `_source`, or None if never indexed. A real-time GET
+def read_incremental_ref(
+    es: Elasticsearch, host: str, org: str, repo: str, ref_type: str, ref: str,
+) -> dict | None:
+    """The ref's incremental join doc `_source`, or None if never indexed. A real-time GET
     (by `_id = ref_key`), so it reflects the last write even without a refresh."""
     try:
-        return es.get(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref))["_source"]
+        return es.get(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref))["_source"]
     except NotFoundError:
         return None
 
@@ -569,6 +573,7 @@ def _build_incremental_join_doc(
     host: str,
     org: str,
     repo: str,
+    ref_type: str,
     ref: str,
     *,
     status: str,
@@ -590,7 +595,7 @@ def _build_incremental_join_doc(
             "org": org,
             "repo": repo,
             "ref": ref,
-            "ref_type": "branch",
+            "ref_type": ref_type,
             "commit": commit,
             "commit_target": commit_target,
             "commit_date": commit_date_iso,
@@ -613,6 +618,7 @@ def write_incremental_indexing(
     host: str,
     org: str,
     repo: str,
+    ref_type: str,
     ref: str,
     completed_commit: str | None,
     commit_target: str,
@@ -628,7 +634,7 @@ def write_incremental_indexing(
     prior = prior or {}
     pg = prior.get("git", {})
     doc = _build_incremental_join_doc(
-        host, org, repo, ref,
+        host, org, repo, ref_type, ref,
         status="indexing",
         commit=completed_commit,
         commit_target=commit_target,
@@ -642,7 +648,7 @@ def write_incremental_indexing(
         index_level=index_level,
         index_suffix=index_suffix,
     )
-    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref), document=doc, refresh=refresh)
+    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref), document=doc, refresh=refresh)
 
 
 def write_incremental_ready(
@@ -650,6 +656,7 @@ def write_incremental_ready(
     host: str,
     org: str,
     repo: str,
+    ref_type: str,
     ref: str,
     commit: str,
     commit_date_iso: str | None,
@@ -663,7 +670,7 @@ def write_incremental_ready(
     prior failure fields. This is the pointer-advancing publication boundary (INV-006): callers
     must delete+index+refresh the content indices FIRST, then call this."""
     doc = _build_incremental_join_doc(
-        host, org, repo, ref,
+        host, org, repo, ref_type, ref,
         status="complete",
         commit=commit,
         commit_target=None,
@@ -677,7 +684,7 @@ def write_incremental_ready(
         index_level=index_level,
         index_suffix=index_suffix,
     )
-    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref), document=doc, refresh=refresh)
+    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref), document=doc, refresh=refresh)
 
 
 def write_incremental_failed(
@@ -685,6 +692,7 @@ def write_incremental_failed(
     host: str,
     org: str,
     repo: str,
+    ref_type: str,
     ref: str,
     completed_commit: str | None,
     commit_target: str | None,
@@ -700,7 +708,7 @@ def write_incremental_failed(
     prior = prior or {}
     pg = prior.get("git", {})
     doc = _build_incremental_join_doc(
-        host, org, repo, ref,
+        host, org, repo, ref_type, ref,
         status="indexing",
         commit=completed_commit,
         commit_target=commit_target,
@@ -714,7 +722,7 @@ def write_incremental_failed(
         index_level=index_level,
         index_suffix=index_suffix,
     )
-    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref), document=doc, refresh=refresh)
+    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref), document=doc, refresh=refresh)
 
 
 def _delete_by_query_sync(es: Elasticsearch, index: str, query: dict, refresh: bool) -> None:
@@ -741,16 +749,17 @@ def delete_incremental_paths(
     host: str,
     org: str,
     repo: str,
+    ref_type: str,
     ref: str,
     paths,
     index_level: str = "repo",
     index_suffix: str | None = None,
     refresh: bool = False,
 ) -> None:
-    """Synchronously delete the file and line docs for `paths` on this exact branch. Scoped by
-    the exact (git.host, git.org, git.repo, git.ref) 4-term filter (INV-008: one branch's docs
-    can never bleed into another's) plus a `file.path` terms filter, never a wildcard. A no-op
-    for an empty path set."""
+    """Synchronously delete the file and line docs for `paths` on this exact ref. Scoped by
+    the exact (git.host, git.org, git.repo, git.ref_type, git.ref) 5-term filter (INV-008:
+    one ref's docs can never bleed into another's) plus a `file.path` terms filter, never a
+    wildcard. A no-op for an empty path set."""
     paths = list(paths)
     if not paths:
         return
@@ -760,6 +769,7 @@ def delete_incremental_paths(
                 {"term": {"git.host": host}},
                 {"term": {"git.org": org}},
                 {"term": {"git.repo": repo}},
+                {"term": {"git.ref_type": ref_type}},
                 {"term": {"git.ref": ref}},
                 {"terms": {"file.path": paths}},
             ]
@@ -778,17 +788,20 @@ def delete_incremental_branch(
     org: str,
     repo: str,
     ref: str,
+    ref_type: str = "branch",
     index_level: str = "repo",
     index_suffix: str | None = None,
     refresh: bool = False,
 ) -> None:
-    """Delete EVERY incremental content doc for this branch (full namespace), scoped by the
-    exact (git.host, git.org, git.repo, git.ref) 4-term filter (INV-008). Used for the initial
-    index and the missing-diff-base rebuild (INV-007)."""
+    """Delete EVERY incremental content doc for this ref (full namespace), scoped by the exact
+    (git.host, git.org, git.repo, git.ref_type, git.ref) 5-term filter (INV-008). Used for
+    the initial index and the missing-diff-base rebuild (INV-007). `ref_type` defaults to
+    "branch" for back-compat with existing callers that pass `ref` positionally."""
     query = {"bool": {"filter": [
         {"term": {"git.host": host}},
         {"term": {"git.org": org}},
         {"term": {"git.repo": repo}},
+        {"term": {"git.ref_type": ref_type}},
         {"term": {"git.ref": ref}},
     ]}}
     for index in (
@@ -800,16 +813,19 @@ def delete_incremental_branch(
 
 def count_incremental_branch_docs(
     es: Elasticsearch, host: str, org: str, repo: str, ref: str,
+    ref_type: str = "branch",
     index_level: str = "repo", index_suffix: str | None = None,
 ) -> tuple[int, int]:
-    """Authoritative (files, lines) totals for a branch's current incremental view, counted by
-    exact (git.host, git.org, git.repo, git.ref). Call AFTER refreshing the content indices so
-    counts reflect the just-applied deletes and indexes -- these become the ready marker's
-    files_count/lines_count. Returns 0 for an index that does not exist yet."""
+    """Authoritative (files, lines) totals for a ref's current incremental view, counted by
+    exact (git.host, git.org, git.repo, git.ref_type, git.ref). Call AFTER refreshing the
+    content indices so counts reflect the just-applied deletes and indexes -- these become the
+    ready marker's files_count/lines_count. Returns 0 for an index that does not exist yet.
+    `ref_type` defaults to "branch" for back-compat with existing callers."""
     query = {"bool": {"filter": [
         {"term": {"git.host": host}},
         {"term": {"git.org": org}},
         {"term": {"git.repo": repo}},
+        {"term": {"git.ref_type": ref_type}},
         {"term": {"git.ref": ref}},
     ]}}
 

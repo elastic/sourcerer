@@ -450,44 +450,50 @@ class TestWriteRefMarker:
 class TestIncrementalRefKeyIdentity:
     def test_id_is_ref_key_not_a_hash(self):
         es = MagicMock()
-        write_incremental_indexing(es, "github", "acme", "widgets", "main", OLD, NEW)
-        assert es.index.call_args.kwargs["id"] == build_ref_key("github", "acme", "widgets", "main")
+        write_incremental_indexing(es, "github", "acme", "widgets", "branch", "main", OLD, NEW)
+        assert es.index.call_args.kwargs["id"] == build_ref_key("github", "acme", "widgets", "branch", "main")
 
     def test_stable_across_calls_commit_independent(self):
-        a = build_ref_key("github", "acme", "widgets", "main")
-        b = build_ref_key("github", "acme", "widgets", "main")
-        assert a == b  # one document per branch, no commit folded in
+        a = build_ref_key("github", "acme", "widgets", "branch", "main")
+        b = build_ref_key("github", "acme", "widgets", "branch", "main")
+        assert a == b  # one document per ref, no commit folded in
+
+    def test_branch_and_tag_same_name_have_distinct_keys(self):
+        branch_key = build_ref_key("github", "acme", "widgets", "branch", "deploy")
+        tag_key = build_ref_key("github", "acme", "widgets", "tag", "deploy")
+        assert branch_key != tag_key  # ref_type distinguishes them
 
 
 class TestWriteIncrementalIndexing:
     def test_incremental_marker_preserves_completed_commit_and_exposes_target(self):
         es = MagicMock()
-        write_incremental_indexing(es, "github", "acme", "widgets", "main",
+        write_incremental_indexing(es, "github", "acme", "widgets", "branch", "main",
                                     completed_commit=OLD, commit_target=NEW)
         doc = _indexed_doc(es)
         assert doc["status"] == "indexing"
         assert doc["git"]["commit"] == OLD  # completed pointer unchanged (INV-006)
         assert doc["git"]["commit_target"] == NEW
         assert doc["mode"] == "delta"
+        assert doc["git"]["ref_type"] == "branch"
         assert es.index.call_args.kwargs["index"] == REFS_INDEX
 
     def test_incremental_marker_first_index_has_no_completed_commit(self):
         es = MagicMock()
-        write_incremental_indexing(es, "github", "acme", "widgets", "main",
+        write_incremental_indexing(es, "github", "acme", "widgets", "branch", "main",
                                     completed_commit=None, commit_target=NEW)
         assert _indexed_doc(es)["git"]["commit"] is None
 
     def test_incremental_marker_carries_prior_counts(self):
         es = MagicMock()
         prior = {"files_count": 12, "lines_count": 340, "git": {"commit_date": "2026-01-01T00:00:00+00:00"}}
-        write_incremental_indexing(es, "github", "acme", "widgets", "main", OLD, NEW, prior=prior)
+        write_incremental_indexing(es, "github", "acme", "widgets", "branch", "main", OLD, NEW, prior=prior)
         doc = _indexed_doc(es)
         assert doc["files_count"] == 12 and doc["lines_count"] == 340
         assert doc["git"]["commit_date"] == "2026-01-01T00:00:00+00:00"
 
     def test_incremental_indexing_carries_routing(self):
         es = MagicMock()
-        write_incremental_indexing(es, "github", "acme", "widgets", "main", OLD, NEW,
+        write_incremental_indexing(es, "github", "acme", "widgets", "branch", "main", OLD, NEW,
                                    index_level="commit", index_suffix="s1")
         doc = _indexed_doc(es)
         assert doc["index_level"] == "commit"
@@ -495,16 +501,29 @@ class TestWriteIncrementalIndexing:
 
     def test_incremental_indexing_default_routing(self):
         es = MagicMock()
-        write_incremental_indexing(es, "github", "acme", "widgets", "main", OLD, NEW)
+        write_incremental_indexing(es, "github", "acme", "widgets", "branch", "main", OLD, NEW)
         doc = _indexed_doc(es)
         assert doc["index_level"] == "repo"
         assert doc["index_suffix"] is None
+
+    def test_tag_ref_type_propagates_to_doc(self):
+        es = MagicMock()
+        write_incremental_indexing(es, "github", "acme", "widgets", "tag", "deploy@1",
+                                    completed_commit=None, commit_target=NEW)
+        doc = _indexed_doc(es)
+        assert doc["git"]["ref_type"] == "tag"
+        assert doc["git"]["ref"] == "deploy@1"
+        # Join doc id must differ from a same-named branch's
+        branch_id = build_ref_key("github", "acme", "widgets", "branch", "deploy@1")
+        tag_id = build_ref_key("github", "acme", "widgets", "tag", "deploy@1")
+        assert es.index.call_args.kwargs["id"] == tag_id
+        assert tag_id != branch_id
 
 
 class TestWriteIncrementalReady:
     def test_incremental_marker_advances_commit_and_clears_target_and_error(self):
         es = MagicMock()
-        write_incremental_ready(es, "github", "acme", "widgets", "main", commit=NEW,
+        write_incremental_ready(es, "github", "acme", "widgets", "branch", "main", commit=NEW,
                                  commit_date_iso="2026-02-02T00:00:00+00:00",
                                  files_count=5, lines_count=99)
         doc = _indexed_doc(es)
@@ -517,7 +536,7 @@ class TestWriteIncrementalReady:
 
     def test_incremental_ready_carries_routing(self):
         es = MagicMock()
-        write_incremental_ready(es, "github", "acme", "widgets", "main", commit=NEW,
+        write_incremental_ready(es, "github", "acme", "widgets", "branch", "main", commit=NEW,
                                 commit_date_iso=None, files_count=1, lines_count=1,
                                 index_level="commit", index_suffix="s1")
         doc = _indexed_doc(es)
@@ -528,8 +547,8 @@ class TestWriteIncrementalReady:
 class TestWriteIncrementalFailed:
     def test_incremental_marker_keeps_status_indexing_and_retains_old_pointer(self):
         es = MagicMock()
-        write_incremental_failed(es, "github", "acme", "widgets", "main", completed_commit=OLD,
-                                  commit_target=NEW, error="boom")
+        write_incremental_failed(es, "github", "acme", "widgets", "branch", "main",
+                                  completed_commit=OLD, commit_target=NEW, error="boom")
         doc = _indexed_doc(es)
         assert doc["status"] == "indexing"  # not advanced -- a failed run leaves the prior state
         assert doc["git"]["commit"] == OLD
@@ -539,12 +558,12 @@ class TestWriteIncrementalFailed:
 
     def test_incremental_marker_error_text_is_bounded(self):
         es = MagicMock()
-        write_incremental_failed(es, "github", "acme", "widgets", "main", OLD, NEW, error="x" * 5000)
+        write_incremental_failed(es, "github", "acme", "widgets", "branch", "main", OLD, NEW, error="x" * 5000)
         assert len(_indexed_doc(es)["error"]) == ERROR_MAX_LEN
 
     def test_incremental_failed_carries_routing(self):
         es = MagicMock()
-        write_incremental_failed(es, "github", "acme", "widgets", "main", OLD, NEW, error="boom",
+        write_incremental_failed(es, "github", "acme", "widgets", "branch", "main", OLD, NEW, error="boom",
                                  index_level="commit", index_suffix="s1")
         doc = _indexed_doc(es)
         assert doc["index_level"] == "commit"
@@ -555,26 +574,26 @@ class TestReadIncrementalRef:
     def test_returns_source(self):
         es = MagicMock()
         es.get.return_value = {"_source": {"status": "ready", "git": {"commit": NEW}}}
-        assert read_incremental_ref(es, "github", "acme", "widgets", "main") == (
+        assert read_incremental_ref(es, "github", "acme", "widgets", "branch", "main") == (
             {"status": "ready", "git": {"commit": NEW}}
         )
-        assert es.get.call_args.kwargs["id"] == build_ref_key("github", "acme", "widgets", "main")
+        assert es.get.call_args.kwargs["id"] == build_ref_key("github", "acme", "widgets", "branch", "main")
 
     def test_missing_returns_none(self):
         es = MagicMock()
         es.get.side_effect = _not_found()
-        assert read_incremental_ref(es, "github", "acme", "widgets", "main") is None
+        assert read_incremental_ref(es, "github", "acme", "widgets", "branch", "main") is None
 
 
 class TestDeleteIncrementalPaths:
     def test_empty_paths_is_noop(self):
         es = MagicMock()
-        delete_incremental_paths(es, "github", "acme", "widgets", "main", [])
+        delete_incremental_paths(es, "github", "acme", "widgets", "branch", "main", [])
         es.delete_by_query.assert_not_called()
 
     def test_scoped_to_exact_ref_key_and_paths(self):
         es = MagicMock()
-        delete_incremental_paths(es, "github", "acme", "widgets", "main", ["a.txt", "b.txt"])
+        delete_incremental_paths(es, "github", "acme", "widgets", "branch", "main", ["a.txt", "b.txt"])
         assert es.delete_by_query.call_count == 2  # files + lines indices
         for call in es.delete_by_query.call_args_list:
             query = call.kwargs["query"]
@@ -582,13 +601,14 @@ class TestDeleteIncrementalPaths:
             assert {"term": {"git.host": "github"}} in filt
             assert {"term": {"git.org": "acme"}} in filt
             assert {"term": {"git.repo": "widgets"}} in filt
+            assert {"term": {"git.ref_type": "branch"}} in filt
             assert {"term": {"git.ref": "main"}} in filt
             assert {"terms": {"file.path": ["a.txt", "b.txt"]}} in filt
 
     def test_missing_index_is_ignored(self):
         es = MagicMock()
         es.delete_by_query.side_effect = _not_found()
-        delete_incremental_paths(es, "github", "acme", "widgets", "main", ["a.txt"])  # no raise
+        delete_incremental_paths(es, "github", "acme", "widgets", "branch", "main", ["a.txt"])  # no raise
 
 
 class TestDeleteIncrementalBranch:
@@ -602,6 +622,7 @@ class TestDeleteIncrementalBranch:
             assert {"term": {"git.host": "github"}} in filt
             assert {"term": {"git.org": "acme"}} in filt
             assert {"term": {"git.repo": "widgets"}} in filt
+            assert {"term": {"git.ref_type": "branch"}} in filt
             assert {"term": {"git.ref": "main"}} in filt
             assert not any("ref_key" in str(f) for f in filt)
 

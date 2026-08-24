@@ -425,7 +425,7 @@ incrementally as the HEAD moves (`"delta"`). Controls whether `since` and
 - Default: `"snapshot"`
 - Validation:
   - Must be one of: `"snapshot"`, `"delta"`
-  - `"delta"` is only valid when `git.ref_type` is `"branch"`
+  - `"delta"` is only valid when `git.ref_type` is `"branch"` or `"tag"`
   - `"delta"` cannot be combined with `since` or `retain`
   - `"delta"` cannot be combined with `index.level: commit`
 

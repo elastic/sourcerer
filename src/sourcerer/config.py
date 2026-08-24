@@ -283,9 +283,9 @@ class Selector:
     levels: tuple[str, ...] = ()           # numeric levels shared by the versioned match patterns
     schedule: Schedule | None = None       # per-source schedule override (sources[i].schedule)
     # sources[i].mode: the indexing mode for this source -- "snapshot" (default, commit-addressed)
-    # or "delta" (ref-addressed, branch-only). Controls whether since/retain apply and routes
+    # or "delta" (ref-addressed, branch or tag). Controls whether since/retain apply and routes
     # the unit to the incremental delta-index path instead of the snapshot flow.
-    mode: str = "snapshot"                 # "snapshot" (default) or "delta" (branch-only)
+    mode: str = "snapshot"                 # "snapshot" (default) or "delta" (branch or tag)
     # sources[i].index routing (see specs/sourcerer-yml.md): which physical files/lines index this
     # source's content docs land in. Per-source, so two sources sharing a (host, org, repo) may
     # route differently.
@@ -500,10 +500,10 @@ def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
         index_level, index_suffix = _parse_index(raw["index"], ctx)
 
     if mode == "delta":
-        if ref_type != "branch":
+        if ref_type not in ("branch", "tag"):
             raise ValueError(f"{ctx} mode: 'delta' is only valid for "
-                             f"git.ref_type: branch (got ref_type {ref_type!r})")
-        # A delta-mode branch maintains a single mutable ref-addressed view with no per-commit
+                             f"git.ref_type: branch or tag (got ref_type {ref_type!r})")
+        # A delta-mode ref maintains a single mutable ref-addressed view with no per-commit
         # history for retention to trim and no inclusion floor to apply -- both since and retain
         # are meaningless here (see specs/incremental-indexing.md).
         if raw.get("since") is not None:

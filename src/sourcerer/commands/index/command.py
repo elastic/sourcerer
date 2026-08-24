@@ -259,17 +259,18 @@ def index_incremental_branch_in_dir(
     reporter: ProgressReporter | None = None,
     unit: Unit | None = None,
 ) -> None:
-    """Advance one incremental (ref-addressed) branch source in an already-cloned `repo_dir`.
+    """Advance one incremental (ref-addressed) branch or tag source in an already-cloned
+    `repo_dir`.
 
-    Reads the branch's prior completed commit (its refs join doc, `_id = ref_key`), checks out
-    the fetched branch tip, and either:
+    Reads the ref's prior completed commit (its refs join doc, `_id = ref_key`), checks out
+    the fetched tip, and either:
       - does nothing (already at the completed commit and not `--force`),
       - does a full rebuild (first index, `--force`, or a missing diff base -- INV-007): delete
-        the whole branch namespace, then index every currently-tracked path, or
+        the whole ref namespace, then index every currently-tracked path, or
       - does a delta update: `git diff --name-status` (via `plan_changes`) between the prior and
         new commit, deleting only the paths git reports removed/changed and (re)indexing only the
-        paths git reports added/changed (INV-008 -- scoped by the exact (host,org,repo,ref) tuple,
-        never a whole namespace sweep).
+        paths git reports added/changed (INV-008 -- scoped by the exact
+        (host,org,repo,ref_type,ref) 5-tuple, never a whole namespace sweep).
     The refs join doc is published `indexing` before any mutation and `complete` only after the
     content deletes/indexes and a refresh all succeed (INV-006); a raised exception instead
     records `write_incremental_failed` and leaves the completed pointer untouched, then
@@ -280,12 +281,17 @@ def index_incremental_branch_in_dir(
     if unit is None:
         unit = Unit(host=host, org=org, repo=repo, ref=branch, kind="branch", mode="delta")
 
+    ref_type = unit.kind  # "branch" or "tag"
+
     reporter.set_stage(unit, "checkout")
-    checkout_branch(repo_dir, branch)
+    if ref_type == "tag":
+        checkout_ref(repo_dir, branch)
+    else:
+        checkout_branch(repo_dir, branch)
     new_sha = resolve_commit(repo_dir)
     commit_date_iso = commit_date(repo_dir)
 
-    prior = read_incremental_ref(es, host, org, repo, branch)
+    prior = read_incremental_ref(es, host, org, repo, ref_type, branch)
     old_sha = None if force else (prior.get("git", {}).get("commit") if prior else None)
 
     level = unit.index_level
@@ -302,7 +308,7 @@ def index_incremental_branch_in_dir(
         return
 
     reporter.set_stage(unit, "indexing")
-    write_incremental_indexing(es, host, org, repo, branch, completed_commit=old_sha,
+    write_incremental_indexing(es, host, org, repo, ref_type, branch, completed_commit=old_sha,
                                commit_target=new_sha, prior=prior,
                                index_level=level, index_suffix=suffix)
     try:
@@ -312,52 +318,53 @@ def index_incremental_branch_in_dir(
             full_rebuild = plan.base_missing
 
         if full_rebuild:
-            delete_incremental_branch(es, host, org, repo, branch, index_level=level, index_suffix=suffix)
+            delete_incremental_branch(es, host, org, repo, branch,
+                                      ref_type=ref_type, index_level=level, index_suffix=suffix)
             reporter.set_total_files(unit, count_tracked_files(repo_dir))
             indexed_files, indexed_lines = index_incremental_paths(
                 es, host, org, repo, repo_dir, branch, None,
                 on_progress=lambda f, l: reporter.update_counts(unit, f, l),
-                index_level=level, index_suffix=suffix,
+                index_level=level, index_suffix=suffix, ref_type=ref_type,
             )
         else:
-            delete_incremental_paths(es, host, org, repo, branch, plan.delete_paths,
+            delete_incremental_paths(es, host, org, repo, ref_type, branch, plan.delete_paths,
                                      index_level=level, index_suffix=suffix)
             reporter.set_total_files(unit, len(plan.index_paths))
             indexed_files, indexed_lines = index_incremental_paths(
                 es, host, org, repo, repo_dir, branch, plan.index_paths,
                 on_progress=lambda f, l: reporter.update_counts(unit, f, l),
-                index_level=level, index_suffix=suffix,
+                index_level=level, index_suffix=suffix, ref_type=ref_type,
             )
 
         refresh_incremental_content(es, host, org, repo, index_level=level, index_suffix=suffix)
         files_count, lines_count = count_incremental_branch_docs(
-            es, host, org, repo, branch, index_level=level, index_suffix=suffix,
+            es, host, org, repo, branch, ref_type=ref_type, index_level=level, index_suffix=suffix,
         )
         # Mode-switch: flip any complete snapshot markers for this (host,org,repo,ref) to
         # "stale" BEFORE publishing the incremental join doc as "complete". This ensures the
         # two-complete-docs fan-out window (one snapshot + one incremental marker both matching
-        # LOOKUP JOIN ON git.ref) never opens. Stale content is reclaimed by prune.
+        # LOOKUP JOIN ON git.ref, git.ref_type) never opens. Stale content is reclaimed by prune.
         mark_snapshot_markers_stale(es, host, org, repo, branch)
-        write_incremental_ready(es, host, org, repo, branch, new_sha, commit_date_iso,
+        write_incremental_ready(es, host, org, repo, ref_type, branch, new_sha, commit_date_iso,
                                 files_count, lines_count,
                                 index_level=level, index_suffix=suffix)
         # Migration cleanup (write-new -> flip join doc -> delete-old): now that the join doc is
-        # complete and points at the new routing, delete this branch's docs from the old physical
-        # index.  Scoped to the exact (host,org,repo,ref) 4-term filter so a sibling source that
-        # still lives in the old index is never touched.  A crash between the ready write above
-        # and this delete leaves stale-location incremental docs in the old index; prune's
-        # incremental stale-location sweep (Class D-I) reclaims them.
+        # complete and points at the new routing, delete this ref's docs from the old physical
+        # index. Scoped to the exact (host,org,repo,ref_type,ref) 5-term filter so a sibling
+        # source that still lives in the old index is never touched. A crash between the ready
+        # write above and this delete leaves stale-location incremental docs in the old index;
+        # prune's incremental stale-location sweep (Class D-I) reclaims them.
         if routing_changed:
             old_level, old_suffix = old_routing
             delete_incremental_branch(es, host, org, repo, branch,
-                                      index_level=old_level, index_suffix=old_suffix)
+                                      ref_type=ref_type, index_level=old_level, index_suffix=old_suffix)
     except KeyboardInterrupt:
-        write_incremental_failed(es, host, org, repo, branch, completed_commit=old_sha,
+        write_incremental_failed(es, host, org, repo, ref_type, branch, completed_commit=old_sha,
                                  commit_target=new_sha, error="interrupted", prior=prior,
                                  index_level=level, index_suffix=suffix)
         raise
     except Exception as e:
-        write_incremental_failed(es, host, org, repo, branch, completed_commit=old_sha,
+        write_incremental_failed(es, host, org, repo, ref_type, branch, completed_commit=old_sha,
                                  commit_target=new_sha, error=str(e), prior=prior,
                                  index_level=level, index_suffix=suffix)
         raise
@@ -621,11 +628,11 @@ def run_config(
             (host, org, repo), group = item
             clone_url = hosts[host].clone_url(org, repo)
 
-            # Incremental branch units are split from the snapshot pre-clone/skip/retention flow
-            # entirely: no cohort retention, no `since` history walk, no commit-addressed content
-            # reuse -- each is a standalone two-phase delta update against its own prior state
-            # (see index_incremental_branch_in_dir). Processed here, before the snapshot-only
-            # `group` continues below with incremental units filtered out.
+            # Delta-mode units (branches and tags) are split from the snapshot pre-clone/skip/
+            # retention flow entirely: no cohort retention, no `since` history walk, no
+            # commit-addressed content reuse -- each is a standalone two-phase delta update
+            # against its own prior state (see index_incremental_branch_in_dir). Processed here,
+            # before the snapshot-only `group` continues below with delta units filtered out.
             incremental_units = [u for u in group if u.mode == "delta"]
             group = [u for u in group if u.mode != "delta"]
             for unit in incremental_units:

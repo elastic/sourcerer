@@ -52,7 +52,7 @@ configuration:
     | FORK
         ( WHERE git.commit IS NOT NULL )
         ( WHERE git.ref IS NOT NULL AND git.commit IS NULL
-            | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref )
+            | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref, git.ref_type )
 
     // Glob match (* and **) on file.path
     | EVAL _fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")

@@ -299,11 +299,11 @@ def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, 
             pass
 
     # Class D-I: stale-location incremental content (ref-addressed, no git.commit). Mirrors Class D
-    # but keyed on (host, org, repo, ref) tuples -- the commit-keyed filter above cannot match
-    # incremental docs whose git.commit is absent.
+    # but keyed on (host, org, repo, ref_type, ref) tuples -- the commit-keyed filter above cannot
+    # match incremental docs whose git.commit is absent.
     for index_name, ref_tuples in plan.orphan_stale_incremental.items():
         stale_dropped += len(ref_tuples)
-        for (host, org, repo, ref) in ref_tuples:
+        for (host, org, repo, ref_type, ref) in ref_tuples:
             try:
                 es.delete_by_query(
                     index=index_name,
@@ -311,6 +311,7 @@ def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, 
                         {"term": {"git.host": host}},
                         {"term": {"git.org": org}},
                         {"term": {"git.repo": repo}},
+                        {"term": {"git.ref_type": ref_type}},
                         {"term": {"git.ref": ref}},
                     ]}},
                     conflicts="proceed",

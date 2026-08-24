@@ -150,6 +150,7 @@ def build_incremental_file_doc(
     host: str,
     org: str,
     repo: str,
+    ref_type: str,
     ref: str,
     rel_path: str,
     abs_path: pathlib.Path,
@@ -159,9 +160,11 @@ def build_incremental_file_doc(
     target_path: str | None = None,
     target_size: int | None = None,
 ) -> tuple[str, dict]:
-    """Ref-addressed (incremental) file doc: carries `git.ref` but no `git.commit`; `_id` is
-    stable across commits (derived from the branch name, not the commit), so a modified file's
-    doc overwrites in place on the next HEAD advance rather than minting a new id."""
+    """Ref-addressed (incremental) file doc: carries `git.ref` and `git.ref_type` but no
+    `git.commit`; `_id` is stable across commits (derived from ref_type + ref name, not the
+    commit SHA), so a modified file's doc overwrites in place on the next HEAD advance rather
+    than minting a new id. Including ref_type in the id keeps a same-named branch and tag in
+    delta mode in non-overlapping id spaces."""
     p = pathlib.PurePosixPath(rel_path)
     directory = "" if str(p.parent) == "." else str(p.parent)
     extension = p.suffix.lstrip(".") or None
@@ -198,10 +201,11 @@ def build_incremental_file_doc(
             "org": org,
             "repo": repo,
             "ref": ref,
+            "ref_type": ref_type,
         },
         "file": file_fields,
     }
-    _id = make_doc_id(host, org, repo, "branch", ref, rel_path)
+    _id = make_doc_id(host, org, repo, ref_type, ref, rel_path)
     return _id, doc
 
 
@@ -209,6 +213,7 @@ def iter_incremental_line_docs(
     host: str,
     org: str,
     repo: str,
+    ref_type: str,
     ref: str,
     rel_path: str,
     content: str,
@@ -218,7 +223,8 @@ def iter_incremental_line_docs(
     target_size: int | None = None,
     attributes: list[str] | None = None,
 ) -> Iterator[tuple[str, dict]]:
-    """Ref-addressed (incremental) line docs -- same shape as `build_incremental_file_doc`."""
+    """Ref-addressed (incremental) line docs -- same shape as `build_incremental_file_doc`:
+    carries `git.ref` and `git.ref_type` but no `git.commit`."""
     p = pathlib.PurePosixPath(rel_path)
     directory = "" if str(p.parent) == "." else str(p.parent)
     extension = p.suffix.lstrip(".") or None
@@ -242,11 +248,12 @@ def iter_incremental_line_docs(
             "org": org,
             "repo": repo,
             "ref": ref,
+            "ref_type": ref_type,
         },
         "file": file_fields,
     }
     for line_num, line_content in enumerate(content.splitlines(), start=1):
-        _id = make_doc_id(host, org, repo, "branch", ref, rel_path, str(line_num))
+        _id = make_doc_id(host, org, repo, ref_type, ref, rel_path, str(line_num))
         yield _id, {**base, "line": {"number": line_num, "content": line_content}}
 
 
@@ -273,14 +280,17 @@ def _init_worker(
 
 
 def _init_worker_incremental(
-    host: str, org: str, repo: str, ref: str, repo_dir: str, symlink_paths: frozenset[str] = frozenset(),
+    host: str, org: str, repo: str, ref_type: str, ref: str, repo_dir: str,
+    symlink_paths: frozenset[str] = frozenset(),
     index_level: str = "repo", index_suffix: str | None = None,
 ) -> None:
-    """Same as `_init_worker`, but for the incremental (ref-addressed) path: `ref` replaces
-    `commit_sha` and `mode` routes `_build_one_file_actions` to the incremental doc builders."""
+    """Same as `_init_worker`, but for the incremental (ref-addressed) path: `ref_type`+`ref`
+    replace `commit_sha` and `mode` routes `_build_one_file_actions` to the incremental doc
+    builders."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _WORKER_CTX.update(
-        host=host, org=org, repo=repo, ref=ref, repo_dir=pathlib.Path(repo_dir),
+        host=host, org=org, repo=repo, ref_type=ref_type, ref=ref,
+        repo_dir=pathlib.Path(repo_dir),
         symlink_paths=symlink_paths, index_level=index_level, index_suffix=index_suffix,
         mode="delta",
     )
@@ -305,7 +315,9 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
     ctx = _WORKER_CTX
     incremental = ctx.get("mode", "snapshot") == "delta"
     host, org, repo = ctx["host"], ctx["org"], ctx["repo"]
-    commit_sha = ctx.get("ref") if incremental else ctx["commit_sha"]
+    ref_type = ctx.get("ref_type", "branch")
+    ref = ctx.get("ref")
+    commit_sha = ref if incremental else ctx["commit_sha"]
     level, suffix = ctx.get("index_level", "repo"), ctx.get("index_suffix")
     abs_path = ctx["repo_dir"] / rel_path
     # Incremental content is ref-addressed (no commit-level index name); the physical index name
@@ -351,26 +363,42 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
     else:
         git_target_path = None
         git_target_size = None
-    doc_builder = build_incremental_file_doc if incremental else build_file_doc
-    file_id, file_doc = doc_builder(
-        host, org, repo, commit_sha, rel_path, abs_path, binary=binary,
-        is_symlink=True if is_git_symlink else None,
-        target_path=git_target_path,
-        target_size=git_target_size,
-    )
+    if incremental:
+        file_id, file_doc = build_incremental_file_doc(
+            host, org, repo, ref_type, ref, rel_path, abs_path, binary=binary,
+            is_symlink=True if is_git_symlink else None,
+            target_path=git_target_path,
+            target_size=git_target_size,
+        )
+    else:
+        file_id, file_doc = build_file_doc(
+            host, org, repo, commit_sha, rel_path, abs_path, binary=binary,
+            is_symlink=True if is_git_symlink else None,
+            target_path=git_target_path,
+            target_size=git_target_size,
+        )
     actions = [{"_index": f_index, "_id": file_id, "_source": file_doc}]
     if raw is None or binary:
         return actions
     content = raw.decode("utf-8", errors="surrogateescape")
     ff = file_doc["file"]
-    line_iter = iter_incremental_line_docs if incremental else iter_line_docs
-    for line_id, line_doc in line_iter(
-        host, org, repo, commit_sha, rel_path, content,
-        size=ff["size"],
-        target_path=ff.get("target_path"),
-        target_size=ff.get("target_size"),
-        attributes=ff.get("attributes"),
-    ):
+    if incremental:
+        line_docs = iter_incremental_line_docs(
+            host, org, repo, ref_type, ref, rel_path, content,
+            size=ff["size"],
+            target_path=ff.get("target_path"),
+            target_size=ff.get("target_size"),
+            attributes=ff.get("attributes"),
+        )
+    else:
+        line_docs = iter_line_docs(
+            host, org, repo, commit_sha, rel_path, content,
+            size=ff["size"],
+            target_path=ff.get("target_path"),
+            target_size=ff.get("target_size"),
+            attributes=ff.get("attributes"),
+        )
+    for line_id, line_doc in line_docs:
         actions.append({"_index": l_index, "_id": line_id, "_source": line_doc})
     return actions
 
@@ -478,8 +506,9 @@ def index_incremental_paths(
     on_progress: Callable[[int, int], None] | None = None,
     index_level: str = "repo",
     index_suffix: str | None = None,
+    ref_type: str = "branch",
 ) -> tuple[int, int]:
-    """Index a set of paths for an incremental (ref-addressed) branch source.
+    """Index a set of paths for an incremental (ref-addressed) branch or tag source.
 
     `rel_paths=None` walks the whole checked-out tree (first index / full rebuild, e.g. when a
     diff base is unavailable). A given `rel_paths` list indexes only those paths -- the delta
@@ -498,7 +527,7 @@ def index_incremental_paths(
     with ProcessPoolExecutor(
         max_workers=max(1, t.index_workers),
         initializer=_init_worker_incremental,
-        initargs=(host, org, repo, ref, str(repo_dir), symlink_paths, index_level, index_suffix),
+        initargs=(host, org, repo, ref_type, ref, str(repo_dir), symlink_paths, index_level, index_suffix),
     ) as executor:
         def _batched(items: Iterator[str], n: int) -> Iterator[list[str]]:
             it = iter(items)

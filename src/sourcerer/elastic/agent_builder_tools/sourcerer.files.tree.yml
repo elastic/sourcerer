@@ -51,7 +51,7 @@ configuration:
     | FORK
         ( WHERE git.commit IS NOT NULL )
         ( WHERE git.ref IS NOT NULL AND git.commit IS NULL
-            | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref )
+            | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref, git.ref_type )
 
     // Split each file path into its segments
     | EVAL _segs = SPLIT(file.path, "/")
