@@ -401,6 +401,7 @@ def write_indexing_marker(
     commit_date_iso: str | None,
     index_level: str = "repo",
     index_suffix: str | None = None,
+    ref_pattern: str | None = None,
 ) -> None:
     """Write a status:'indexing' marker for a ref that is about to be ingested.
 
@@ -423,6 +424,7 @@ def write_indexing_marker(
             "org": org,
             "repo": repo,
             "ref": ref,
+            "ref_pattern": ref_pattern if ref_pattern is not None else ref,
             "ref_type": ref_type,
             "commit": commit_sha,
             "commit_date": commit_date_iso,
@@ -452,6 +454,7 @@ def write_ref_marker(
     index_level: str = "repo",
     index_suffix: str | None = None,
     refresh: bool = False,
+    ref_pattern: str | None = None,
 ) -> None:
     # (ref, ref_type) replaces the old git.branch/git.tag fields: those were write-only and
     # fully reconstructable as `git.ref filtered by git.ref_type`. git.tag was an array that
@@ -471,6 +474,7 @@ def write_ref_marker(
             "org": org,
             "repo": repo,
             "ref": ref,
+            "ref_pattern": ref_pattern if ref_pattern is not None else ref,
             "ref_type": ref_type,
             "commit": commit_sha,
             "commit_date": commit_date_iso,
@@ -551,16 +555,16 @@ def pre_clone_skip(
 # constructor even though git.ref_key is no longer a stored field -- the id itself remains the
 # stable overwrite key for each delta-mode ref.
 
-ERROR_MAX_LEN = 2000  # bound stored failure text so a giant git/ES error can't bloat the doc
-
 
 def read_incremental_ref(
-    es: Elasticsearch, host: str, org: str, repo: str, ref_type: str, ref: str,
+    es: Elasticsearch, host: str, org: str, repo: str, ref_type: str, ref_pattern: str,
 ) -> dict | None:
     """The ref's incremental join doc `_source`, or None if never indexed. A real-time GET
-    (by `_id = ref_key`), so it reflects the last write even without a refresh."""
+    (by `_id = build_ref_key(..., ref_pattern)` where `ref_pattern` is the stream identity
+    stored as `git.ref_pattern`). For delta-tag streams this is the pattern string
+    (e.g. "deploy@{major}"); for all other refs it equals the concrete ref name."""
     try:
-        return es.get(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref))["_source"]
+        return es.get(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref_pattern))["_source"]
     except NotFoundError:
         return None
 
@@ -575,6 +579,7 @@ def _build_incremental_join_doc(
     repo: str,
     ref_type: str,
     ref: str,
+    ref_pattern: str,
     *,
     status: str,
     commit: str | None,
@@ -584,17 +589,20 @@ def _build_incremental_join_doc(
     lines_count: int = 0,
     indexed_at: str | None = None,
     indexing_started_at: str | None = None,
-    failed_at: str | None = None,
-    error: str | None = None,
     index_level: str = "repo",
     index_suffix: str | None = None,
 ) -> dict:
+    """Build an incremental join doc. `ref` is the CONCRETE resolved ref (e.g. the newest
+    matching tag for a delta-tag stream, or the branch name for a delta branch). `ref_pattern`
+    is the STREAM IDENTITY: the literal match-pattern string for a delta-tag stream, or equal to
+    `ref` for all other refs. Stored as `git.ref_pattern` and doubles as the stable `_id` key."""
     return {
         "git": {
             "host": host,
             "org": org,
             "repo": repo,
             "ref": ref,
+            "ref_pattern": ref_pattern,
             "ref_type": ref_type,
             "commit": commit,
             "commit_target": commit_target,
@@ -606,8 +614,6 @@ def _build_incremental_join_doc(
         "lines_count": lines_count,
         "indexed_at": indexed_at,
         "indexing_started_at": indexing_started_at,
-        "failed_at": failed_at,
-        "error": error[:ERROR_MAX_LEN] if error else None,
         "index_level": index_level,
         "index_suffix": index_suffix,
     }
@@ -622,6 +628,7 @@ def write_incremental_indexing(
     ref: str,
     completed_commit: str | None,
     commit_target: str,
+    ref_pattern: str | None = None,
     prior: dict | None = None,
     refresh: bool = False,
     index_level: str = "repo",
@@ -630,11 +637,16 @@ def write_incremental_indexing(
     """Publish `status: indexing`: the completed pointer (`git.commit`) stays at the LAST
     completed SHA (or None on a first index) while `git.commit_target` advertises the candidate
     SHA the run is advancing to. A failed run never overwrites `git.commit` with `commit_target`
-    (INV-006) -- only `write_incremental_ready` does that, after delete+index+refresh succeed."""
+    (INV-006) -- only `write_incremental_ready` does that, after delete+index+refresh succeed.
+
+    `ref` is the CONCRETE resolved ref (git.ref payload); `ref_pattern` is the STREAM IDENTITY
+    stored as `git.ref_pattern` and used as the doc _id. For delta-tag streams these differ
+    (e.g. ref="deploy@1788000000", ref_pattern="deploy@{major}"). Defaults to `ref`."""
+    ref_pattern = ref_pattern or ref
     prior = prior or {}
     pg = prior.get("git", {})
     doc = _build_incremental_join_doc(
-        host, org, repo, ref_type, ref,
+        host, org, repo, ref_type, ref, ref_pattern,
         status="indexing",
         commit=completed_commit,
         commit_target=commit_target,
@@ -643,12 +655,10 @@ def write_incremental_indexing(
         lines_count=prior.get("lines_count", 0),
         indexed_at=prior.get("indexed_at"),
         indexing_started_at=_now_iso(),
-        failed_at=prior.get("failed_at"),
-        error=prior.get("error"),
         index_level=index_level,
         index_suffix=index_suffix,
     )
-    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref), document=doc, refresh=refresh)
+    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref_pattern), document=doc, refresh=refresh)
 
 
 def write_incremental_ready(
@@ -662,15 +672,20 @@ def write_incremental_ready(
     commit_date_iso: str | None,
     files_count: int,
     lines_count: int,
+    ref_pattern: str | None = None,
     refresh: bool = True,
     index_level: str = "repo",
     index_suffix: str | None = None,
 ) -> None:
     """Publish `status: complete` at the NEW completed commit, clearing `commit_target` and any
     prior failure fields. This is the pointer-advancing publication boundary (INV-006): callers
-    must delete+index+refresh the content indices FIRST, then call this."""
+    must delete+index+refresh the content indices FIRST, then call this.
+
+    `ref` is the CONCRETE resolved ref (git.ref payload); `ref_pattern` is the STREAM IDENTITY
+    (stored as `git.ref_pattern`, used as the doc _id). Defaults to `ref`."""
+    ref_pattern = ref_pattern or ref
     doc = _build_incremental_join_doc(
-        host, org, repo, ref_type, ref,
+        host, org, repo, ref_type, ref, ref_pattern,
         status="complete",
         commit=commit,
         commit_target=None,
@@ -679,12 +694,10 @@ def write_incremental_ready(
         lines_count=lines_count,
         indexed_at=_now_iso(),
         indexing_started_at=None,
-        failed_at=None,
-        error=None,
         index_level=index_level,
         index_suffix=index_suffix,
     )
-    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref), document=doc, refresh=refresh)
+    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref_pattern), document=doc, refresh=refresh)
 
 
 def write_incremental_failed(
@@ -697,32 +710,34 @@ def write_incremental_failed(
     completed_commit: str | None,
     commit_target: str | None,
     error: str,
+    ref_pattern: str | None = None,
     prior: dict | None = None,
     refresh: bool = False,
     index_level: str = "repo",
     index_suffix: str | None = None,
 ) -> None:
-    """Record a failed update WITHOUT advancing the completed pointer: status stays `indexing`,
-    `git.commit` remains the last completed SHA, and a bounded `error`/`failed_at` are stored for
-    diagnosis (INV-006). The next run retries old -> current and clears these on success."""
+    """Record a failed update WITHOUT advancing the completed pointer: status becomes `failed`,
+    `git.commit` remains the last completed SHA (INV-006). The next run retries old -> current.
+
+    `ref` is the CONCRETE resolved ref (git.ref payload); `ref_pattern` is the STREAM IDENTITY
+    (stored as `git.ref_pattern`, used as the doc _id). Defaults to `ref`."""
+    ref_pattern = ref_pattern or ref
     prior = prior or {}
     pg = prior.get("git", {})
     doc = _build_incremental_join_doc(
-        host, org, repo, ref_type, ref,
-        status="indexing",
+        host, org, repo, ref_type, ref, ref_pattern,
+        status="failed",
         commit=completed_commit,
         commit_target=commit_target,
         commit_date_iso=pg.get("commit_date"),
         files_count=prior.get("files_count", 0),
         lines_count=prior.get("lines_count", 0),
         indexed_at=prior.get("indexed_at"),
-        indexing_started_at=prior.get("indexing_started_at") or _now_iso(),
-        failed_at=_now_iso(),
-        error=error,
+        indexing_started_at=None,
         index_level=index_level,
         index_suffix=index_suffix,
     )
-    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref), document=doc, refresh=refresh)
+    es.index(index=REFS_INDEX, id=build_ref_key(host, org, repo, ref_type, ref_pattern), document=doc, refresh=refresh)
 
 
 def _delete_by_query_sync(es: Elasticsearch, index: str, query: dict, refresh: bool) -> None:
@@ -750,16 +765,16 @@ def delete_incremental_paths(
     org: str,
     repo: str,
     ref_type: str,
-    ref: str,
+    ref_pattern: str,
     paths,
     index_level: str = "repo",
     index_suffix: str | None = None,
     refresh: bool = False,
 ) -> None:
     """Synchronously delete the file and line docs for `paths` on this exact ref. Scoped by
-    the exact (git.host, git.org, git.repo, git.ref_type, git.ref) 5-term filter (INV-008:
-    one ref's docs can never bleed into another's) plus a `file.path` terms filter, never a
-    wildcard. A no-op for an empty path set."""
+    the exact (git.host, git.org, git.repo, git.ref_type, git.ref_pattern) 5-term filter
+    (INV-008: one ref's docs can never bleed into another's) plus a `file.path` terms filter.
+    A no-op for an empty path set."""
     paths = list(paths)
     if not paths:
         return
@@ -770,7 +785,7 @@ def delete_incremental_paths(
                 {"term": {"git.org": org}},
                 {"term": {"git.repo": repo}},
                 {"term": {"git.ref_type": ref_type}},
-                {"term": {"git.ref": ref}},
+                {"term": {"git.ref_pattern": ref_pattern}},
                 {"terms": {"file.path": paths}},
             ]
         }
@@ -787,22 +802,22 @@ def delete_incremental_branch(
     host: str,
     org: str,
     repo: str,
-    ref: str,
+    ref_pattern: str,
     ref_type: str = "branch",
     index_level: str = "repo",
     index_suffix: str | None = None,
     refresh: bool = False,
 ) -> None:
     """Delete EVERY incremental content doc for this ref (full namespace), scoped by the exact
-    (git.host, git.org, git.repo, git.ref_type, git.ref) 5-term filter (INV-008). Used for
-    the initial index and the missing-diff-base rebuild (INV-007). `ref_type` defaults to
-    "branch" for back-compat with existing callers that pass `ref` positionally."""
+    (git.host, git.org, git.repo, git.ref_type, git.ref_pattern) 5-term filter (INV-008). Used
+    for the initial index and the missing-diff-base rebuild (INV-007). `ref_type` defaults to
+    "branch" for back-compat with existing callers that pass `ref_pattern` positionally."""
     query = {"bool": {"filter": [
         {"term": {"git.host": host}},
         {"term": {"git.org": org}},
         {"term": {"git.repo": repo}},
         {"term": {"git.ref_type": ref_type}},
-        {"term": {"git.ref": ref}},
+        {"term": {"git.ref_pattern": ref_pattern}},
     ]}}
     for index in (
         files_index(host, org, repo, None, index_level, index_suffix),
@@ -812,21 +827,20 @@ def delete_incremental_branch(
 
 
 def count_incremental_branch_docs(
-    es: Elasticsearch, host: str, org: str, repo: str, ref: str,
+    es: Elasticsearch, host: str, org: str, repo: str, ref_pattern: str,
     ref_type: str = "branch",
     index_level: str = "repo", index_suffix: str | None = None,
 ) -> tuple[int, int]:
     """Authoritative (files, lines) totals for a ref's current incremental view, counted by
-    exact (git.host, git.org, git.repo, git.ref_type, git.ref). Call AFTER refreshing the
-    content indices so counts reflect the just-applied deletes and indexes -- these become the
-    ready marker's files_count/lines_count. Returns 0 for an index that does not exist yet.
-    `ref_type` defaults to "branch" for back-compat with existing callers."""
+    exact (git.host, git.org, git.repo, git.ref_type, git.ref_pattern). Call AFTER refreshing
+    the content indices so counts reflect the just-applied deletes and indexes -- these become the
+    ready marker's files_count/lines_count. Returns 0 for an index that does not exist yet."""
     query = {"bool": {"filter": [
         {"term": {"git.host": host}},
         {"term": {"git.org": org}},
         {"term": {"git.repo": repo}},
         {"term": {"git.ref_type": ref_type}},
-        {"term": {"git.ref": ref}},
+        {"term": {"git.ref_pattern": ref_pattern}},
     ]}}
 
     def _count(index: str) -> int:
@@ -880,16 +894,16 @@ def apply_content_index_mapping(es: Elasticsearch, files_mapping: dict, lines_ma
 
 
 def stale_snapshot_markers_for_ref(
-    es: Elasticsearch, host: str, org: str, repo: str, ref: str,
+    es: Elasticsearch, host: str, org: str, repo: str, ref_pattern: str,
 ) -> list[dict]:
     """Return any complete snapshot ref-name markers (mode: "snapshot", status: "complete")
-    for (host, org, repo, ref). Used by the incremental index path to detect and mark stale snapshot
-    markers left behind by a mode switch from snapshot to incremental."""
+    for (host, org, repo, ref_pattern). Used by the incremental index path to detect and mark stale
+    snapshot markers left behind by a mode switch from snapshot to incremental."""
     query = {"bool": {"filter": [
         {"term": {"git.host": host}},
         {"term": {"git.org": org}},
         {"term": {"git.repo": repo}},
-        {"term": {"git.ref": ref}},
+        {"term": {"git.ref_pattern": ref_pattern}},
         {"term": {"status": "complete"}},
         {"term": {"mode": "snapshot"}},
     ]}}
@@ -901,17 +915,17 @@ def stale_snapshot_markers_for_ref(
 
 
 def mark_snapshot_markers_stale(
-    es: Elasticsearch, host: str, org: str, repo: str, ref: str,
+    es: Elasticsearch, host: str, org: str, repo: str, ref_pattern: str,
 ) -> int:
-    """Flip any complete snapshot markers for this (host, org, repo, ref) to status:"stale",
-    making them invisible to all content tools without deleting them immediately. Content
-    reclamation is deferred to the prune command's stale-marker step. Returns the count of
-    markers flipped.
+    """Flip any complete snapshot markers for this (host, org, repo, ref_pattern) to
+    status:"stale", making them invisible to all content tools without deleting them immediately.
+    Content reclamation is deferred to the prune command's stale-marker step. Returns the count
+    of markers flipped.
 
     ORDER: callers must call this BEFORE publishing the incremental join doc as "complete",
     so the two-complete-docs fan-out window (one snapshot + one incremental, both reachable by
-    the LOOKUP JOIN ON git.ref) never opens."""
-    markers = stale_snapshot_markers_for_ref(es, host, org, repo, ref)
+    the LOOKUP JOIN ON git.ref_pattern) never opens."""
+    markers = stale_snapshot_markers_for_ref(es, host, org, repo, ref_pattern)
     for hit in markers:
         try:
             es.update(index=REFS_INDEX, id=hit["_id"], doc={"status": "stale"})

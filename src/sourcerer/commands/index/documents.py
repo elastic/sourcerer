@@ -151,7 +151,7 @@ def build_incremental_file_doc(
     org: str,
     repo: str,
     ref_type: str,
-    ref: str,
+    ref_pattern: str,
     rel_path: str,
     abs_path: pathlib.Path,
     *,
@@ -160,11 +160,12 @@ def build_incremental_file_doc(
     target_path: str | None = None,
     target_size: int | None = None,
 ) -> tuple[str, dict]:
-    """Ref-addressed (incremental) file doc: carries `git.ref` and `git.ref_type` but no
-    `git.commit`; `_id` is stable across commits (derived from ref_type + ref name, not the
-    commit SHA), so a modified file's doc overwrites in place on the next HEAD advance rather
-    than minting a new id. Including ref_type in the id keeps a same-named branch and tag in
-    delta mode in non-overlapping id spaces."""
+    """Ref-addressed (incremental) file doc: carries `git.ref_pattern` (stream identity) but no
+    `git.ref` (concrete) or `git.commit`. `git.ref` is intentionally omitted: because content
+    `_id` is keyed on `ref_pattern`, a delta run only re-writes CHANGED paths, so after a tag
+    stream promotion unchanged paths would retain a stale `git.ref`. The concrete ref lives only
+    on the refs join doc (written wholesale each run). `_id` is keyed on `ref_pattern` so that
+    delta-tag stream promotions overwrite the same doc in place rather than minting a new id."""
     p = pathlib.PurePosixPath(rel_path)
     directory = "" if str(p.parent) == "." else str(p.parent)
     extension = p.suffix.lstrip(".") or None
@@ -200,12 +201,12 @@ def build_incremental_file_doc(
             "host": host,
             "org": org,
             "repo": repo,
-            "ref": ref,
+            "ref_pattern": ref_pattern,
             "ref_type": ref_type,
         },
         "file": file_fields,
     }
-    _id = make_doc_id(host, org, repo, ref_type, ref, rel_path)
+    _id = make_doc_id(host, org, repo, ref_type, ref_pattern, rel_path)
     return _id, doc
 
 
@@ -214,7 +215,7 @@ def iter_incremental_line_docs(
     org: str,
     repo: str,
     ref_type: str,
-    ref: str,
+    ref_pattern: str,
     rel_path: str,
     content: str,
     *,
@@ -224,7 +225,8 @@ def iter_incremental_line_docs(
     attributes: list[str] | None = None,
 ) -> Iterator[tuple[str, dict]]:
     """Ref-addressed (incremental) line docs -- same shape as `build_incremental_file_doc`:
-    carries `git.ref` and `git.ref_type` but no `git.commit`."""
+    carries `git.ref_pattern` (stream identity) but no `git.ref` (concrete) or `git.commit`.
+    See `build_incremental_file_doc` for why `git.ref` is intentionally omitted."""
     p = pathlib.PurePosixPath(rel_path)
     directory = "" if str(p.parent) == "." else str(p.parent)
     extension = p.suffix.lstrip(".") or None
@@ -247,13 +249,13 @@ def iter_incremental_line_docs(
             "host": host,
             "org": org,
             "repo": repo,
-            "ref": ref,
+            "ref_pattern": ref_pattern,
             "ref_type": ref_type,
         },
         "file": file_fields,
     }
     for line_num, line_content in enumerate(content.splitlines(), start=1):
-        _id = make_doc_id(host, org, repo, ref_type, ref, rel_path, str(line_num))
+        _id = make_doc_id(host, org, repo, ref_type, ref_pattern, rel_path, str(line_num))
         yield _id, {**base, "line": {"number": line_num, "content": line_content}}
 
 
@@ -280,16 +282,18 @@ def _init_worker(
 
 
 def _init_worker_incremental(
-    host: str, org: str, repo: str, ref_type: str, ref: str, repo_dir: str,
+    host: str, org: str, repo: str, ref_type: str, ref_pattern: str, repo_dir: str,
     symlink_paths: frozenset[str] = frozenset(),
     index_level: str = "repo", index_suffix: str | None = None,
 ) -> None:
-    """Same as `_init_worker`, but for the incremental (ref-addressed) path: `ref_type`+`ref`
-    replace `commit_sha` and `mode` routes `_build_one_file_actions` to the incremental doc
-    builders."""
+    """Same as `_init_worker`, but for the incremental (ref-addressed) path: `ref_type`+
+    `ref_pattern` replace `commit_sha` and `mode` routes `_build_one_file_actions` to the
+    incremental doc builders. `ref_pattern` is the stream identity (== the concrete ref name for
+    non-stream refs; the literal pattern string for delta-tag streams). The concrete `ref` is NOT
+    stored here -- content docs carry only `ref_pattern`; `git.ref` lives on the refs join doc."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _WORKER_CTX.update(
-        host=host, org=org, repo=repo, ref_type=ref_type, ref=ref,
+        host=host, org=org, repo=repo, ref_type=ref_type, ref_pattern=ref_pattern,
         repo_dir=pathlib.Path(repo_dir),
         symlink_paths=symlink_paths, index_level=index_level, index_suffix=index_suffix,
         mode="delta",
@@ -316,8 +320,8 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
     incremental = ctx.get("mode", "snapshot") == "delta"
     host, org, repo = ctx["host"], ctx["org"], ctx["repo"]
     ref_type = ctx.get("ref_type", "branch")
-    ref = ctx.get("ref")
-    commit_sha = ref if incremental else ctx["commit_sha"]
+    ref_pattern = ctx["ref_pattern"] if incremental else None
+    commit_sha = ctx.get("commit_sha")
     level, suffix = ctx.get("index_level", "repo"), ctx.get("index_suffix")
     abs_path = ctx["repo_dir"] / rel_path
     # Incremental content is ref-addressed (no commit-level index name); the physical index name
@@ -365,7 +369,7 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
         git_target_size = None
     if incremental:
         file_id, file_doc = build_incremental_file_doc(
-            host, org, repo, ref_type, ref, rel_path, abs_path, binary=binary,
+            host, org, repo, ref_type, ref_pattern, rel_path, abs_path, binary=binary,
             is_symlink=True if is_git_symlink else None,
             target_path=git_target_path,
             target_size=git_target_size,
@@ -384,7 +388,7 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
     ff = file_doc["file"]
     if incremental:
         line_docs = iter_incremental_line_docs(
-            host, org, repo, ref_type, ref, rel_path, content,
+            host, org, repo, ref_type, ref_pattern, rel_path, content,
             size=ff["size"],
             target_path=ff.get("target_path"),
             target_size=ff.get("target_size"),
@@ -501,7 +505,7 @@ def index_incremental_paths(
     org: str,
     repo: str,
     repo_dir: pathlib.Path,
-    ref: str,
+    ref_pattern: str,
     rel_paths: list[str] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     index_level: str = "repo",
@@ -516,6 +520,10 @@ def index_incremental_paths(
     an incremental HEAD advance only touch the files git reports changed. Deletions for removed
     paths are the caller's responsibility (see `markers.delete_incremental_paths`) since they
     need no doc generation. Mirrors `index_repo`'s worker-pool ingest loop.
+
+    `ref_pattern` is the stream identity key (the literal pattern for delta-tag streams, or the
+    concrete ref name for all other refs). The concrete `ref` is intentionally absent here --
+    content docs carry only `git.ref_pattern`; `git.ref` lives only on the refs join doc.
     """
     files_count = 0
     lines_count = 0
@@ -527,7 +535,7 @@ def index_incremental_paths(
     with ProcessPoolExecutor(
         max_workers=max(1, t.index_workers),
         initializer=_init_worker_incremental,
-        initargs=(host, org, repo, ref_type, ref, str(repo_dir), symlink_paths, index_level, index_suffix),
+        initargs=(host, org, repo, ref_type, ref_pattern, str(repo_dir), symlink_paths, index_level, index_suffix),
     ) as executor:
         def _batched(items: Iterator[str], n: int) -> Iterator[list[str]]:
             it = iter(items)

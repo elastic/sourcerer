@@ -35,27 +35,32 @@ Query snippet:
         | KEEP git.commit
         ))
     OR
-    (git.ref IS NOT NULL AND git.commit IS NULL AND git.ref IN (
-        // Incremental refs
+    (git.ref_pattern IS NOT NULL AND git.commit IS NULL AND git.ref_pattern IN (
+        // Incremental refs: content docs carry git.ref_pattern = stream identity (pattern for
+        // delta-tag streams, branch name otherwise). The refs-side join key is git.ref_pattern
+        // (same field, same value on both sides). The ?git_ref param can be the pattern, the
+        // concrete tag, or a wildcard — both git.ref_pattern and git.ref are checked.
         FROM sourcerer-refs
         | WHERE git.host LIKE ?git_host
             AND git.org LIKE ?git_org
             AND git.repo LIKE ?git_repo
             AND git.commit LIKE ?git_commit
-            AND git.ref LIKE ?git_ref
+            AND (git.ref_pattern LIKE ?git_ref OR git.ref LIKE ?git_ref)
             AND git.ref_type LIKE ?git_ref_type
-        | KEEP git.ref
+        | KEEP git.ref_pattern
         ))
     )
     // other filters
 
 // Branch by content-doc shape to resolve git.commit for incremental refs:
 //   Snapshot rows already carry git.commit (no join needed).
-//   Incremental rows carry only git.ref; the join resolves git.commit from the refs join doc.
+//   Incremental rows carry git.ref_pattern (stream identity) and git.ref (concrete resolved ref);
+//   the LOOKUP JOIN resolves git.commit from the refs join doc using git.ref_pattern as the join
+//   key — the same field with the same value on both content and refs sides (no RENAME needed).
 | FORK
     ( WHERE git.commit IS NOT NULL )
-    ( WHERE git.ref IS NOT NULL AND git.commit IS NULL
-        | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref )
+    ( WHERE git.ref_pattern IS NOT NULL AND git.commit IS NULL
+        | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref_pattern, git.ref_type )
 
 // rest of query
 ```

@@ -71,6 +71,12 @@ class Unit:
     # commit-addressed) or "delta" (ref-addressed, branch or tag). Routes the unit to the
     # incremental delta-index path instead of the snapshot pre-clone/skip/retention flow.
     mode: str = "snapshot"
+    # Stream identity for delta-tag moving streams. For a delta-mode tag selector whose `match`
+    # pattern covers many concrete tags (e.g. "deploy@{major}"), `ref_pattern` holds the literal
+    # pattern string and is stored as `git.ref_pattern` on all content and refs docs.  `ref`
+    # advances to the resolved concrete tag post-clone.  For all other units (branches, snapshots,
+    # concrete tags) `ref_pattern` == `ref` so the split is transparent to non-stream code paths.
+    ref_pattern: str | None = None
 
     @property
     def label(self) -> str:

@@ -51,12 +51,13 @@ _CONTENT_TOOL_IDS = (
 
 def test_content_tools_use_universal_ref_join_query():
     # Every content tool uses a two-OR'd-IN subquery to scope rows to matching
-    # refs (git.commit OR git.ref), then a FORK to resolve git.commit for both
+    # refs (git.commit OR git.ref_pattern), then a FORK to resolve git.commit for both
     # content shapes without fan-out:
     #  - Snapshot arm (git.commit IS NOT NULL): no join needed; git.commit already
     #    lives on the content row.
-    #  - Incremental arm (git.ref IS NOT NULL AND git.commit IS NULL): LOOKUP JOIN
-    #    sourcerer-refs ON (host,org,repo,ref) to resolve git.commit from the join doc.
+    #  - Incremental arm (git.ref_pattern IS NOT NULL AND git.commit IS NULL): clean same-name
+    #    LOOKUP JOIN sourcerer-refs ON (host,org,repo,git.ref_pattern,ref_type) to resolve
+    #    git.commit from the join doc. No RENAME needed because both sides share git.ref_pattern.
     # No status guard is applied anywhere in the query.
     # Ref scoping uses three separate params: git_commit, git_ref, git_ref_type.
     tools = _tools()
@@ -68,6 +69,11 @@ def test_content_tools_use_universal_ref_join_query():
         # git.ref_key must not be used as a field or join key (comments may reference it by name)
         assert "git.ref_key" not in query, f"{tid} still uses git.ref_key as a field"
         assert "ON git.ref_key" not in query, f"{tid} still joins on git.ref_key"
+        # Old RENAME-based expression join must be gone
+        assert "RENAME git.ref AS _ref_id" not in query, \
+            f"{tid} still has old RENAME git.ref AS _ref_id (replaced by git.ref_pattern join)"
+        assert "_ref_id == match" not in query, \
+            f"{tid} still has old _ref_id == match expression join"
         # The membership subquery uses two OR'd IN paths (one for snapshot commits, one for
         # incremental refs), scoped by git_commit, git_ref, and git_ref_type params.
         assert "git.commit LIKE ?git_commit" in query, f"{tid} missing git.commit LIKE ?git_commit"
@@ -75,10 +81,11 @@ def test_content_tools_use_universal_ref_join_query():
         assert "git.ref_type LIKE ?git_ref_type" in query, f"{tid} missing git.ref_type LIKE ?git_ref_type"
         # Snapshot arm: no join; git.commit already on the content row.
         assert "git.commit IS NOT NULL" in query, f"{tid} missing snapshot FORK arm (git.commit IS NOT NULL)"
-        # Incremental arm: join on the 4-tuple (no ref_key) to resolve git.commit.
-        assert "git.ref IS NOT NULL" in query, f"{tid} missing incremental FORK arm (git.ref IS NOT NULL)"
-        assert "LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref" in query, \
-            f"{tid} missing the incremental join on (host,org,repo,ref)"
+        # Incremental arm: clean same-name LOOKUP JOIN on git.ref_pattern (no RENAME).
+        assert "git.ref_pattern IS NOT NULL" in query, \
+            f"{tid} missing incremental FORK arm (git.ref_pattern IS NOT NULL)"
+        assert "LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref_pattern, git.ref_type" in query, \
+            f"{tid} missing the new git.ref_pattern join on (host,org,repo,git.ref_pattern,git.ref_type)"
         # No ref_key param or join shape.
         assert "git_ref_key" not in params, f"{tid} still exposes git_ref_key as a param"
         assert "?git_ref_key" not in query, f"{tid} still references ?git_ref_key"

@@ -11,7 +11,6 @@ from elasticsearch import NotFoundError
 
 # App packages
 from sourcerer.commands.index.markers import (
-    ERROR_MAX_LEN,
     build_ref_id,
     commit_prefix_indexed,
     commits_with_content,
@@ -28,6 +27,7 @@ from sourcerer.commands.index.markers import (
     write_incremental_failed,
     write_incremental_indexing,
     write_incremental_ready,
+    write_indexing_marker,
     write_ref_marker,
 )
 from sourcerer.indices import FILES_ALIAS, REFS_ALIAS, REFS_INDEX
@@ -446,6 +446,72 @@ class TestWriteRefMarker:
                          files_count=5, lines_count=100)
         assert es.index.call_args.kwargs["document"]["status"] == "complete"
 
+    def test_complete_marker_carries_ref_pattern(self):
+        # write_ref_marker (status:complete) must populate git.ref_pattern. When no ref_pattern
+        # arg is given (branch == pattern), the fallback is git.ref.
+        es = MagicMock()
+        write_ref_marker(es, "github", "acme", "widgets", "branch", "main", OLD, None,
+                         files_count=1, lines_count=10)
+        doc = es.index.call_args.kwargs["document"]
+        assert doc["git"]["ref_pattern"] == "main"
+
+    def test_complete_marker_explicit_ref_pattern_differs_from_ref(self):
+        # When a versioned snapshot tag has a pattern like "zentity-{major}.{minor}.{patch}",
+        # git.ref holds the concrete tag and git.ref_pattern holds the raw match pattern.
+        es = MagicMock()
+        write_ref_marker(es, "github", "zentity-io", "zentity", "tag", "zentity-1.7.0", OLD, None,
+                         files_count=10, lines_count=200,
+                         ref_pattern="zentity-{major}.{minor}.{patch}")
+        doc = es.index.call_args.kwargs["document"]
+        assert doc["git"]["ref"] == "zentity-1.7.0"
+        assert doc["git"]["ref_pattern"] == "zentity-{major}.{minor}.{patch}"
+        # _id still keys on build_ref_id(concrete ref + commit), not the pattern,
+        # so sibling tags sharing a ref_pattern get distinct docs.
+        from sourcerer.commands.index.markers import build_ref_id
+        expected_id = build_ref_id("github", "zentity-io", "zentity", "tag", "zentity-1.7.0", OLD)
+        assert es.index.call_args.kwargs["id"] == expected_id
+
+
+class TestWriteIndexingMarker:
+    """write_indexing_marker is the in-progress (status:'indexing') snapshot writer. It must
+    populate git.ref_pattern from the very first write, so the field is never NULL in a snapshot
+    refs doc -- even while the ref is mid-index (before write_ref_marker's 'complete' overwrite)."""
+
+    def test_indexing_marker_carries_ref_pattern(self):
+        # Fallback: when no ref_pattern arg is passed, git.ref_pattern == git.ref.
+        es = MagicMock()
+        write_indexing_marker(es, "github", "acme", "widgets", "branch", "main", OLD, None)
+        doc = es.index.call_args.kwargs["document"]
+        assert doc["git"]["ref_pattern"] == "main"
+        assert doc["git"]["ref"] == "main"
+        assert doc["git"]["ref_pattern"] == doc["git"]["ref"]
+
+    def test_indexing_marker_explicit_ref_pattern_differs_from_ref(self):
+        # When a versioned snapshot tag has a pattern, the in-progress marker also carries it.
+        es = MagicMock()
+        write_indexing_marker(es, "github", "zentity-io", "zentity", "tag", "zentity-1.7.0", OLD, None,
+                              ref_pattern="zentity-{major}.{minor}.{patch}")
+        doc = es.index.call_args.kwargs["document"]
+        assert doc["git"]["ref"] == "zentity-1.7.0"
+        assert doc["git"]["ref_pattern"] == "zentity-{major}.{minor}.{patch}"
+
+    def test_indexing_marker_status_is_indexing(self):
+        es = MagicMock()
+        write_indexing_marker(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None)
+        doc = es.index.call_args.kwargs["document"]
+        assert doc["status"] == "indexing"
+        assert doc["mode"] == "snapshot"
+
+    def test_indexing_marker_id_matches_write_ref_marker_id(self):
+        # Both writers must use the same ref_id so write_ref_marker overwrites in place.
+        es = MagicMock()
+        write_indexing_marker(es, "github", "acme", "widgets", "tag", "v2.0.0", OLD, None)
+        indexing_id = es.index.call_args.kwargs["id"]
+        write_ref_marker(es, "github", "acme", "widgets", "tag", "v2.0.0", OLD, None,
+                         files_count=1, lines_count=1)
+        complete_id = es.index.call_args.kwargs["id"]
+        assert indexing_id == complete_id
+
 
 class TestIncrementalRefKeyIdentity:
     def test_id_is_ref_key_not_a_hash(self):
@@ -530,7 +596,6 @@ class TestWriteIncrementalReady:
         assert doc["status"] == "complete"
         assert doc["git"]["commit"] == NEW  # advances only after a successful run (INV-006)
         assert doc["git"]["commit_target"] is None
-        assert doc["error"] is None and doc["failed_at"] is None
         assert doc["files_count"] == 5 and doc["lines_count"] == 99
         assert es.index.call_args.kwargs["refresh"] is True  # publication boundary
 
@@ -545,21 +610,16 @@ class TestWriteIncrementalReady:
 
 
 class TestWriteIncrementalFailed:
-    def test_incremental_marker_keeps_status_indexing_and_retains_old_pointer(self):
+    def test_incremental_failed_sets_status_failed_and_retains_old_pointer(self):
         es = MagicMock()
         write_incremental_failed(es, "github", "acme", "widgets", "branch", "main",
                                   completed_commit=OLD, commit_target=NEW, error="boom")
         doc = _indexed_doc(es)
-        assert doc["status"] == "indexing"  # not advanced -- a failed run leaves the prior state
-        assert doc["git"]["commit"] == OLD
+        assert doc["status"] == "failed"
+        assert doc["git"]["commit"] == OLD   # completed pointer unchanged (INV-006)
         assert doc["git"]["commit_target"] == NEW
-        assert doc["error"] == "boom"
-        assert doc["failed_at"] is not None
-
-    def test_incremental_marker_error_text_is_bounded(self):
-        es = MagicMock()
-        write_incremental_failed(es, "github", "acme", "widgets", "branch", "main", OLD, NEW, error="x" * 5000)
-        assert len(_indexed_doc(es)["error"]) == ERROR_MAX_LEN
+        assert "error" not in doc
+        assert "failed_at" not in doc
 
     def test_incremental_failed_carries_routing(self):
         es = MagicMock()
@@ -602,7 +662,7 @@ class TestDeleteIncrementalPaths:
             assert {"term": {"git.org": "acme"}} in filt
             assert {"term": {"git.repo": "widgets"}} in filt
             assert {"term": {"git.ref_type": "branch"}} in filt
-            assert {"term": {"git.ref": "main"}} in filt
+            assert {"term": {"git.ref_pattern": "main"}} in filt
             assert {"terms": {"file.path": ["a.txt", "b.txt"]}} in filt
 
     def test_missing_index_is_ignored(self):
@@ -623,7 +683,7 @@ class TestDeleteIncrementalBranch:
             assert {"term": {"git.org": "acme"}} in filt
             assert {"term": {"git.repo": "widgets"}} in filt
             assert {"term": {"git.ref_type": "branch"}} in filt
-            assert {"term": {"git.ref": "main"}} in filt
+            assert {"term": {"git.ref_pattern": "main"}} in filt
             assert not any("ref_key" in str(f) for f in filt)
 
     def test_isolated_from_another_branch(self):

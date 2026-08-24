@@ -347,6 +347,41 @@ class TestSelectorMatches:
         assert sel.matches("commit", "deadbeef" * 5) is None
 
 
+class TestSelectorMatchPattern:
+    def test_versioned_tag_returns_raw_pattern_and_version(self):
+        sel = _cfg([_source(ref_type="tag", match="v{major}.{minor}.{patch}")]).repos[0].selectors[0]
+        result = sel.match_pattern("tag", "v1.2.3")
+        assert result is not None
+        pattern, v = result
+        assert pattern == "v{major}.{minor}.{patch}"
+        assert v.components == (1, 2, 3)
+
+    def test_ref_type_mismatch_returns_none(self):
+        sel = _cfg([_source(ref_type="branch", match="main")]).repos[0].selectors[0]
+        assert sel.match_pattern("tag", "main") is None
+
+    def test_no_match_returns_none(self):
+        sel = _cfg([_source(ref_type="tag", match="v{major}.{minor}.{patch}")]).repos[0].selectors[0]
+        assert sel.match_pattern("tag", "unrelated-tag") is None
+
+    def test_commit_prefix_returns_prefix_and_version(self):
+        sha = "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60"
+        sel = _cfg([_source(ref_type="commit", match="cfefb3b")]).repos[0].selectors[0]
+        result = sel.match_pattern("commit", sha)
+        assert result is not None
+        prefix, v = result
+        assert prefix == "cfefb3b"
+        assert v.ref == sha
+
+    def test_first_matching_pattern_wins(self):
+        # When multiple patterns match, the first raw pattern is returned.
+        sel = _cfg([_source(match=["main", "dev"])]).repos[0].selectors[0]
+        result = sel.match_pattern("branch", "main")
+        assert result is not None
+        pattern, _ = result
+        assert pattern == "main"
+
+
 class TestSinceVersionFloor:
     def test_full_ref_name(self):
         cfg = _cfg([_source(ref_type="tag", match="v{major}.{minor}.{patch}", since={"ref": "v8.17.0"})])

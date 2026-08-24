@@ -24,7 +24,7 @@
             "git.org",
             "git.repo",
             "git.commit",
-            "git.ref",
+            "git.ref_pattern",
             "git.ref_type",
             "file.path",
             "line.number"
@@ -103,6 +103,9 @@
               "normalizer": "lowercase"
             },
             "ref": {
+              "type": "keyword"
+            },
+            "ref_pattern": {
               "type": "keyword"
             },
             "ref_type": {

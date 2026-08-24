@@ -82,7 +82,7 @@ class TestStaleSnapshotMarkersForRef:
         assert {"term": {"git.host": "github"}} in filt
         assert {"term": {"git.org": "acme"}} in filt
         assert {"term": {"git.repo": "widgets"}} in filt
-        assert {"term": {"git.ref": "main"}} in filt
+        assert {"term": {"git.ref_pattern": "main"}} in filt
         assert {"term": {"status": "complete"}} in filt
         assert {"term": {"mode": "snapshot"}} in filt
 

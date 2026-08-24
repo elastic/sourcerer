@@ -31,16 +31,16 @@ configuration:
               | KEEP git.commit
               ))
           OR
-          (git.ref IS NOT NULL AND git.commit IS NULL AND git.ref IN (
+          (git.ref_pattern IS NOT NULL AND git.commit IS NULL AND git.ref_pattern IN (
               // Incremental refs
               FROM sourcerer-refs
               | WHERE git.host LIKE ?git_host
                   AND git.org LIKE ?git_org
                   AND git.repo LIKE ?git_repo
                   AND git.commit LIKE ?git_commit
-                  AND git.ref LIKE ?git_ref
+                  AND (git.ref_pattern LIKE ?git_ref OR git.ref LIKE ?git_ref)
                   AND git.ref_type LIKE ?git_ref_type
-              | KEEP git.ref
+              | KEEP git.ref_pattern
               ))
           )
 
@@ -50,8 +50,8 @@ configuration:
     //    git.commit from the refs join doc (one doc per (host,org,repo,ref)).
     | FORK
         ( WHERE git.commit IS NOT NULL )
-        ( WHERE git.ref IS NOT NULL AND git.commit IS NULL
-            | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref, git.ref_type )
+        ( WHERE git.ref_pattern IS NOT NULL AND git.commit IS NULL
+            | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref_pattern, git.ref_type )
 
     // Split each file path into its segments
     | EVAL _segs = SPLIT(file.path, "/")

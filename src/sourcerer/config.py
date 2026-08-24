@@ -309,6 +309,23 @@ class Selector:
                 return v
         return None
 
+    def match_pattern(self, ref_type: str, ref: str) -> tuple[str, Version] | None:
+        """Like matches(), but also returns the raw match pattern that matched `ref`.
+        Used to set Unit.ref_pattern to the raw sources[i].match string (not the concrete ref)."""
+        if self.ref_type != ref_type:
+            return None
+        if self.ref_type == "commit":
+            ref_l = ref.lower()
+            for p in self.raw_patterns:
+                if ref_l.startswith(p):
+                    return p, Version(ref=ref, components=(), prerelease="")
+            return None
+        for pattern, cp in zip(self.raw_patterns, self.compiled):
+            v = match_version(cp, ref)
+            if v is not None:
+                return pattern, v
+        return None
+
     def since_version_floor(self) -> tuple[int, ...] | None:
         """If `since` is a ref anchor that denotes a version under this (versioned) selector,
         the inclusive version floor to index from -- name-only, so it's applied in Phase 1 and

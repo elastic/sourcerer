@@ -33,10 +33,12 @@ def _set_worker_ctx(host: str, org: str, repo: str, commit_sha: str, repo_dir, s
     )
 
 
-def _set_worker_ctx_incremental(host: str, org: str, repo: str, ref: str, repo_dir,
+def _set_worker_ctx_incremental(host: str, org: str, repo: str, repo_dir,
+                                ref_pattern: str = "main",
                                 symlink_paths=frozenset(), ref_type: str = "branch") -> None:
     documents._WORKER_CTX.update(
-        host=host, org=org, repo=repo, ref_type=ref_type, ref=ref,
+        host=host, org=org, repo=repo, ref_type=ref_type,
+        ref_pattern=ref_pattern,
         repo_dir=pathlib.Path(repo_dir),
         symlink_paths=symlink_paths, mode="delta",
     )
@@ -182,13 +184,16 @@ class TestIterLineDocs:
 
 
 class TestIncrementalDocs:
-    def test_ref_field_set_no_ref_key(self, tmp_path):
-        # Incremental docs carry git.ref (the ref name) and git.ref_type but no git.ref_key.
+    def test_ref_pattern_set_no_ref_no_ref_key(self, tmp_path):
+        # Incremental docs carry git.ref_pattern (identity) and git.ref_type but NOT git.ref or
+        # git.ref_key. git.ref lives only on the refs join doc (written wholesale each run);
+        # content docs omit it to avoid staleness when unchanged paths survive a tag promotion.
         p = tmp_path / "a.txt"
         p.write_text("hello")
         _id, doc = build_incremental_file_doc("github", "acme", "widgets", "branch", "main", "a.txt", p)
-        assert doc["git"]["ref"] == "main"
+        assert doc["git"]["ref_pattern"] == "main"
         assert doc["git"]["ref_type"] == "branch"
+        assert "ref" not in doc["git"]
         assert "ref_key" not in doc["git"]
 
     def test_no_commit_field(self, tmp_path):
@@ -199,13 +204,33 @@ class TestIncrementalDocs:
 
     def test_id_stable_across_commits(self, tmp_path):
         # The whole point of ref-addressing: the id does not depend on the commit, only the
-        # ref_type+ref, so a modified file's doc overwrites in place rather than minting a new id.
+        # ref_type+ref_pattern, so a modified file's doc overwrites in place rather than minting a new id.
         p = tmp_path / "a.txt"
         p.write_text("hello")
         id1, _ = build_incremental_file_doc("github", "acme", "widgets", "branch", "main", "a.txt", p)
         p.write_text("hello world -- content changed, same ref/path")
         id2, _ = build_incremental_file_doc("github", "acme", "widgets", "branch", "main", "a.txt", p)
         assert id1 == id2
+
+    def test_id_stable_across_tag_promotions(self, tmp_path):
+        # For delta-tag streams: promoting from deploy@1 to deploy@2 must not mint a new doc id.
+        # Content _id is keyed on ref_pattern (stream identity), not the concrete tag.
+        p = tmp_path / "a.txt"
+        p.write_text("hello")
+        id1, _ = build_incremental_file_doc("github", "acme", "widgets", "tag", "deploy@{major}", "a.txt", p)
+        id2, _ = build_incremental_file_doc("github", "acme", "widgets", "tag", "deploy@{major}", "a.txt", p)
+        assert id1 == id2, "doc id must be keyed on ref_pattern, not concrete ref"
+
+    def test_delta_content_has_ref_pattern_not_ref(self, tmp_path):
+        # Content docs carry git.ref_pattern (stream identity) but NOT git.ref (concrete).
+        # After a tag-stream promotion, unchanged paths are NOT rewritten (delta only touches
+        # changed paths), so git.ref on content would be inconsistent/stale across a single ref.
+        # The concrete git.ref lives only on the refs join doc (one doc, rewritten each run).
+        p = tmp_path / "a.txt"
+        p.write_text("hello")
+        _id, doc = build_incremental_file_doc("github", "acme", "widgets", "tag", "deploy@{major}", "a.txt", p)
+        assert "ref" not in doc["git"], "git.ref must be absent from delta content docs"
+        assert doc["git"]["ref_pattern"] == "deploy@{major}"
 
     def test_id_differs_from_snapshot_id(self, tmp_path):
         p = tmp_path / "a.txt"
@@ -222,21 +247,24 @@ class TestIncrementalDocs:
         tag_id, _ = build_incremental_file_doc("github", "acme", "widgets", "tag", "deploy", "a.txt", p)
         assert branch_id != tag_id
 
-    def test_line_docs_ref_and_no_commit_no_ref_key(self):
-        # Incremental line docs carry git.ref and git.ref_type, no git.commit, no git.ref_key.
+    def test_line_docs_ref_pattern_no_ref_no_commit_no_ref_key(self):
+        # Incremental line docs carry git.ref_pattern and git.ref_type; git.ref and git.commit
+        # are absent for the same reason as file docs (see test_delta_content_has_ref_pattern_not_ref).
         docs = list(iter_incremental_line_docs("github", "acme", "widgets", "branch", "main", "a.txt", "one\ntwo"))
         for _id, d in docs:
-            assert d["git"]["ref"] == "main"
+            assert d["git"]["ref_pattern"] == "main"
             assert d["git"]["ref_type"] == "branch"
+            assert "ref" not in d["git"]
             assert "commit" not in d["git"]
             assert "ref_key" not in d["git"]
 
     def test_worker_ctx_routes_to_incremental_builders(self, tmp_path):
         (tmp_path / "a.txt").write_text("one\ntwo\n")
-        _set_worker_ctx_incremental("github", "acme", "widgets", "main", tmp_path)
+        _set_worker_ctx_incremental("github", "acme", "widgets", tmp_path, ref_pattern="main")
         actions = _build_one_file_actions("a.txt")
-        assert actions[0]["_source"]["git"]["ref"] == "main"
+        assert actions[0]["_source"]["git"]["ref_pattern"] == "main"
         assert actions[0]["_source"]["git"]["ref_type"] == "branch"
+        assert "ref" not in actions[0]["_source"]["git"]
         assert "commit" not in actions[0]["_source"]["git"]
         assert "ref_key" not in actions[0]["_source"]["git"]
 

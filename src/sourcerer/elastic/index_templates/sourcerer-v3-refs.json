@@ -18,9 +18,13 @@
             "git.host",
             "git.org",
             "git.repo",
-            "git.ref"
+            "git.ref",
+            "git.ref_pattern",
+            "git.ref_type"
           ],
           "order": [
+            "asc",
+            "asc",
             "asc",
             "asc",
             "asc",
@@ -56,6 +60,9 @@
               "normalizer": "lowercase"
             },
             "ref": {
+              "type": "keyword"
+            },
+            "ref_pattern": {
               "type": "keyword"
             },
             "ref_type": {

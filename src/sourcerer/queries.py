@@ -266,14 +266,19 @@ def gather_intended_incremental_index_by_ref(
     double-counted.  Returns {} if the refs index doesn't exist."""
     out: dict[tuple[str, str, str, str, str], set[str]] = {}
     body = {"query": {"term": {"mode": "delta"}}}
-    src_fields = ["git.host", "git.org", "git.repo", "git.ref_type", "git.ref",
+    # `git.ref_pattern` is the stream identity that aligns with content docs' git.ref_pattern (the
+    # pattern for delta-tag streams, the branch name for delta branches). `git.ref` is the
+    # concrete resolved ref (e.g. newest tag) and is NOT the content key. Read `git.ref_pattern`.
+    src_fields = ["git.host", "git.org", "git.repo", "git.ref_type", "git.ref_pattern",
                   "index_level", "index_suffix"]
     try:
         for hit in scan(es, index=REFS_ALIAS, query=body, _source=src_fields, preserve_order=False):
             src = hit["_source"]
             g = src.get("git", {})
             host, org, repo = g.get("host"), g.get("org"), g.get("repo")
-            ref_type, ref = g.get("ref_type"), g.get("ref")
+            ref_type = g.get("ref_type")
+            # `git.ref_pattern` is the content-side identity (aligns with content docs' git.ref_pattern).
+            ref = g.get("ref_pattern")  # nested under git
             if not (host and org and repo and ref_type and ref):
                 continue
             level = src.get("index_level") or "repo"
@@ -308,8 +313,9 @@ def gather_incremental_content_by_index(
 def _composite_incremental_ref_tuples(
     es: Elasticsearch, index: str,
 ) -> set[tuple[str, str, str, str, str]]:
-    """Distinct (host, org, repo, ref_type, ref) tuples from incremental content docs (git.ref
-    present, git.commit absent) in `index`. Returns empty set if the index doesn't exist."""
+    """Distinct (host, org, repo, ref_type, ref_pattern) tuples from incremental content docs
+    (git.ref_pattern present, git.commit absent) in `index`. Returns empty set if the index
+    doesn't exist."""
     out: set[tuple[str, str, str, str, str]] = set()
     after: dict | None = None
     while True:
@@ -320,13 +326,13 @@ def _composite_incremental_ref_tuples(
                 {"org": {"terms": {"field": "git.org"}}},
                 {"repo": {"terms": {"field": "git.repo"}}},
                 {"ref_type": {"terms": {"field": "git.ref_type"}}},
-                {"ref": {"terms": {"field": "git.ref"}}},
+                {"ref_pattern": {"terms": {"field": "git.ref_pattern"}}},
             ],
         }
         if after is not None:
             composite["after"] = after
-        # Filter to docs that have git.ref but no git.commit (incremental content).
-        query = {"bool": {"filter": [{"exists": {"field": "git.ref"}}],
+        # Filter to docs that have git.ref_pattern but no git.commit (incremental content).
+        query = {"bool": {"filter": [{"exists": {"field": "git.ref_pattern"}}],
                           "must_not": [{"exists": {"field": "git.commit"}}]}}
         try:
             resp = es.search(index=index, size=0, query=query,
@@ -339,7 +345,7 @@ def _composite_incremental_ref_tuples(
             return out
         for b in buckets:
             out.add((b["key"]["host"], b["key"]["org"], b["key"]["repo"],
-                     b["key"]["ref_type"], b["key"]["ref"]))
+                     b["key"]["ref_type"], b["key"]["ref_pattern"]))
         after = agg.get("after_key")
         if after is None:
             return out
@@ -419,8 +425,8 @@ def _enumerate_content_field(
 def _enumerate_incremental_content_ref_pairs(
     es: Elasticsearch, host: str, org: str, repo: str,
 ) -> set[tuple[str, str]]:
-    """Every distinct (git.ref_type, git.ref) pair in this repo's incremental content docs
-    (docs that have git.ref and no git.commit), via paginated composite aggregation."""
+    """Every distinct (git.ref_type, git.ref_pattern) pair in this repo's incremental content docs
+    (docs that have git.ref_pattern and no git.commit), via paginated composite aggregation."""
     out: set[tuple[str, str]] = set()
     for index in (FILES_ALIAS, LINES_ALIAS):
         after: dict | None = None
@@ -429,7 +435,7 @@ def _enumerate_incremental_content_ref_pairs(
                 "size": _COMPOSITE_PAGE_SIZE,
                 "sources": [
                     {"ref_type": {"terms": {"field": "git.ref_type"}}},
-                    {"ref": {"terms": {"field": "git.ref"}}},
+                    {"ref_pattern": {"terms": {"field": "git.ref_pattern"}}},
                 ],
             }
             if after is not None:
@@ -439,7 +445,7 @@ def _enumerate_incremental_content_ref_pairs(
                     {"term": {"git.host": host}},
                     {"term": {"git.org": org}},
                     {"term": {"git.repo": repo}},
-                    {"exists": {"field": "git.ref"}},
+                    {"exists": {"field": "git.ref_pattern"}},
                 ],
                 "must_not": [{"exists": {"field": "git.commit"}}],
             }}
@@ -456,7 +462,7 @@ def _enumerate_incremental_content_ref_pairs(
             if not buckets:
                 break
             for b in buckets:
-                out.add((b["key"]["ref_type"], b["key"]["ref"]))
+                out.add((b["key"]["ref_type"], b["key"]["ref_pattern"]))
             after = agg.get("after_key")
             if after is None:
                 break
@@ -497,9 +503,12 @@ def check_join_uniqueness(es: Elasticsearch, host: str, org: str, repo: str) -> 
             found_commits = set()
         offending.extend(sorted(commits - found_commits))
 
-    # --- incremental: each (ref_type, ref) pair must have EXACTLY ONE incremental join doc ---
-    # Content docs carry both git.ref and git.ref_type; a same-named branch and tag are distinct
-    # (ref_type, ref) pairs and are each allowed exactly one join doc.
+    # --- incremental: each (ref_type, ref_pattern) pair must have EXACTLY ONE incremental join doc ---
+    # Content docs carry git.ref_pattern (= the stream identity) and git.ref_type; a same-named
+    # branch and tag are distinct (ref_type, ref_pattern) pairs, each allowed exactly one join doc.
+    # On the refs side the join key is git.ref_pattern (= the stream identity), NOT git.ref
+    # (which holds the concrete resolved ref for delta-tag streams). Filter and aggregate by
+    # (git.ref_type, git.ref_pattern) so the pair-counts align with the content-side key.
     ref_pairs = _enumerate_incremental_content_ref_pairs(es, host, org, repo)
     if ref_pairs:
         try:
@@ -509,22 +518,22 @@ def check_join_uniqueness(es: Elasticsearch, host: str, org: str, repo: str) -> 
                     {"term": {"git.host": host}},
                     {"term": {"git.org": org}},
                     {"term": {"git.repo": repo}},
-                    {"terms": {"git.ref": sorted({r for _, r in ref_pairs})}},
+                    {"terms": {"git.ref_pattern": sorted({r for _, r in ref_pairs})}},
                     {"term": {"mode": "delta"}},
                 ]}},
                 aggs={"ref_pairs": {"composite": {"size": 1000, "sources": [
                     {"ref_type": {"terms": {"field": "git.ref_type"}}},
-                    {"ref": {"terms": {"field": "git.ref"}}},
+                    {"ref_pattern": {"terms": {"field": "git.ref_pattern"}}},
                 ]}}},
             )
             pair_counts = {
-                (b["key"]["ref_type"], b["key"]["ref"]): b["doc_count"]
+                (b["key"]["ref_type"], b["key"]["ref_pattern"]): b["doc_count"]
                 for b in resp["aggregations"]["ref_pairs"]["buckets"]
             }
         except NotFoundError:
             pair_counts = {}
         offending.extend(
-            sorted(f"{rt}/{ref}" for rt, ref in ref_pairs if pair_counts.get((rt, ref), 0) != 1)
+            sorted(f"{rt}/{ref_pattern}" for rt, ref_pattern in ref_pairs if pair_counts.get((rt, ref_pattern), 0) != 1)
         )
 
     return sorted(offending)
