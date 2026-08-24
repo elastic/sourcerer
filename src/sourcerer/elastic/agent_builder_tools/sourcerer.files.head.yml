@@ -19,8 +19,6 @@ configuration:
           // So resolution yields two membership sets off the same match:
           //   1. Matching commits, checked against snapshot-shaped rows
           //   2. Matching refs, checked against incremental-shaped rows
-          // Includes a consistency guard by only retrieving content from refs
-          // whose indexing is complete.
           (git.commit IS NOT NULL AND git.commit IN (
               // Commit snapshots
               FROM sourcerer-refs
@@ -30,7 +28,6 @@ configuration:
                   AND git.commit LIKE ?git_commit
                   AND git.ref LIKE ?git_ref
                   AND git.ref_type LIKE ?git_ref_type
-                  AND status == "complete"
               | KEEP git.commit
               ))
           OR
@@ -43,32 +40,19 @@ configuration:
                   AND git.commit LIKE ?git_commit
                   AND git.ref LIKE ?git_ref
                   AND git.ref_type LIKE ?git_ref_type
-                  AND status == "complete"
               | KEEP git.ref
               ))
           )
         AND file.path LIKE ?file_path
 
-    // Branch by content-doc shape:
-    //   1. Content for commit snapshots already carry git.commit, and status
-    //      was confirmed by the membership subquery above (status=="complete"),
-    //      so the snapshot arm needs no join; it just asserts status to match
-    //      the incremental arm's column.
-    //   2. Content for incremental refs carry only git.ref. The join resolves
-    //      the ref's current status from its join doc. Safety of the incremental
-    //      join (one doc per (host,org,repo,ref)) is enforced by the "one update
-    //      mode owns a ref name" invariant at index time.
+    // Branch by content-doc shape to resolve git.commit for incremental refs:
+    // 1. Snapshot rows already carry git.commit on the content doc (no join needed).
+    // 2. Incremental rows carry only git.ref; the LOOKUP JOIN resolves the citable
+    //    git.commit from the refs join doc (one doc per (host,org,repo,ref)).
     | FORK
-        ( WHERE git.commit IS NOT NULL
-            | EVAL status = "complete" )
+        ( WHERE git.commit IS NOT NULL )
         ( WHERE git.ref IS NOT NULL AND git.commit IS NULL
             | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref )
-
-    // Consistency guard: Only retrieve from a ref whose indexing is complete.
-    // Excludes torn/partial-read windows when an incrementally indexed ref is
-    // in the middle of an update. This is a no-op for the commit snapshot arm,
-    // whose status is always "complete" from the EVAL above.
-    | WHERE status == "complete"
 
     // Glob match (* and **) on file.path
     | EVAL _fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")

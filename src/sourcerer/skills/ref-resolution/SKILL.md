@@ -73,9 +73,9 @@ Once a ref is resolved above, pass the value straight through:
   itself as `git_commit_ish` (e.g. `main`) -- no commit needed, the query always resolves to whatever
   commit that branch is CURRENTLY at.
 
-Internally, each tool resolves the citable commit via a FORK that branches on content-doc shape:
-a `LOOKUP JOIN` on (`git.host`, `git.org`, `git.repo`, `git.commit`) for snapshot-shaped rows, or
-on (`git.host`, `git.org`, `git.repo`, `git.ref`) for incremental-shaped rows.
+Internally, each tool uses a FORK that branches on content-doc shape to resolve the citable commit:
+snapshot-shaped rows already carry `git.commit` (no join needed), while incremental-shaped rows get
+their `git.commit` resolved via a `LOOKUP JOIN` on (`git.host`, `git.org`, `git.repo`, `git.ref`).
 
 Read the resolved `git.commit` back from each result row (the content query's own join supplies
 it) for citations. Because incremental content overwrites in place, a branch query always returns

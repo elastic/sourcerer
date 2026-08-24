@@ -51,12 +51,13 @@ _CONTENT_TOOL_IDS = (
 
 def test_content_tools_use_universal_ref_join_query():
     # Every content tool uses a two-OR'd-IN subquery to scope rows to matching
-    # refs (git.commit OR git.ref), then a FORK to handle the two content shapes
-    # separately without fan-out:
-    #  - Snapshot arm (git.commit IS NOT NULL): EVAL status = "complete" -- no join needed; the
-    #    commit already lives on the content row, and status was pre-confirmed by the subquery.
-    #  - Incremental arm (git.ref IS NOT NULL AND git.commit IS NULL): LOOKUP JOIN sourcerer-refs
-    #    ON (host,org,repo,ref) to resolve status from the incremental join doc.
+    # refs (git.commit OR git.ref), then a FORK to resolve git.commit for both
+    # content shapes without fan-out:
+    #  - Snapshot arm (git.commit IS NOT NULL): no join needed; git.commit already
+    #    lives on the content row.
+    #  - Incremental arm (git.ref IS NOT NULL AND git.commit IS NULL): LOOKUP JOIN
+    #    sourcerer-refs ON (host,org,repo,ref) to resolve git.commit from the join doc.
+    # No status guard is applied anywhere in the query.
     # Ref scoping uses three separate params: git_commit, git_ref, git_ref_type.
     tools = _tools()
     for tid in _CONTENT_TOOL_IDS:
@@ -72,10 +73,9 @@ def test_content_tools_use_universal_ref_join_query():
         assert "git.commit LIKE ?git_commit" in query, f"{tid} missing git.commit LIKE ?git_commit"
         assert "git.ref LIKE ?git_ref" in query, f"{tid} missing git.ref LIKE ?git_ref"
         assert "git.ref_type LIKE ?git_ref_type" in query, f"{tid} missing git.ref_type LIKE ?git_ref_type"
-        # Snapshot arm: no join; asserts status = "complete" inline.
+        # Snapshot arm: no join; git.commit already on the content row.
         assert "git.commit IS NOT NULL" in query, f"{tid} missing snapshot FORK arm (git.commit IS NOT NULL)"
-        assert 'EVAL status = "complete"' in query, f"{tid} missing EVAL status = \"complete\" in snapshot arm"
-        # Incremental arm: join on the 4-tuple (no ref_key).
+        # Incremental arm: join on the 4-tuple (no ref_key) to resolve git.commit.
         assert "git.ref IS NOT NULL" in query, f"{tid} missing incremental FORK arm (git.ref IS NOT NULL)"
         assert "LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref" in query, \
             f"{tid} missing the incremental join on (host,org,repo,ref)"
@@ -90,10 +90,10 @@ def test_content_tools_use_universal_ref_join_query():
         # No collapsed git_commit_ish param.
         assert "git_commit_ish" not in params, f"{tid} still exposes git_commit_ish as a param"
         assert "?git_commit_ish" not in query, f"{tid} still references ?git_commit_ish"
-        # The post-FORK status guard must appear after the join (defense-in-depth; free no-op for
-        # snapshot arm since status is already "complete" from the EVAL).
-        assert '| WHERE status == "complete"' in query, f"{tid} missing the post-FORK status guard"
-        assert query.index("LOOKUP JOIN sourcerer-refs") < query.index('WHERE status == "complete"')
+        # No status guard: the post-FORK status filter and status-related EVALs have been removed.
+        assert '| WHERE status == "complete"' not in query, f"{tid} still has the removed status guard"
+        assert 'EVAL status = "complete"' not in query, f"{tid} still has the removed EVAL status"
+        assert "status" not in strip_esql_comments(query), f"{tid} still references status in query body"
 
 
 def test_refs_list_does_not_surface_ref_key():

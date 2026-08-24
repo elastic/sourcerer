@@ -23,8 +23,6 @@ Query snippet:
     // So resolution yields two membership sets off the same match:
     //   1. Matching commits, checked against snapshot-shaped rows
     //   2. Matching refs, checked against incremental-shaped rows
-    // Includes a consistency guard by only retrieving content from refs
-    // whose indexing is complete.
     (git.commit IS NOT NULL AND git.commit IN (
         // Commit snapshots
         FROM sourcerer-refs
@@ -34,7 +32,6 @@ Query snippet:
             AND git.commit LIKE ?git_commit
             AND git.ref LIKE ?git_ref
             AND git.ref_type LIKE ?git_ref_type
-            AND status == "complete"
         | KEEP git.commit
         ))
     OR
@@ -47,35 +44,18 @@ Query snippet:
             AND git.commit LIKE ?git_commit
             AND git.ref LIKE ?git_ref
             AND git.ref_type LIKE ?git_ref_type
-            AND status == "complete"
         | KEEP git.ref
         ))
     )
     // other filters
 
-// Branch by content-doc shape:
-//   1. Content for commit snapshots already carry git.commit, and status
-//      was confirmed by the membership subquery above (status=="complete"),
-//      so the snapshot arm needs no join; it just asserts status to match
-//      the incremental arm's column.
-//   2. Content for incremental refs carry only git.ref. The join resolves
-//      the ref's current status from its join doc. This join assumes at
-//      most one doc per (host,org,repo,ref). That assumption requires a
-//      "one update mode owns a ref name" invariant (no repo may have both
-//      a snapshot and incremental source targeting the same ref name),
-//      which must be enforced separately (e.g. at config-validation time);
-//      nothing in this query itself enforces it.
+// Branch by content-doc shape to resolve git.commit for incremental refs:
+//   Snapshot rows already carry git.commit (no join needed).
+//   Incremental rows carry only git.ref; the join resolves git.commit from the refs join doc.
 | FORK
-    ( WHERE git.commit IS NOT NULL
-        | EVAL status = "complete" )
+    ( WHERE git.commit IS NOT NULL )
     ( WHERE git.ref IS NOT NULL AND git.commit IS NULL
         | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref )
-
-// Consistency guard: Only retrieve from a ref whose indexing is complete.
-// Excludes torn/partial-read windows when an incrementally indexed ref is
-// in the middle of an update. This is a no-op for the commit snapshot arm,
-// whose status is always "complete" from the EVAL above.
-| WHERE status == "complete"
 
 // rest of query
 ```

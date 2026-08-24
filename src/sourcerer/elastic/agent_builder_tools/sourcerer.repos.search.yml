@@ -19,8 +19,6 @@ configuration:
           // So resolution yields two membership sets off the same match:
           //   1. Matching commits, checked against snapshot-shaped rows
           //   2. Matching refs, checked against incremental-shaped rows
-          // Includes a consistency guard by only retrieving content from refs
-          // whose indexing is complete.
           (git.commit IS NOT NULL AND git.commit IN (
               // Commit snapshots
               FROM sourcerer-refs
@@ -30,7 +28,6 @@ configuration:
                   AND git.commit LIKE ?git_commit
                   AND git.ref LIKE ?git_ref
                   AND git.ref_type LIKE ?git_ref_type
-                  AND status == "complete"
               | KEEP git.commit
               ))
           OR
@@ -43,7 +40,6 @@ configuration:
                   AND git.commit LIKE ?git_commit
                   AND git.ref LIKE ?git_ref
                   AND git.ref_type LIKE ?git_ref_type
-                  AND status == "complete"
               | KEEP git.ref
               ))
           )
