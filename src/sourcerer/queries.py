@@ -483,7 +483,8 @@ def check_join_uniqueness(es: Elasticsearch, host: str, org: str, repo: str) -> 
     an empty list means the invariant holds."""
     offending: list[str] = []
 
-    # --- snapshot: each commit must have ≥1 complete refs doc ---
+    # --- snapshot: each commit must have ≥1 complete (or in-progress) refs doc ---
+    # Accept "indexing" status as non-offending: an active run holding this commit is not stale.
     commits = _enumerate_content_field(es, host, org, repo, "git.commit")
     if commits:
         try:
@@ -494,7 +495,7 @@ def check_join_uniqueness(es: Elasticsearch, host: str, org: str, repo: str) -> 
                     {"term": {"git.org": org}},
                     {"term": {"git.repo": repo}},
                     {"terms": {"git.commit": sorted(commits)}},
-                    {"term": {"status": "complete"}},
+                    {"terms": {"status": ["complete", "indexing"]}},
                 ]}},
                 aggs={"commits": {"terms": {"field": "git.commit", "size": len(commits)}}},
             )
