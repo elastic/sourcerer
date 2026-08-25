@@ -12,7 +12,7 @@ Commands:
   include them.
 - `sourcerer index <org>/<repo> [-b <branch>] [-t <tag>] [-c <commit>]` (single-repo path
   defaults to `git.host` = `github`)
-- `sourcerer index --config <file> [--prune] [--dry-run]`
+- `sourcerer index --config <file> [--prune] [--dry-run] [--no-backfill]`
 - `sourcerer prune [--config <file>] [--dry-run]` (config-driven retention prune is skipped
   without `--config`; the orphan sweep always runs)
 - `sourcerer mcp-proxy [-e <env>]` (run a stdio MCP proxy that forwards to the Kibana
@@ -57,6 +57,36 @@ config's `sources:` is a YAML list, one entry per (host, org, repo, ref_type). S
 | `match` | yes | For `branch`/`tag`: pattern string or list of patterns matched against ref names (version DSL + glob), a ref matches if any pattern hits. For `commit`: a commit SHA/prefix string or list of them (see below). |
 | `since` | no | Index-side inclusion floor: the earliest commit to start indexing from. See below. Not valid for `git.ref_type: commit`. |
 | `retain` | no | Retention policy (see below). Omit to keep forever. For `git.ref_type: commit`, only `age` is valid. |
+| `mode` | no | `snapshot` (default) or `delta` (branch or tag). See below. |
+
+#### `mode` (snapshot vs. delta)
+
+`snapshot` (default): content is commit-addressed. A HEAD advance on a branch
+indexes a whole new snapshot under the new commit.
+
+`delta` (branch or tag; rejects `since`/`retain` -- there is no per-commit history for either
+to apply to): content is ref-addressed instead. A HEAD advance runs `git diff
+--name-status` between the previously-completed commit and the new tip and only deletes/
+reindexes the paths git reports changed -- add/modify/delete/rename/copy -- instead of
+reindexing the whole tree. A missing diff base (force-push, GC'd, or the first index) rebuilds
+the whole ref namespace. The refs join doc publishes `status: indexing` before any content
+change and `status: complete` (with the new commit) only after the deletes/indexes/refresh all
+succeed, so a crash mid-update leaves the prior commit and content in place.
+
+Delta mode is especially useful for fast-moving tags that are force-updated many times a day
+(e.g. `deploy@8`-style Serverless promotion tags): snapshot mode would mint a fresh full snapshot
+per force-update; delta mode diffs only what changed, keeping indexing cost proportional to the
+diff size regardless of tag-move frequency.
+
+```yaml
+- git:
+    host: github
+    org: elastic
+    repo: serverless-gitops
+    ref_type: branch
+  match: main
+  mode: delta
+```
 
 #### `git.ref_type: commit` (pinning an explicit commit)
 
@@ -228,7 +258,7 @@ config files each driven by their own cron job. Run `sourcerer index --config` o
 cron** (e.g. every 5 minutes) and let the schedule config control the actual indexing cadence.
 
 **How the gate works**: on each invocation of `index --config`, before any ls-remote or clone
-work, the command queries `sourcerer-v2-refs` to see when each source was last fully indexed
+work, the command queries `sourcerer-v3-refs` to see when each source was last fully indexed
 (`status: complete`) and whether any ref in its scope is actively being indexed (`status:
 indexing`). Only sources whose schedule has fired since their last indexed run proceed to the
 expensive pipeline. Sources where another run is actively indexing are skipped.
@@ -319,19 +349,19 @@ Content is addressed by **host + commit**, not by ref name. A file's bytes are f
 by `(git.host, git.org, git.repo, git.commit, file.path)`, so the same file reached via any ref
 collapses to a single doc (no per-ref duplication), while the same org/repo on two different git
 hosts stays distinct. `git.host` is a lowercase keyword, placed before `git.org` in every index
-template's mappings and index sort. Backing indices are `sourcerer-v2-refs`,
-`sourcerer-v2-files~{git.host}~{git.org}~{git.repo}`, and
-`sourcerer-v2-lines~{git.host}~{git.org}~{git.repo}` (read via the unchanged `sourcerer-refs` /
+template's mappings and index sort. Backing indices are `sourcerer-v3-refs`,
+`sourcerer-v3-files~{git.host}~{git.org}~{git.repo}`, and
+`sourcerer-v3-lines~{git.host}~{git.org}~{git.repo}` (read via the unchanged `sourcerer-refs` /
 `sourcerer-files` / `sourcerer-lines` aliases).
 
 **Index routing (`sources[i].index.level` / `index.suffix`).** A source can override the content
 index name: `level` (`host`/`org`/`repo` (default)/`commit`) chooses the granularity
-(`sourcerer-v2-*~{host}` … `~{host}~{org}~{repo}~{commit}`), and `suffix` appends `^{suffix}`
+(`sourcerer-v3-*~{host}` … `~{host}~{org}~{repo}~{commit}`), and `suffix` appends `^{suffix}`
 (e.g. `~{host}~{org}~{repo}^deploy`). Routing is **per-source**, so two sources of the same
-`(host, org, repo)` may target different indices; the read aliases match `sourcerer-v2-files*` /
-`sourcerer-v2-lines*`, so every leveled/suffixed index auto-joins them and agents are unaffected.
+`(host, org, repo)` may target different indices; the read aliases match `sourcerer-v3-files*` /
+`sourcerer-v3-lines*`, so every leveled/suffixed index auto-joins them and agents are unaffected.
 The name is built by `files_index`/`lines_index` in `src/sourcerer/indices.py`; each ref marker in
-`sourcerer-v2-refs` records the source's `index_level`/`index_suffix` (semantic, not the resolved
+`sourcerer-v3-refs` records the source's `index_level`/`index_suffix` (semantic, not the resolved
 name — so a future prefix bump stays correct). Changing a source's routing between runs triggers a
 **migration** (`sourcerer index` re-ingests at the new index, flips the marker, then deletes the old
 copy; `sourcerer prune` sweeps any crash-leftover as `orphan:stale-location`, and deletes any
@@ -346,6 +376,102 @@ creates one index/shard per commit — see `specs/sourcerer-yml.md` for the cave
   in `sourcerer-refs` mapping the branch to its current commit. To search a branch,
   resolve it to a commit via the refs index (the `sourcerer.refs.list` tool), then filter
   content by `git.host` + `git.commit`.
+
+### Universal join query
+
+Content docs come in two disjoint shapes depending on how they were indexed:
+
+- **Snapshot** (`mode: snapshot`): content docs carry `git.commit` and no `git.ref`. The ref-name
+  marker in `sourcerer-v3-refs` (keyed by `build_ref_id`, one per snapshot source) carries the commit
+  and status. `git.commit` on the content row is already the answer; no join is needed to resolve it.
+- **Delta** (`mode: delta`): content docs carry `git.ref` and no `git.commit`. A
+  dedicated refs join doc at `_id = build_ref_key(host,org,repo,ref)` (one per branch) holds the
+  live HEAD commit and is advanced two-phase. The join resolves `git.commit` from this doc.
+
+Every Agent Builder content tool (`sourcerer.code.*`, `sourcerer.files.*`) uses
+the same shape that handles both modes without fan-out:
+
+```esql
+FROM sourcerer-lines
+| WHERE git.host LIKE ?git_host AND ...
+    AND (
+      // Resolve git_commit, git_ref, and git_ref_type against the small sourcerer-refs
+      // index first (content docs carry no git.ref_type); the two membership sets handle
+      // both content-doc shapes in one pass.
+      (git.commit IS NOT NULL AND git.commit IN (
+          FROM sourcerer-refs
+          | WHERE git.host LIKE ?git_host AND ...
+              AND git.commit LIKE ?git_commit
+              AND git.ref LIKE ?git_ref
+              AND git.ref_type LIKE ?git_ref_type
+          | KEEP git.commit
+          ))
+      OR
+      (git.ref IS NOT NULL AND git.commit IS NULL AND git.ref IN (
+          FROM sourcerer-refs
+          | WHERE git.host LIKE ?git_host AND ...
+              AND git.commit LIKE ?git_commit
+              AND git.ref LIKE ?git_ref
+              AND git.ref_type LIKE ?git_ref_type
+          | KEEP git.ref
+          ))
+      )
+// Branch by content-doc shape to resolve git.commit for incremental refs:
+//   Snapshot rows already carry git.commit (no join needed).
+//   Incremental rows carry only git.ref; the join resolves git.commit from the refs join doc.
+//   Safety of the incremental join (one doc per (host,org,repo,ref)) is enforced by
+//   the "one mode owns a ref name" invariant at index time.
+| FORK
+    ( WHERE git.commit IS NOT NULL )
+    ( WHERE git.ref IS NOT NULL AND git.commit IS NULL
+        | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref )
+```
+
+**Snapshot rows** carry `git.commit` directly; they are matched by the first IN subquery and pass
+through the FORK unchanged. Critically, the snapshot arm never touches `sourcerer-refs` at query
+time, so two complete markers sharing the same commit (branch + same-named tag) do NOT fan out —
+the commit set is resolved once and deduplicated naturally.
+
+**Incremental rows** carry `git.ref` but no `git.commit`; they are matched by the second IN
+subquery and then joined in the FORK incremental arm. The LOOKUP JOIN resolves `git.commit` from the
+refs join doc so incremental rows carry a citable commit SHA in the output. The join is safe
+(no fan-out) because there is always exactly one incremental join doc per `(host,org,repo,ref)`:
+`_id = build_ref_key(...)` (overwrite-in-place) and the runtime mode-conflict guard in
+`selection.py` prevent multiple concurrent join docs for the same ref.
+
+**Scoping params** (`git_commit`, `git_ref`, `git_ref_type`) are all optional (default `"*"`) and
+support `*`/`?` wildcards (filters use `LIKE`). For a normal content question, resolve a ref first
+(see `src/sourcerer/skills/ref-resolution/SKILL.md`), then pass the result through the appropriate
+param: a commit SHA goes to `git_commit`; a branch or tag name goes to `git_ref` (optionally narrow
+further with `git_ref_type: branch` or `git_ref_type: tag`). Leaving all three at `"*"` matches
+content across all refs at once; because every content tool carries `git.commit` through to output
+(and aggregations group `BY git.commit`), unpinned results stay attributable per commit rather than
+being blended — but a version-specific answer should still pin a ref.
+
+#### `status` field values
+
+Every `sourcerer-v3-refs` document — snapshot ref-name markers and incremental join docs alike
+— carries a `status` field drawn from a three-value vocabulary:
+
+| Value | Meaning |
+|---|---|
+| `indexing` | A run is mid-flight. `indexing_started_at` is set; `indexed_at` is absent/null. Present on snapshot ref-name markers (written by `write_indexing_marker` just before ingest) and incremental join docs (written by `write_incremental_indexing`). A stale `indexing` doc whose `indexing_started_at` is older than the retry window (default 6 h) marks a crashed run and is treated as due for re-indexing. |
+| `complete` | Fully indexed and ready to query. `indexed_at` is set; `indexing_started_at` is absent/null (the terminal write drops it). Written by `write_ref_marker` (snapshot markers) and `write_incremental_ready` (incremental join docs). The scheduler's "last indexed" aggregation and `sourcerer.refs.list`'s default `?status == "complete"` filter both use this value. |
+| `stale` | A snapshot marker superseded by a mode switch to `delta`. Written by `mark_snapshot_markers_stale` (called BEFORE the incremental join doc is published as `complete`). The prune command reclaims their content and deletes the marker via `execute_stale_marker_deletions`. |
+
+#### Uniqueness gate
+
+`_run_uniqueness_gate` (`commands/index/command.py`) runs after each index pass and calls
+`check_join_uniqueness` (`queries.py`) to verify:
+
+- **Snapshot** (git.commit IS NOT NULL in content): each distinct commit must have ≥1 complete refs
+  doc (presence check — multi-ref-per-commit is legal).
+- **Delta** (git.ref IS NOT NULL in content): each distinct ref must have **exactly one**
+  incremental join doc with `mode == "delta"` (anti-fan-out guard for the surviving join).
+
+The gate is non-fatal (logs a warning, does not block): with the flip-status switchover in place,
+violations should only occur if a stale-flip was skipped or crashed mid-way; the next prune run
+reclaims the stale marker and resolves the violation automatically.
 
 ## Releases
 
@@ -384,3 +510,16 @@ different git hosting providers. This is a breaking change:
 - **Citations**: `sourcerer setup --config sourcerer.yml` reads the config's `hosts:` section
   and generates one citation skill per host so the agent formats links correctly for each
   provider. Run `setup` again whenever you add or customize a host.
+
+### Upgrading from v2 to v3
+
+v3.0.0 adds incremental (ref-addressed) branch indexing (`update: incremental`, see above). This
+is a breaking change to the backing indices, with no config schema change:
+
+- **Indices**: backing indices are renamed `sourcerer-v2-*` to `sourcerer-v3-*`. There is no
+  automatic migration - run `sourcerer setup` to create the v3 templates, then re-index every
+  source. The old `sourcerer-v2-*` indices can be deleted once you have re-indexed.
+- **Agent Builder tools**: content tools (`sourcerer.code.*`, `sourcerer.files.*`) replace their
+  `git_commit` param with `git_ref` (a commit SHA or a branch/tag name); `git_commit` survives
+  as an optional filter alongside `git_ref` and `git_ref_type`. Run `sourcerer setup` again to push
+  the updated tool definitions.

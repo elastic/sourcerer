@@ -26,10 +26,12 @@ from ...hosts import resolve_hosts
 from ...planner import Marker, plan_repo
 from ...progress import ProgressReporter, Unit, make_reporter
 from ...indices import files_index, lines_index
+from ...queries import check_join_uniqueness
 from ...utils import ES_ERRORS, make_client
+from ...version import compile_pattern, match_version
 from ..prune import command as prune_cmd
 from ..prune.execute import delete_commit_from_indices
-from .documents import index_repo
+from .documents import index_incremental_paths, index_repo
 from .git import (
     checkout_branch,
     checkout_ref,
@@ -37,6 +39,7 @@ from .git import (
     count_tracked_files,
     default_branch,
     list_branch_commits,
+    plan_changes,
     prepared_repo,
     ref_dates,
     resolve_cache_root,
@@ -44,14 +47,35 @@ from .git import (
     _rev_info,
 )
 from .markers import (
-    build_ref_id, commits_with_content, content_present, fully_indexed_counts,
-    markers_status_by_id, _needs_index, pre_clone_skip, recorded_routing,
-    should_index, write_indexing_marker, write_ref_marker,
+    build_ref_id, commits_with_content, content_present,
+    count_incremental_branch_docs, delete_incremental_branch, delete_incremental_paths,
+    fully_indexed_counts, mark_snapshot_markers_stale, marker_routing, markers_status_by_id,
+    _needs_index, pre_clone_skip, read_incremental_ref, recorded_routing,
+    refresh_incremental_content, should_index, write_incremental_failed,
+    write_incremental_indexing, write_incremental_ready, write_indexing_marker, write_ref_marker,
 )
 from .report import dry_run_config
 from .schedule import filter_config_by_schedule
 from .runtime import _aborted, _tuning, bulk_indexing_settings, handle_interrupts
 from .selection import _effective_since_floor, _load_config, _resolve_entry
+
+
+def _run_uniqueness_gate(es: Elasticsearch, host: str, org: str, repo: str) -> bool:
+    """Post-index join-uniqueness gate: every distinct content commit/ref in
+    this repo must resolve to a complete refs join doc. For snapshot content (git.commit IS NOT
+    NULL) each commit must have at least one complete refs doc; for incremental (git.ref IS NOT
+    NULL) each ref must have exactly one incremental join doc. Prints offenders to stderr and
+    returns False; True (silent) when the invariant holds."""
+    offending = check_join_uniqueness(es, host, org, repo)
+    if offending:
+        click.echo(
+            f"Warning: {host}/{org}/{repo}: {len(offending)} content key(s) with join-doc "
+            f"mismatch in sourcerer-v3-refs (run prune to clean stale markers): "
+            f"{', '.join(offending)}",
+            err=True,
+        )
+        return False
+    return True
 
 
 def _branch_has_since(branch_name: str, cfg) -> bool:
@@ -200,7 +224,8 @@ def index_ref_in_dir(
         # that this scope is currently being indexed by another run and skip it.
         # The terminal write_ref_marker (status:'complete') overwrites this doc in place.
         write_indexing_marker(es, host, org, repo, ref_type, ref_for_id, commit_sha,
-                              commit_date_iso, index_level=level, index_suffix=suffix)
+                              commit_date_iso, index_level=level, index_suffix=suffix,
+                              ref_pattern=unit.ref_pattern or ref_for_id)
         files_count, lines_count = index_repo(
             es, host, org, repo, repo_dir, commit_sha,
             on_progress=lambda f, l: reporter.update_counts(unit, f, l),
@@ -211,7 +236,8 @@ def index_ref_in_dir(
     # old copy is deleted, so a crash between here and the delete below leaves stale (not missing)
     # data that the prune stale-location sweep reclaims.
     write_ref_marker(es, host, org, repo, ref_type, ref_for_id, commit_sha, commit_date_iso,
-                     files_count, lines_count, index_level=level, index_suffix=suffix)
+                     files_count, lines_count, index_level=level, index_suffix=suffix,
+                     ref_pattern=unit.ref_pattern or ref_for_id)
     if migrating:
         # Reconstruct the OLD index name from the prior marker's routing and drop this commit's
         # stale copy there. Commit-safety (another surviving ref sharing the commit) is respected
@@ -223,6 +249,160 @@ def index_ref_in_dir(
         if {old_f, old_l} != {new_f, new_l}:
             delete_commit_from_indices(es, host, org, repo, commit_sha, (old_l, old_f))
     reporter.finish(unit, status, files_count, lines_count)
+
+
+def index_incremental_branch_in_dir(
+    es: Elasticsearch,
+    host: str,
+    org: str,
+    repo: str,
+    repo_dir,
+    branch: str,
+    force: bool = False,
+    reporter: ProgressReporter | None = None,
+    unit: Unit | None = None,
+) -> None:
+    """Advance one incremental (ref-addressed) branch or tag source in an already-cloned
+    `repo_dir`.
+
+    Reads the ref's prior completed commit (its refs join doc, `_id = ref_key`), checks out
+    the fetched tip, and either:
+      - does nothing (already at the completed commit and not `--force`),
+      - does a full rebuild (first index, `--force`, or a missing diff base): delete
+        the whole ref namespace, then index every currently-tracked path, or
+      - does a delta update: `git diff --name-status` (via `plan_changes`) between the prior and
+        new commit, deleting only the paths git reports removed/changed and (re)indexing only the
+        paths git reports added/changed (scoped by the exact
+        (host,org,repo,ref_type,ref) 5-tuple, never a whole namespace sweep).
+    The refs join doc is published `indexing` before any mutation and `complete` only after the
+    content deletes/indexes and a refresh all succeed; a raised exception instead
+    records `write_incremental_failed` and leaves the completed pointer untouched, then
+    re-raises so the caller's per-unit error handling reports it.
+    """
+    if reporter is None:
+        reporter = ProgressReporter()
+    if unit is None:
+        unit = Unit(host=host, org=org, repo=repo, ref=branch, kind="branch", mode="delta")
+
+    ref_type = unit.kind  # "branch" or "tag"
+
+    # Stream identity: for a delta-tag stream `unit.ref_pattern` holds the literal match-pattern
+    # string (e.g. "deploy@{major}") and is the stable _id key for the refs join doc and the
+    # `git.ref_pattern` stored on all content docs. For branches and non-stream tags
+    # ref_pattern == branch (the concrete ref name).
+    ref_pattern = unit.ref_pattern or branch  # stable identity (pattern for tag streams, branch otherwise)
+
+    # For a delta-tag stream resolve the CONCRETE newest tag post-clone (commit dates are
+    # available here via `ref_dates`). `ref` then holds the concrete tag while `ref_pattern`
+    # (the pattern) stays the identity for all content/marker scoping. For branches ref == ref_pattern.
+    reporter.set_stage(unit, "checkout")
+    if ref_type == "tag":
+        cp = compile_pattern(branch)
+        dates = ref_dates(repo_dir)
+        tag_matches = [
+            (ts, name)
+            for (kind, name), ts in dates.items()
+            if kind == "tag" and match_version(cp, name) is not None
+        ]
+        if not tag_matches:
+            # Pattern matched tags in Phase 1 but none are present in the clone. This can happen
+            # if all matching tags were deleted between ls-remote and the clone fetch. Skip.
+            reporter.finish(unit, "no-changes", detail="no matching tags in clone")
+            return
+        ref = max(tag_matches)[1]  # newest by creatordate timestamp — concrete resolved tag
+        checkout_ref(repo_dir, ref)
+    else:
+        ref = branch  # branch name is both the concrete ref and the identity
+        checkout_branch(repo_dir, ref)
+    # Expose the concrete resolved ref in the unit so the reporter displays it.
+    unit.ref = ref
+
+    new_sha = resolve_commit(repo_dir)
+    commit_date_iso = commit_date(repo_dir)
+
+    # Read the prior join doc keyed on `ref_pattern` (the stable identity, unchanged across promotions).
+    prior = read_incremental_ref(es, host, org, repo, ref_type, ref_pattern)
+    old_sha = None if force else (prior.get("git", {}).get("commit") if prior else None)
+
+    level = unit.index_level
+    suffix = unit.index_suffix
+
+    # Detect a routing (index.level / index.suffix) change from the prior completed run. When the
+    # routing changes we must migrate even if the commit hasn't advanced -- so routing_changed
+    # bypasses the no-changes early-return and forces a full rebuild into the new index (below).
+    old_routing = marker_routing(prior) if prior else None
+    routing_changed = old_routing is not None and old_routing != (level, suffix)
+
+    if old_sha == new_sha and not force and not routing_changed:
+        reporter.finish(unit, "no-changes")
+        return
+
+    reporter.set_stage(unit, "indexing")
+    # `ref` = concrete tag/branch (payload stored as git.ref in the join doc and content docs).
+    # `ref_pattern` = stream identity (pattern for tag streams; == ref for branches).
+    # Content docs (files/lines) are keyed on `ref_pattern` for _id stability across promotions.
+    write_incremental_indexing(es, host, org, repo, ref_type, ref, completed_commit=old_sha,
+                               commit_target=new_sha, ref_pattern=ref_pattern, prior=prior,
+                               index_level=level, index_suffix=suffix)
+    try:
+        full_rebuild = old_sha is None or force or routing_changed
+        if not full_rebuild:
+            plan = plan_changes(repo_dir, old_sha, new_sha)
+            full_rebuild = plan.base_missing
+
+        if full_rebuild:
+            # Content scoped on `ref_pattern` (the stream identity).
+            delete_incremental_branch(es, host, org, repo, ref_pattern,
+                                      ref_type=ref_type, index_level=level, index_suffix=suffix)
+            reporter.set_total_files(unit, count_tracked_files(repo_dir))
+            indexed_files, indexed_lines = index_incremental_paths(
+                es, host, org, repo, repo_dir, ref_pattern, None,
+                on_progress=lambda f, l: reporter.update_counts(unit, f, l),
+                index_level=level, index_suffix=suffix, ref_type=ref_type,
+            )
+        else:
+            delete_incremental_paths(es, host, org, repo, ref_type, ref_pattern, plan.delete_paths,
+                                     index_level=level, index_suffix=suffix)
+            reporter.set_total_files(unit, len(plan.index_paths))
+            indexed_files, indexed_lines = index_incremental_paths(
+                es, host, org, repo, repo_dir, ref_pattern, plan.index_paths,
+                on_progress=lambda f, l: reporter.update_counts(unit, f, l),
+                index_level=level, index_suffix=suffix, ref_type=ref_type,
+            )
+
+        refresh_incremental_content(es, host, org, repo, index_level=level, index_suffix=suffix)
+        files_count, lines_count = count_incremental_branch_docs(
+            es, host, org, repo, ref_pattern, ref_type=ref_type, index_level=level, index_suffix=suffix,
+        )
+        # Mode-switch: flip any complete snapshot markers for this (host,org,repo,ref) to
+        # "stale" BEFORE publishing the incremental join doc as "complete". This ensures the
+        # two-complete-docs fan-out window (one snapshot + one incremental marker both matching
+        # LOOKUP JOIN ON git.ref_pattern) never opens. Stale content is reclaimed by prune.
+        mark_snapshot_markers_stale(es, host, org, repo, ref_pattern)
+        write_incremental_ready(es, host, org, repo, ref_type, ref, new_sha, commit_date_iso,
+                                files_count, lines_count, ref_pattern=ref_pattern,
+                                index_level=level, index_suffix=suffix)
+        # Migration cleanup (write-new -> flip join doc -> delete-old): now that the join doc is
+        # complete and points at the new routing, delete this ref's docs from the old physical
+        # index. Scoped to the exact (host,org,repo,ref_type,git.ref_pattern) 5-term filter so a
+        # sibling source that still lives in the old index is never touched. A crash between the
+        # ready write above and this delete leaves stale-location incremental docs in the old
+        # index; prune's incremental stale-location sweep (Class D-I) reclaims them.
+        if routing_changed:
+            old_level, old_suffix = old_routing
+            delete_incremental_branch(es, host, org, repo, ref_pattern,
+                                      ref_type=ref_type, index_level=old_level, index_suffix=old_suffix)
+    except KeyboardInterrupt:
+        write_incremental_failed(es, host, org, repo, ref_type, ref, completed_commit=old_sha,
+                                 commit_target=new_sha, ref_pattern=ref_pattern, error="interrupted", prior=prior,
+                                 index_level=level, index_suffix=suffix)
+        raise
+    except Exception as e:
+        write_incremental_failed(es, host, org, repo, ref_type, ref, completed_commit=old_sha,
+                                 commit_target=new_sha, ref_pattern=ref_pattern, error=str(e), prior=prior,
+                                 index_level=level, index_suffix=suffix)
+        raise
+    reporter.finish(unit, "indexed", indexed_files, indexed_lines)
 
 
 def index_one(
@@ -345,6 +525,9 @@ def run(
         except ES_ERRORS as e:
             reporter.finish(unit, "error", detail=f"Elasticsearch request failed: {e}")
             sys.exit(1)
+
+    if not _run_uniqueness_gate(es, host, org, repo):
+        sys.exit(1)
 
 
 def run_config(
@@ -478,6 +661,49 @@ def run_config(
                 return
             (host, org, repo), group = item
             clone_url = hosts[host].clone_url(org, repo)
+
+            # Delta-mode units (branches and tags) are split from the snapshot pre-clone/skip/
+            # retention flow entirely: no cohort retention, no `since` history walk, no
+            # commit-addressed content reuse -- each is a standalone two-phase delta update
+            # against its own prior state (see index_incremental_branch_in_dir). Processed here,
+            # before the snapshot-only `group` continues below with delta units filtered out.
+            incremental_units = [u for u in group if u.mode == "delta"]
+            group = [u for u in group if u.mode != "delta"]
+            for unit in incremental_units:
+                reporter.start(unit)
+            if incremental_units:
+                try:
+                    with prepared_repo(host, org, repo, clone_url, cache_root, ephemeral) as repo_dir:
+                        if repo_dir is None:
+                            for unit in incremental_units:
+                                reporter.finish(
+                                    unit, "locked",
+                                    detail="another sourcerer run holds this repo's cache lock",
+                                )
+                        else:
+                            for unit in incremental_units:
+                                if _aborted.is_set():
+                                    break
+                                try:
+                                    index_incremental_branch_in_dir(
+                                        es, host, org, repo, repo_dir, unit.ref, force, reporter, unit,
+                                    )
+                                except KeyboardInterrupt:
+                                    break
+                                except (FileNotFoundError, subprocess.CalledProcessError,
+                                        ValueError, *ES_ERRORS) as e:
+                                    with failures_lock:
+                                        failures += 1
+                                    reporter.finish(unit, "error", detail=str(e))
+                except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
+                    for unit in incremental_units:
+                        if unit.status is None:
+                            with failures_lock:
+                                failures += 1
+                            reporter.finish(unit, "error", detail=str(e))
+            if not group:
+                return
+
             # 2a. Cheap pre-clone skip for the whole group (no clone yet).
             #
             # Batched approach: for branch/tag units that carry a remote_sha from Phase 1's
@@ -726,6 +952,14 @@ def run_config(
             # Drain the iterator so any unexpected error surfaces; expected per-ref/clone
             # errors are handled inside process_group and counted in `failures`.
             list(pool.map(process_group, groups.items()))
+
+    # Post-index uniqueness gate, one distinct repo at a time, skipped on abort (the
+    # plan is incomplete). Every offending repo's ref_key(s) are reported before exiting.
+    if not _aborted.is_set():
+        distinct_repos = {(c.host, c.org, c.repo) for c in entries}
+        for host, org, repo in sorted(distinct_repos):
+            if not _run_uniqueness_gate(es, host, org, repo):
+                failures += 1
 
     # Prune only after ALL indexing is complete, so a ref newly indexed this run is present in
     # the refs index before it's scored for retention (e.g. it can be the cohort-newest that

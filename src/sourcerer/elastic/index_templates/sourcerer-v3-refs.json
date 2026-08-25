@@ -3,7 +3,7 @@
     "description": "sourcerer-refs"
   },
   "index_patterns": [
-    "sourcerer-v2-refs*"
+    "sourcerer-v3-refs*"
   ],
   "template": {
     "aliases": {
@@ -18,9 +18,13 @@
             "git.host",
             "git.org",
             "git.repo",
-            "git.ref"
+            "git.ref",
+            "git.ref_pattern",
+            "git.ref_type"
           ],
           "order": [
+            "asc",
+            "asc",
             "asc",
             "asc",
             "asc",
@@ -56,8 +60,10 @@
               "normalizer": "lowercase"
             },
             "ref": {
-              "type": "keyword",
-              "normalizer": "lowercase"
+              "type": "keyword"
+            },
+            "ref_pattern": {
+              "type": "keyword"
             },
             "ref_type": {
               "type": "keyword",
@@ -69,6 +75,10 @@
             },
             "commit_date": {
               "type": "date"
+            },
+            "commit_target": {
+              "type": "keyword",
+              "normalizer": "lowercase"
             }
           }
         },
@@ -89,10 +99,16 @@
           "type": "date"
         },
         "index_level": {
-          "type": "keyword"
+          "type": "keyword",
+          "normalizer": "lowercase"
         },
         "index_suffix": {
-          "type": "keyword"
+          "type": "keyword",
+          "normalizer": "lowercase"
+        },
+        "mode": {
+          "type": "keyword",
+          "normalizer": "lowercase"
         }
       }
     }

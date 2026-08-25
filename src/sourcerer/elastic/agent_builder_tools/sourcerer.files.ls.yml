@@ -9,7 +9,49 @@ configuration:
     | WHERE git.host LIKE ?git_host
         AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
-        AND git.commit LIKE ?git_commit
+        AND (
+          // Resolve git_commit, git_ref, and git_ref_type against the small
+          // sourcerer-refs index first, rather than evaluating the wildcard
+          // match per line against this (far larger) content index.
+          // Content docs come in two disjoint shapes:
+          //   1. Commit snapshots have git.commit and no git.ref
+          //   2. Incremental refs have git.ref and no git.commit
+          // So resolution yields two membership sets off the same match:
+          //   1. Matching commits, checked against snapshot-shaped rows
+          //   2. Matching refs, checked against incremental-shaped rows
+          (git.commit IS NOT NULL AND git.commit IN (
+              // Commit snapshots
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host
+                  AND git.org LIKE ?git_org
+                  AND git.repo LIKE ?git_repo
+                  AND git.commit LIKE ?git_commit
+                  AND git.ref LIKE ?git_ref
+                  AND git.ref_type LIKE ?git_ref_type
+              | KEEP git.commit
+              ))
+          OR
+          (git.ref_pattern IS NOT NULL AND git.commit IS NULL AND git.ref_pattern IN (
+              // Incremental refs
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host
+                  AND git.org LIKE ?git_org
+                  AND git.repo LIKE ?git_repo
+                  AND git.commit LIKE ?git_commit
+                  AND (git.ref_pattern LIKE ?git_ref OR git.ref LIKE ?git_ref)
+                  AND git.ref_type LIKE ?git_ref_type
+              | KEEP git.ref_pattern
+              ))
+          )
+
+    // Branch by content-doc shape to resolve git.commit for incremental refs:
+    // 1. Snapshot rows already carry git.commit on the content doc (no join needed).
+    // 2. Incremental rows carry only git.ref; the LOOKUP JOIN resolves the citable
+    //    git.commit from the refs join doc (one doc per (host,org,repo,ref)).
+    | FORK
+        ( WHERE git.commit IS NOT NULL )
+        ( WHERE git.ref_pattern IS NOT NULL AND git.commit IS NULL
+            | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref_pattern, git.ref_type )
 
     // Enforce glob depth for * and ** on file.path.
     // Without this, "src/*/Job.java" would match files at any depth,
@@ -64,7 +106,11 @@ configuration:
     )
 
     // Collapse to one row per unique entry - this turns raw paths into an ls listing.
-    | STATS files = COUNT(*), bytes = SUM(file.size) BY name, is_dir
+    // Group by the commit too: when git_commit/git_ref/git_ref_type match more than one ref (e.g. a
+    // wildcard or the default "*"), each ref must get its own listing rather than having
+    // its file counts/bytes summed together into a meaningless cross-ref total.
+    | STATS files = COUNT(*), bytes = SUM(file.size)
+        BY git.host, git.org, git.repo, git.commit, name, is_dir
 
     // Append a trailing "/" to directory entries so they read like ls output.
     | EVAL name = CASE(is_dir, CONCAT(name, "/"), name)
@@ -72,8 +118,8 @@ configuration:
     // Format the response. Each row is a single entry name, the cheapest row
     // in this toolset, so limit defaults to a high ceiling that mainly exists
     // to opt out of ES|QL's implicit row cap rather than to trim real usage.
-    | SORT is_dir DESC, name
-    | KEEP name
+    | SORT git.host, git.org, git.repo, git.commit, is_dir DESC, name
+    | KEEP git.host, git.org, git.repo, git.commit, name
     | LIMIT ?limit
   params:
     git_host:
@@ -94,6 +140,16 @@ configuration:
     git_commit:
       type: string
       description: Filter by git commit(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_ref:
+      type: string
+      description: Filter by ref name(s), e.g. "main" or "v1.*" (supports * and ? wildcards)
+      optional: true
+      defaultValue: "*"
+    git_ref_type:
+      type: string
+      description: Filter by ref type (can be "branch", "tag", "commit", or any with "*")
       optional: true
       defaultValue: "*"
     file_path:

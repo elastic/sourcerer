@@ -43,11 +43,11 @@ class TestListSourcererIndices:
     def test_discovers_backing_indices_through_content_aliases(self):
         es = MagicMock()
         es.indices.get_alias.side_effect = [
-            {"sourcerer-v2-files~github~acme~widgets": {}},
-            {"sourcerer-v2-lines~github~acme~widgets": {}},
+            {"sourcerer-v3-files~github~acme~widgets": {}},
+            {"sourcerer-v3-lines~github~acme~widgets": {}},
         ]
         names = list_sourcerer_indices(es)
-        assert names == ["sourcerer-v2-files~github~acme~widgets", "sourcerer-v2-lines~github~acme~widgets"]
+        assert names == ["sourcerer-v3-files~github~acme~widgets", "sourcerer-v3-lines~github~acme~widgets"]
         assert es.indices.get_alias.call_args_list[0].kwargs == {"name": FILES_ALIAS}
         assert es.indices.get_alias.call_args_list[1].kwargs == {"name": LINES_ALIAS}
 
@@ -119,12 +119,12 @@ class TestEmptyContentIndices:
 
     def test_returns_only_zero_doc_content_indices(self):
         counts = {
-            "sourcerer-v2-files~github~acme~widgets": 0,        # empty -> returned
-            "sourcerer-v2-files~github~acme~widgets^deploy": 5, # non-empty -> skipped
+            "sourcerer-v3-files~github~acme~widgets": 0,        # empty -> returned
+            "sourcerer-v3-files~github~acme~widgets^deploy": 5, # non-empty -> skipped
         }
         es = self._es_with_counts(counts)
         result = empty_content_indices(es, list(counts))
-        assert result == ["sourcerer-v2-files~github~acme~widgets"]
+        assert result == ["sourcerer-v3-files~github~acme~widgets"]
 
     def test_non_sourcerer_index_never_considered(self):
         # An unrelated (even empty) index must not be counted or returned.
@@ -134,11 +134,11 @@ class TestEmptyContentIndices:
         es.count.assert_not_called()  # guarded by parse_index_name before any count
 
     def test_refs_index_not_considered(self):
-        es = self._es_with_counts({"sourcerer-v2-refs": 0})
-        assert empty_content_indices(es, ["sourcerer-v2-refs"]) == []
+        es = self._es_with_counts({"sourcerer-v3-refs": 0})
+        assert empty_content_indices(es, ["sourcerer-v3-refs"]) == []
         es.count.assert_not_called()
 
     def test_index_that_vanished_is_skipped(self):
         # count raises NotFound (deleted between listing and counting) -> just skipped.
         es = self._es_with_counts({})  # every count -> NotFound
-        assert empty_content_indices(es, ["sourcerer-v2-files~github~acme~widgets"]) == []
+        assert empty_content_indices(es, ["sourcerer-v3-files~github~acme~widgets"]) == []

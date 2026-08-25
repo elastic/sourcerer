@@ -16,6 +16,7 @@ from ...config import Config, RepoConfig, load_config
 from ...hosts import Host
 from ...planner import Marker, plan_repo
 from ...progress import Unit
+from ...version import match_version
 from .git import _commit_date_of, list_remote_ref_names, list_remote_refs
 
 
@@ -33,6 +34,12 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
     # Phase 2's pre-clone skip check.
     fetched: dict[str, dict[str, str] | None] = {}
     seen: set[tuple[str, str]] = set()
+    # Maps (ref_type, name) -> mode for the winning selector, so we can detect when a second
+    # selector of a DIFFERENT mode also claims the same ref. Mixed-mode refs are unsafe: the
+    # incremental LOOKUP JOIN ON git.ref requires exactly one refs doc per (host,org,repo,ref),
+    # but a snapshot marker and an incremental join doc would both be present (fan-out).
+    seen_mode: dict[tuple[str, str], str] = {}
+    mode_conflicts: list[tuple[str, str, str, str]] = []  # (ref_type, name, mode_a, mode_b)
     units: list[Unit] = []
     for sel in cfg.selectors:
         rt = sel.ref_type
@@ -44,9 +51,11 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
                 if (rt, prefix) in seen:
                     continue
                 seen.add((rt, prefix))
+                seen_mode[(rt, prefix)] = sel.mode
                 units.append(Unit(
                     host=cfg.host, org=cfg.org, repo=cfg.repo, ref=prefix, kind=rt,
                     index_level=sel.index_level, index_suffix=sel.index_suffix,
+                    mode=sel.mode, ref_pattern=prefix,
                 ))
             continue
         if rt not in fetched:
@@ -55,20 +64,68 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
         if ref_map is None:
             continue  # ls-remote failed for this ref type, skip
         floor = sel.since_version_floor()  # version-based `since: {ref}`, name-only
+
+        # Delta-mode tag selectors are "moving streams": each raw pattern string is a single
+        # logical stream whose identity is the pattern itself (not any concrete tag name). One
+        # stream unit is emitted per raw pattern that matches at least one remote tag; the
+        # concrete newest-committed tag is resolved post-clone (ls-remote lacks dates). The
+        # per-name loop below handles all other cases (snapshot tags, all branches).
+        if sel.mode == "delta" and rt == "tag":
+            for pattern, cp in zip(sel.raw_patterns, sel.compiled):
+                key = (rt, pattern)
+                # Only emit a stream unit if this specific pattern matches at least one remote tag.
+                has_match = any(match_version(cp, name) is not None for name in ref_map)
+                if not has_match:
+                    continue  # pattern matches nothing remotely -- no stream to emit
+                if key in seen:
+                    prior_mode = seen_mode[key]
+                    if prior_mode != sel.mode:
+                        mode_conflicts.append((rt, pattern, prior_mode, sel.mode))
+                    continue
+                seen.add(key)
+                seen_mode[key] = sel.mode
+                units.append(Unit(
+                    host=cfg.host, org=cfg.org, repo=cfg.repo, ref=pattern, kind=rt,
+                    remote_sha=None,  # resolved post-clone via ref_dates
+                    index_level=sel.index_level, index_suffix=sel.index_suffix,
+                    mode=sel.mode, ref_pattern=pattern,
+                ))
+            continue
+
         for name in sorted(ref_map):
-            if (rt, name) in seen:
+            matched = sel.match_pattern(rt, name)
+            if matched is None:
                 continue
-            v = sel.matches(rt, name)
-            if v is None:
-                continue
+            pattern, v = matched
             if floor is not None and v.components < floor:
                 continue  # below the since version floor
-            seen.add((rt, name))
+            key = (rt, name)
+            if key in seen:
+                # Already claimed by an earlier selector: check for a mode conflict.
+                prior_mode = seen_mode[key]
+                if prior_mode != sel.mode:
+                    mode_conflicts.append((rt, name, prior_mode, sel.mode))
+                continue
+            seen.add(key)
+            seen_mode[key] = sel.mode
             units.append(Unit(
                 host=cfg.host, org=cfg.org, repo=cfg.repo, ref=name, kind=rt,
                 remote_sha=ref_map[name],
                 index_level=sel.index_level, index_suffix=sel.index_suffix,
+                mode=sel.mode, ref_pattern=pattern,
             ))
+
+    if mode_conflicts:
+        conflicts_str = ", ".join(
+            f"{rt}/{name} ({mode_a} vs {mode_b})"
+            for rt, name, mode_a, mode_b in mode_conflicts
+        )
+        click.echo(
+            f"Warning: {cfg.org}/{cfg.repo}: selectors claim the same ref(s) with different "
+            f"modes -- skipping all units for this repo to avoid fan-out: {conflicts_str}",
+            err=True,
+        )
+        return []
 
     failed_kinds = sorted(k for k, v in fetched.items() if v is None)
     if failed_kinds:

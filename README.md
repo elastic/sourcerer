@@ -46,7 +46,7 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
 
 1. Install the `sourcerer` CLI:
    ```sh
-   uv tool install "git+https://github.com/elastic/sourcerer.git@v2.5.0"
+   uv tool install "git+https://github.com/elastic/sourcerer.git@v3.0.0"
    ```
 2. Add connection details. Create a `.env` in your working directory, then fill it in:
    ```sh
@@ -84,6 +84,36 @@ Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.co
 ## Configuration
 
 The [`sourcerer.yml` specification](specs/sourcerer-yml.md) has the full reference of fields supported by the configuration file.
+
+### Snapshot vs. delta indexing (`mode`)
+
+Each source can set `mode: snapshot` (the default) or `mode: delta` (branch or tag). Every
+Agent Builder content tool takes the same `git_commit_ish` param either way (a commit SHA or a
+branch/tag name, `*`/`?` wildcards supported) and resolves a commit the same way regardless of
+mode.
+
+- **`snapshot`** (default): content is commit-addressed. Every ref (branch, tag, or pinned commit)
+  that resolves to the same commit collapses to one snapshot. A moving branch's HEAD advance indexes
+  a brand-new snapshot under the new commit.
+- **`delta`** (branch or tag): content is ref-addressed instead. Content docs carry `git.ref`
+  but no `git.commit` of their own — the ref's current commit lives only on its refs join doc,
+  resolved at query time via a LOOKUP JOIN. A HEAD advance re-indexes only the files
+  `git diff --name-status` reports changed (add/modify/delete/rename), not the whole tree, so
+  staying current on a fast-moving branch or tag is cheap. Particularly useful for fast-moving
+  tags that are force-updated frequently (e.g. `deploy@8`-style Serverless promotion tags) where
+  snapshot mode would mint a full snapshot per move. `since` and `retain` don't apply to a
+  delta-mode source (there is no per-commit history to filter or retain) and are rejected if given.
+
+```yaml
+sources:
+- git: { host: "github", org: "elastic", repo: "serverless-gitops", ref_type: "branch" }
+  match: "main"
+  mode: delta
+```
+
+Upgrading from a pre-`ref_key` install is automatic and invisible: every `index` run backfills
+pre-existing snapshot content in place (idempotent -- a repeat run changes nothing) unless you
+pass `--no-backfill`.
 
 ### Cloning with SSH
 
@@ -316,10 +346,10 @@ claude plugin marketplace remove elastic-sourcerer
 
 ## Upgrades
 
-To upgrade, reinstall from the desired release tag, replacing `v2.5.0` with the release you want:
+To upgrade, reinstall from the desired release tag, replacing `v3.0.0` with the release you want:
 
 ```sh
-uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@v2.5.0"
+uv tool install --reinstall "git+https://github.com/elastic/sourcerer.git@v3.0.0"
 ```
 
 Git tag installations remain pinned to that release. `uv tool upgrade sourcerer` does not automatically discover a newer GitHub tag.
@@ -383,6 +413,7 @@ the repo root. uv reads `pyproject.toml`, provisions a matching Python, and sync
 dependencies into an isolated `./.venv` (gitignored) on first run:
 
 ```sh
+uv sync --extra dev
 uv run sourcerer help
 uv run sourcerer setup
 uv run sourcerer index elastic/elasticsearch -b main
@@ -406,7 +437,7 @@ uv run pytest tests/
 #### Prepare a release
 
 ```sh
-./scripts/release.sh prepare v2.5.0
+./scripts/release.sh prepare v3.0.0
 ```
 
 `prepare` bumps the version numbers in `pyproject.toml`, `uv.lock`,
@@ -420,7 +451,7 @@ Then from an up-to-date `main` with no tracked changes, publish the tag to make
 an official release:
 
 ```sh
-./scripts/release.sh publish v2.5.0
+./scripts/release.sh publish v3.0.0
 ```
 
 `publish` verifies that all version files are consistent, `main` matches

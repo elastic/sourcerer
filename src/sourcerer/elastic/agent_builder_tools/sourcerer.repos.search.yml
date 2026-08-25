@@ -9,7 +9,40 @@ configuration:
     | WHERE git.host LIKE ?git_host
         AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
-        AND git.commit LIKE ?git_commit
+        AND (
+          // Resolve git_commit, git_ref, and git_ref_type against the small
+          // sourcerer-refs index first, rather than evaluating the wildcard
+          // match per line against this (far larger) content index.
+          // Content docs come in two disjoint shapes:
+          //   1. Commit snapshots have git.commit and no git.ref
+          //   2. Incremental refs have git.ref and no git.commit
+          // So resolution yields two membership sets off the same match:
+          //   1. Matching commits, checked against snapshot-shaped rows
+          //   2. Matching refs, checked against incremental-shaped rows
+          (git.commit IS NOT NULL AND git.commit IN (
+              // Commit snapshots
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host
+                  AND git.org LIKE ?git_org
+                  AND git.repo LIKE ?git_repo
+                  AND git.commit LIKE ?git_commit
+                  AND git.ref LIKE ?git_ref
+                  AND git.ref_type LIKE ?git_ref_type
+              | KEEP git.commit
+              ))
+          OR
+          (git.ref_pattern IS NOT NULL AND git.commit IS NULL AND git.ref_pattern IN (
+              // Incremental refs
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host
+                  AND git.org LIKE ?git_org
+                  AND git.repo LIKE ?git_repo
+                  AND git.commit LIKE ?git_commit
+                  AND (git.ref_pattern LIKE ?git_ref OR git.ref LIKE ?git_ref)
+                  AND git.ref_type LIKE ?git_ref_type
+              | KEEP git.ref_pattern
+              ))
+          )
         AND file.path LIKE ?file_path
         AND MATCH(line.content.text, ?q)
 
@@ -19,16 +52,26 @@ configuration:
     | EVAL _file_segs = MV_COUNT(SPLIT(file.path, "/"))
     | WHERE _fp_is_recursive OR _file_segs == _fp_segs
 
-    // Collapse matching lines to one row per repo + commit
+    // Collapse matching lines to one row per (repo, ref) with COALESCE(git.ref, git.commit).
+    // git.ref is checked first because it's the only field that distinguishes
+    // two incremental branches that happen to currently point at the same commit
+    // (this query never joins, so an incremental row's git.commit stays NULL
+    // throughout. There's nothing for the COALESCE to prefer it over anyway).
+    // For snapshot rows git.ref is NULL, so this falls through to git.commit,
+    // which is already a correct per-commit identity since snapshot content is
+    // naturally deduplicated by commit. Same two reasons as before: incremental
+    // rows have no commit of their own to group by, and two refs sharing a
+    // commit must not collapse into one bucket.
+    | EVAL _ref_ish = COALESCE(git.ref, git.commit)
     | STATS
         _commit_file_count_distinct = COUNT_DISTINCT(file.path),
         _commit_score_sum = SUM(_score)
-        BY git.host, git.org, git.repo, git.commit
+        BY git.host, git.org, git.repo, _ref_ish
 
     // Normalize by distinct files so breadth beats duplication
     | EVAL _commit_score_density = _commit_score_sum / SQRT(TO_DOUBLE(_commit_file_count_distinct))
 
-    // Collapse commits to one row per repo
+    // Collapse refs to one row per repo
     | STATS
         _repo_ref_count = COUNT(*),
         _repo_score_sum = SUM(_commit_score_density)
@@ -60,6 +103,16 @@ configuration:
     git_commit:
       type: string
       description: Filter by git commit(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_ref:
+      type: string
+      description: Filter by ref name(s), e.g. "main" or "v1.*" (supports * and ? wildcards)
+      optional: true
+      defaultValue: "*"
+    git_ref_type:
+      type: string
+      description: Filter by ref type (can be "branch", "tag", "commit", or any with "*")
       optional: true
       defaultValue: "*"
     file_path:

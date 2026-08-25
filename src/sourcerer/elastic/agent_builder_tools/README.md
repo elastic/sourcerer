@@ -13,8 +13,54 @@ Query snippet:
 | WHERE git.host LIKE ?git_host
     AND git.org LIKE ?git_org
     AND git.repo LIKE ?git_repo
-    AND git.commit LIKE ?git_commit
+    AND (
+    // Resolve git_commit, git_ref, and git_ref_type against the small
+    // sourcerer-refs index first, rather than evaluating the wildcard
+    // match per line against this (far larger) content index.
+    // Content docs come in two disjoint shapes:
+    //   1. Commit snapshots have git.commit and no git.ref
+    //   2. Incremental refs have git.ref and no git.commit
+    // So resolution yields two membership sets off the same match:
+    //   1. Matching commits, checked against snapshot-shaped rows
+    //   2. Matching refs, checked against incremental-shaped rows
+    (git.commit IS NOT NULL AND git.commit IN (
+        // Commit snapshots
+        FROM sourcerer-refs
+        | WHERE git.host LIKE ?git_host
+            AND git.org LIKE ?git_org
+            AND git.repo LIKE ?git_repo
+            AND git.commit LIKE ?git_commit
+            AND git.ref LIKE ?git_ref
+            AND git.ref_type LIKE ?git_ref_type
+        | KEEP git.commit
+        ))
+    OR
+    (git.ref_pattern IS NOT NULL AND git.commit IS NULL AND git.ref_pattern IN (
+        // Incremental refs: content docs carry git.ref_pattern = stream identity (pattern for
+        // delta-tag streams, branch name otherwise). The refs-side join key is git.ref_pattern
+        // (same field, same value on both sides). The ?git_ref param can be the pattern, the
+        // concrete tag, or a wildcard — both git.ref_pattern and git.ref are checked.
+        FROM sourcerer-refs
+        | WHERE git.host LIKE ?git_host
+            AND git.org LIKE ?git_org
+            AND git.repo LIKE ?git_repo
+            AND git.commit LIKE ?git_commit
+            AND (git.ref_pattern LIKE ?git_ref OR git.ref LIKE ?git_ref)
+            AND git.ref_type LIKE ?git_ref_type
+        | KEEP git.ref_pattern
+        ))
+    )
     // other filters
+
+// Branch by content-doc shape to resolve git.commit for incremental refs:
+//   Snapshot rows already carry git.commit (no join needed).
+//   Incremental rows carry git.ref_pattern (stream identity) and git.ref (concrete resolved ref);
+//   the LOOKUP JOIN resolves git.commit from the refs join doc using git.ref_pattern as the join
+//   key — the same field with the same value on both content and refs sides (no RENAME needed).
+| FORK
+    ( WHERE git.commit IS NOT NULL )
+    ( WHERE git.ref_pattern IS NOT NULL AND git.commit IS NULL
+        | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref_pattern, git.ref_type )
 
 // rest of query
 ```
@@ -43,6 +89,16 @@ params:
       description: Filter by git commit(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
+    git_ref:
+      type: string
+      description: Filter by ref name(s), e.g. "main" or "v1.*" (supports * and ? wildcards)
+      optional: true
+      defaultValue: "*"
+    git_ref_type:
+      type: string
+      description: Filter by ref type (can be "branch", "tag", "commit", or any with "*")
+      optional: true
+      defaultValue: "*"
 ```
 
 ## Glob matching `file.path`
@@ -57,7 +113,7 @@ Query snippet:
 | WHERE git.host LIKE ?git_host
     AND git.org LIKE ?git_org
     AND git.repo LIKE ?git_repo
-    AND git.commit LIKE ?git_commit
+    // filter by git_commit, git_ref, and git_ref_type
     AND file.path LIKE ?file_path
     // other filters
 

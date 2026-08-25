@@ -4,7 +4,7 @@
 from unittest.mock import MagicMock, patch
 
 # App packages
-from sourcerer.utils import make_doc_id, make_client
+from sourcerer.utils import make_doc_id, make_client, build_ref_key
 
 
 class TestMakeDocId:
@@ -31,6 +31,35 @@ class TestMakeDocId:
         # with surrogateescape, must still produce a stable id rather than raising.
         weird = b"\xff\xfe".decode("utf-8", errors="surrogateescape")
         assert make_doc_id("acme", "widgets", weird) == make_doc_id("acme", "widgets", weird)
+
+
+class TestBuildRefKey:
+    def test_ref_key_incremental_shape(self):
+        assert build_ref_key("github", "elastic", "sourcerer", "branch", "main") == (
+            "github~elastic~sourcerer~branch~main"
+        )
+
+    def test_ref_key_lowercases_host_org_repo_preserves_ref_case(self):
+        assert build_ref_key("GitHub", "Elastic", "Sourcerer", "branch", "Feature/Mixed-Case") == (
+            "github~elastic~sourcerer~branch~Feature/Mixed-Case"
+        )
+
+    def test_ref_key_tag_stream_keys_on_pattern(self):
+        """A delta-tag stream's ref key uses the match pattern, not the concrete tag."""
+        pattern = "deploy@{major}"
+        concrete = "deploy@1788000000"
+        assert build_ref_key("github", "elastic", "kibana", "tag", pattern) != (
+            build_ref_key("github", "elastic", "kibana", "tag", concrete)
+        )
+        # The stable identity (pattern) produces a consistent key.
+        assert build_ref_key("github", "elastic", "kibana", "tag", pattern) == (
+            build_ref_key("github", "elastic", "kibana", "tag", pattern)
+        )
+
+    def test_ref_key_deterministic(self):
+        assert build_ref_key("github", "acme", "widgets", "branch", "main") == build_ref_key(
+            "github", "acme", "widgets", "branch", "main"
+        )
 
 
 class TestMakeClient:

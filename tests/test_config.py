@@ -53,7 +53,7 @@ def _git(host="github", org="acme", repo="widgets", ref_type="branch"):
 
 
 def _source(host="github", org="acme", repo="widgets", ref_type="branch",
-            match="main", since=None, retain=None, omit_match=False):
+            match="main", since=None, retain=None, omit_match=False, mode=None, index=None):
     src = {"git": _git(host, org, repo, ref_type)}
     if not omit_match:
         src["match"] = match
@@ -61,6 +61,10 @@ def _source(host="github", org="acme", repo="widgets", ref_type="branch",
         src["since"] = since
     if retain is not None:
         src["retain"] = retain
+    if mode is not None:
+        src["mode"] = mode
+    if index is not None:
+        src["index"] = index
     return src
 
 
@@ -189,6 +193,65 @@ class TestParseSourceMatch:
         assert cfg.repos[0].selectors[0].levels == ("major", "minor", "patch")
 
 
+class TestParseMode:
+    def test_default_is_snapshot(self):
+        cfg = _cfg([_source()])
+        assert cfg.repos[0].selectors[0].mode == "snapshot"
+
+    def test_delta_accepted_on_branch(self):
+        cfg = _cfg([_source(ref_type="branch", mode="delta")])
+        assert cfg.repos[0].selectors[0].mode == "delta"
+
+    def test_delta_accepted_on_tag(self):
+        cfg = _cfg([_source(ref_type="tag", match="v1.0.0", mode="delta")])
+        assert cfg.repos[0].selectors[0].mode == "delta"
+
+    def test_delta_rejected_on_commit(self):
+        with pytest.raises(ValueError, match="only valid for git.ref_type: branch or tag"):
+            _cfg([_source(ref_type="commit", match="cfefb3b", mode="delta")])
+
+    def test_invalid_mode_raises(self):
+        with pytest.raises(ValueError, match="must be one of"):
+            _cfg([_source(mode="bogus")])
+
+    def test_delta_with_since_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'since'"):
+            _cfg([_source(ref_type="branch", mode="delta", since={"age": "1y"})])
+
+    def test_delta_tag_with_since_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'since'"):
+            _cfg([_source(ref_type="tag", match="v1.0.0", mode="delta", since={"age": "1y"})])
+
+    def test_delta_with_retain_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'retain'"):
+            _cfg([_source(ref_type="branch", mode="delta", retain={"count": 5})])
+
+    def test_delta_tag_with_retain_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'retain'"):
+            _cfg([_source(ref_type="tag", match="v1.0.0", mode="delta", retain={"count": 5})])
+
+    def test_delta_with_commit_level_index_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'index.level: commit'"):
+            _cfg([_source(ref_type="branch", mode="delta", index={"level": "commit"})])
+
+    def test_delta_tag_with_commit_level_index_raises(self):
+        with pytest.raises(ValueError, match="cannot be combined with 'index.level: commit'"):
+            _cfg([_source(ref_type="tag", match="v1.0.0", mode="delta", index={"level": "commit"})])
+
+    def test_top_level_update_key_raises(self):
+        with pytest.raises(ValueError, match="unknown keys"):
+            _cfg([{"git": {"host": "github", "org": "acme", "repo": "widgets", "ref_type": "branch"},
+                   "match": "main", "update": "incremental"}])
+
+    def test_delta_with_repo_level_index_is_fine(self):
+        cfg = _cfg([_source(ref_type="branch", mode="delta", index={"level": "repo"})])
+        assert cfg.repos[0].selectors[0].mode == "delta"
+
+    def test_delta_tag_with_repo_level_index_is_fine(self):
+        cfg = _cfg([_source(ref_type="tag", match="v1.0.0", mode="delta", index={"level": "repo"})])
+        assert cfg.repos[0].selectors[0].mode == "delta"
+
+
 class TestParseCommitSource:
     def test_full_sha_accepted(self):
         cfg = _cfg([_source(ref_type="commit", match="a" * 40)])
@@ -282,6 +345,41 @@ class TestSelectorMatches:
         sel = _cfg([_source(ref_type="commit", match="cfefb3b")]).repos[0].selectors[0]
         assert sel.matches("commit", "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60") is not None
         assert sel.matches("commit", "deadbeef" * 5) is None
+
+
+class TestSelectorMatchPattern:
+    def test_versioned_tag_returns_raw_pattern_and_version(self):
+        sel = _cfg([_source(ref_type="tag", match="v{major}.{minor}.{patch}")]).repos[0].selectors[0]
+        result = sel.match_pattern("tag", "v1.2.3")
+        assert result is not None
+        pattern, v = result
+        assert pattern == "v{major}.{minor}.{patch}"
+        assert v.components == (1, 2, 3)
+
+    def test_ref_type_mismatch_returns_none(self):
+        sel = _cfg([_source(ref_type="branch", match="main")]).repos[0].selectors[0]
+        assert sel.match_pattern("tag", "main") is None
+
+    def test_no_match_returns_none(self):
+        sel = _cfg([_source(ref_type="tag", match="v{major}.{minor}.{patch}")]).repos[0].selectors[0]
+        assert sel.match_pattern("tag", "unrelated-tag") is None
+
+    def test_commit_prefix_returns_prefix_and_version(self):
+        sha = "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60"
+        sel = _cfg([_source(ref_type="commit", match="cfefb3b")]).repos[0].selectors[0]
+        result = sel.match_pattern("commit", sha)
+        assert result is not None
+        prefix, v = result
+        assert prefix == "cfefb3b"
+        assert v.ref == sha
+
+    def test_first_matching_pattern_wins(self):
+        # When multiple patterns match, the first raw pattern is returned.
+        sel = _cfg([_source(match=["main", "dev"])]).repos[0].selectors[0]
+        result = sel.match_pattern("branch", "main")
+        assert result is not None
+        pattern, _ = result
+        assert pattern == "main"
 
 
 class TestSinceVersionFloor:

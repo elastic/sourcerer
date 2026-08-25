@@ -22,7 +22,8 @@ from ...indices import REFS_INDEX
 from ...planner import Decision, Marker, plan_repo
 from ...queries import content_indices_for_commit, fetch_markers, resolve_content_commit
 from ...utils import ES_ERRORS, make_client
-from .execute import delete_commit_content, execute_deletions, execute_orphan_deletions, plan_orphans_now
+from .execute import (delete_commit_content, execute_deletions, execute_orphan_deletions,
+                      execute_stale_marker_deletions, plan_orphans_now)
 from .report import _Row, _orphan_rows, _print, _ref_rows, _retention_rows
 
 
@@ -102,6 +103,7 @@ def run(config_path=None, url=None, api_key=None, username=None, password=None,
 
     total_orphan_indices = total_orphan_content = total_orphan_markers = 0
     total_orphan_stale = total_empty_indices = 0
+    total_stale_markers = total_stale_commits = 0
     if not dry_run:
         for cfg, decisions in repo_decisions:
             if any(d.action == "delete" for d in decisions):
@@ -113,6 +115,16 @@ def run(config_path=None, url=None, api_key=None, username=None, password=None,
                     failures[0] += 1
                     click.echo(f"{cfg.host}/{cfg.org}/{cfg.repo}: error deleting: {e}", err=True)
 
+        # Reclaim stale snapshot markers from mode-switches (snapshot → incremental). These are
+        # markers flipped to status="stale" by index_incremental_branch_in_dir before the new
+        # incremental join doc was published, so they are never visible to content tools but do
+        # hold snapshot content that may no longer be needed.
+        try:
+            total_stale_markers, total_stale_commits = execute_stale_marker_deletions(es)
+        except ES_ERRORS as e:
+            failures[0] += 1
+            click.echo(f"error reclaiming stale markers: {e}", err=True)
+
         if orphan_plan is not None:
             (total_orphan_indices, total_orphan_content, total_orphan_markers,
              total_orphan_stale, total_empty_indices) = _apply_orphan_plan(es, orphan_plan, failures)
@@ -122,6 +134,7 @@ def run(config_path=None, url=None, api_key=None, username=None, password=None,
     elif not quiet:
         click.echo(
             f"Pruned {total_markers} marker(s) and {total_commits} commit(s) of content; "
+            f"reclaimed {total_stale_markers} stale marker(s) and {total_stale_commits} stale commit(s); "
             f"removed {total_orphan_indices} orphaned index(es), "
             f"{total_orphan_content} orphaned content commit(s), "
             f"{total_orphan_markers} orphaned marker commit(s), "

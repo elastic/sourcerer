@@ -184,6 +184,20 @@ sources:
   retain:
     count: 5
 
+# Delta mode -- branch or tag. Instead of a new commit-addressed snapshot on every HEAD
+# advance, content is keyed by git.ref and stays in place: a HEAD advance re-indexes only the
+# files `git diff` reports changed (a delta update), rather than the whole tree. Good for a
+# fast-moving branch or force-updated tag (e.g. `deploy@8`-style Serverless promotion tags)
+# where staying current matters more than retaining per-commit history. `since` and `retain`
+# are not meaningful here (there is no per-commit history to filter/retain) and are rejected if given.
+- git:
+    host: github
+    org: elastic
+    repo: serverless-gitops
+    ref_type: branch
+  match: main
+  mode: delta                     # default: snapshot
+
 # Feature/fix branches as of a week ago; keep the newest commit, prune > 1 month.
 - git:
     host: github
@@ -225,7 +239,7 @@ sources:
   match: deploy@{major}
   index:
     level: repo                   # host | org | repo (default) | commit
-    suffix: deploy                # -> sourcerer-v2-*~github~elastic~elasticsearch^deploy
+    suffix: deploy                # -> sourcerer-v3-*~github~elastic~elasticsearch^deploy
 
 # A second host hosting a same-named org/repo is a distinct instance:
 - git:

@@ -10,13 +10,18 @@ configuration:
         AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
         AND git.commit LIKE ?git_commit
-        AND git.ref LIKE ?git_ref
+        // `git.ref_pattern` is the stream identity (pattern for delta-tag streams, ref name otherwise).
+        // `git.ref` is the CONCRETE resolved ref (newest matching tag for delta-tag streams).
+        // Allow filtering by either so users can select by pattern, concrete tag, or wildcard.
+        AND (git.ref_pattern LIKE ?git_ref OR git.ref LIKE ?git_ref)
         AND git.ref_type LIKE ?git_ref_type
         AND status LIKE ?status
 
     // Format the response
     | SORT indexed_at DESC
-    | KEEP git.host, git.org, git.repo, git.ref, git.ref_type, git.commit, git.commit_date, status, files_count, lines_count, indexed_at, indexing_started_at
+    // Include `git.ref_pattern` (stream identity / join key) alongside git.ref (concrete resolved ref).
+    // For non-stream refs git.ref_pattern == git.ref. For delta-tag streams they differ.
+    | KEEP git.host, git.org, git.repo, git.ref, git.ref_pattern, git.ref_type, git.commit, git.commit_date, status, files_count, lines_count, indexed_at, indexing_started_at
     | LIMIT 1000000
   params:
     git_host:

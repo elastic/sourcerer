@@ -44,7 +44,7 @@ class _Row:
         without it.
       - orphan:content, orphan:marker   -> "host/org/repo@commit" -- no ref exists for either case.
       - orphan:index                    -> the index's own name (e.g.
-        "sourcerer-v2-files~host~org~repo") -- not commit- or even repo-addressable, since a
+        "sourcerer-v3-files~host~org~repo") -- not commit- or even repo-addressable, since a
         host~org-level orphan index spans every repo under that host+org.
       - orphan:stale-location           -> "<index name>@<commit>" -- location-specific, since the
         same commit may legitimately have content in another index; only this stale copy is deleted."""

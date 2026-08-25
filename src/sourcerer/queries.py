@@ -65,6 +65,44 @@ def fetch_markers(
     return out
 
 
+def fetch_stale_markers(es: Elasticsearch) -> list[dict]:
+    """Return all refs docs with status="stale" across all repos. Each element is the raw
+    Elasticsearch hit dict (keys: _id, _source). Called by the prune command to reclaim snapshot
+    content that was switched to incremental mode (the flip-status switchover writes "stale"
+    markers before publishing the incremental join doc as "complete", so these never re-appear in
+    any content-tool query, which all gate on status=="complete")."""
+    try:
+        hits = []
+        for hit in scan(es, index=REFS_ALIAS,
+                        query={"query": {"term": {"status": "stale"}}},
+                        preserve_order=False):
+            hits.append(hit)
+        return hits
+    except NotFoundError:
+        return []
+
+
+def fetch_complete_commits_for_repo(es: Elasticsearch, host: str, org: str, repo: str) -> set[str]:
+    """Return the set of git.commit values referenced by any complete (non-stale) marker in this
+    repo. Used by the stale-marker reclamation step to apply the commit-safety guard: a commit
+    still held by a surviving complete marker must not have its content deleted."""
+    try:
+        resp = es.search(
+            index=REFS_ALIAS, size=0,
+            query={"bool": {"filter": [
+                {"term": {"git.host": host}},
+                {"term": {"git.org": org}},
+                {"term": {"git.repo": repo}},
+                {"term": {"status": "complete"}},
+                {"exists": {"field": "git.commit"}},
+            ]}},
+            aggs={"commits": {"terms": {"field": "git.commit", "size": 10000}}},
+        )
+        return {b["key"] for b in resp["aggregations"]["commits"]["buckets"]}
+    except NotFoundError:
+        return set()
+
+
 # --- Orphan sweep: ES-facing read helpers --------------------------------------------------
 # The detection logic itself (orphan_indices/orphan_content_commits/orphan_markers/
 # plan_orphans) is pure and lives in planner.py; these are the thin, mockable, READ-ONLY
@@ -214,6 +252,105 @@ def gather_intended_index_by_commit(
     return out
 
 
+def gather_intended_incremental_index_by_ref(
+    es: Elasticsearch,
+) -> dict[tuple[str, str, str, str, str], set[str]]:
+    """For every (host, org, repo, ref_type, ref) with an incremental join doc, the set of
+    physical content index names that join doc intends -- reconstructed from its
+    index_level/index_suffix via files_index/lines_index with commit=None (incremental content
+    is ref-addressed, not commit-addressed).
+
+    Feeds the incremental stale-location sweep (Class D-I): content for a ref sitting in an
+    index NOT in this set is stale from a crashed migration and should be reclaimed.  Filters to
+    mode=="delta" docs only, so snapshot markers (which always have git.commit) are not
+    double-counted.  Returns {} if the refs index doesn't exist."""
+    out: dict[tuple[str, str, str, str, str], set[str]] = {}
+    body = {"query": {"term": {"mode": "delta"}}}
+    # `git.ref_pattern` is the stream identity that aligns with content docs' git.ref_pattern (the
+    # pattern for delta-tag streams, the branch name for delta branches). `git.ref` is the
+    # concrete resolved ref (e.g. newest tag) and is NOT the content key. Read `git.ref_pattern`.
+    src_fields = ["git.host", "git.org", "git.repo", "git.ref_type", "git.ref_pattern",
+                  "index_level", "index_suffix"]
+    try:
+        for hit in scan(es, index=REFS_ALIAS, query=body, _source=src_fields, preserve_order=False):
+            src = hit["_source"]
+            g = src.get("git", {})
+            host, org, repo = g.get("host"), g.get("org"), g.get("repo")
+            ref_type = g.get("ref_type")
+            # `git.ref_pattern` is the content-side identity (aligns with content docs' git.ref_pattern).
+            ref = g.get("ref_pattern")  # nested under git
+            if not (host and org and repo and ref_type and ref):
+                continue
+            level = src.get("index_level") or "repo"
+            suffix = src.get("index_suffix") or None
+            key = (host, org, repo, ref_type, ref)
+            intended = out.setdefault(key, set())
+            intended.add(files_index(host, org, repo, None, level, suffix))
+            intended.add(lines_index(host, org, repo, None, level, suffix))
+    except NotFoundError:
+        return {}
+    return out
+
+
+def gather_incremental_content_by_index(
+    es: Elasticsearch, index_names: list[str],
+) -> dict[str, set[tuple[str, str, str, str, str]]]:
+    """Per physical index, the distinct (host, org, repo, ref_type, ref) tuples with incremental
+    content docs in it (docs that have git.ref and a null/absent git.commit).
+
+    Feeds the incremental stale-location sweep (Class D-I) in planner.orphan_stale_incremental_content:
+    to decide a doc is stale we must know WHICH physical index holds it AND which ref it belongs to,
+    so this enumerates each backing index by name via a composite aggregation over git.ref_type +
+    git.ref. Empty/missing indices contribute nothing."""
+    out: dict[str, set[tuple[str, str, str, str, str]]] = {}
+    for name in index_names:
+        tuples = _composite_incremental_ref_tuples(es, name)
+        if tuples:
+            out[name] = tuples
+    return out
+
+
+def _composite_incremental_ref_tuples(
+    es: Elasticsearch, index: str,
+) -> set[tuple[str, str, str, str, str]]:
+    """Distinct (host, org, repo, ref_type, ref_pattern) tuples from incremental content docs
+    (git.ref_pattern present, git.commit absent) in `index`. Returns empty set if the index
+    doesn't exist."""
+    out: set[tuple[str, str, str, str, str]] = set()
+    after: dict | None = None
+    while True:
+        composite: dict = {
+            "size": _COMPOSITE_PAGE_SIZE,
+            "sources": [
+                {"host": {"terms": {"field": "git.host"}}},
+                {"org": {"terms": {"field": "git.org"}}},
+                {"repo": {"terms": {"field": "git.repo"}}},
+                {"ref_type": {"terms": {"field": "git.ref_type"}}},
+                {"ref_pattern": {"terms": {"field": "git.ref_pattern"}}},
+            ],
+        }
+        if after is not None:
+            composite["after"] = after
+        # Filter to docs that have git.ref_pattern but no git.commit (incremental content).
+        query = {"bool": {"filter": [{"exists": {"field": "git.ref_pattern"}}],
+                          "must_not": [{"exists": {"field": "git.commit"}}]}}
+        try:
+            resp = es.search(index=index, size=0, query=query,
+                             aggs={"tuples": {"composite": composite}})
+        except NotFoundError:
+            return out
+        agg = resp["aggregations"]["tuples"]
+        buckets = agg["buckets"]
+        if not buckets:
+            return out
+        for b in buckets:
+            out.add((b["key"]["host"], b["key"]["org"], b["key"]["repo"],
+                     b["key"]["ref_type"], b["key"]["ref_pattern"]))
+        after = agg.get("after_key")
+        if after is None:
+            return out
+
+
 _FULL_SHA_LEN = 40
 _MIN_PREFIX_LEN = 7
 
@@ -242,6 +379,170 @@ def content_indices_for_commit(
         for b in resp["aggregations"]["idx"]["buckets"]:
             names.add(b["key"])
     return sorted(names)
+
+
+def _enumerate_content_field(
+    es: Elasticsearch, host: str, org: str, repo: str, field: str,
+) -> set[str]:
+    """Every distinct value of `field` (git.commit or git.ref) in this repo's content,
+    restricted to docs where that field IS NOT NULL, via paginated composite aggregation."""
+    filters = [
+        {"term": {"git.host": host}},
+        {"term": {"git.org": org}},
+        {"term": {"git.repo": repo}},
+        {"exists": {"field": field}},
+    ]
+    out: set[str] = set()
+    for index in (FILES_ALIAS, LINES_ALIAS):
+        after: dict | None = None
+        while True:
+            composite: dict = {
+                "size": _COMPOSITE_PAGE_SIZE,
+                "sources": [{"val": {"terms": {"field": field}}}],
+            }
+            if after is not None:
+                composite["after"] = after
+            try:
+                resp = es.search(
+                    index=index, size=0,
+                    query={"bool": {"filter": filters}},
+                    aggs={"keys": {"composite": composite}},
+                )
+            except NotFoundError:
+                break
+            agg = resp["aggregations"]["keys"]
+            buckets = agg["buckets"]
+            if not buckets:
+                break
+            for b in buckets:
+                out.add(b["key"]["val"])
+            after = agg.get("after_key")
+            if after is None:
+                break
+    return out
+
+
+def _enumerate_incremental_content_ref_pairs(
+    es: Elasticsearch, host: str, org: str, repo: str,
+) -> set[tuple[str, str]]:
+    """Every distinct (git.ref_type, git.ref_pattern) pair in this repo's incremental content docs
+    (docs that have git.ref_pattern and no git.commit), via paginated composite aggregation."""
+    out: set[tuple[str, str]] = set()
+    for index in (FILES_ALIAS, LINES_ALIAS):
+        after: dict | None = None
+        while True:
+            composite: dict = {
+                "size": _COMPOSITE_PAGE_SIZE,
+                "sources": [
+                    {"ref_type": {"terms": {"field": "git.ref_type"}}},
+                    {"ref_pattern": {"terms": {"field": "git.ref_pattern"}}},
+                ],
+            }
+            if after is not None:
+                composite["after"] = after
+            query = {"bool": {
+                "filter": [
+                    {"term": {"git.host": host}},
+                    {"term": {"git.org": org}},
+                    {"term": {"git.repo": repo}},
+                    {"exists": {"field": "git.ref_pattern"}},
+                ],
+                "must_not": [{"exists": {"field": "git.commit"}}],
+            }}
+            try:
+                resp = es.search(
+                    index=index, size=0,
+                    query=query,
+                    aggs={"pairs": {"composite": composite}},
+                )
+            except NotFoundError:
+                break
+            agg = resp["aggregations"]["pairs"]
+            buckets = agg["buckets"]
+            if not buckets:
+                break
+            for b in buckets:
+                out.add((b["key"]["ref_type"], b["key"]["ref_pattern"]))
+            after = agg.get("after_key")
+            if after is None:
+                break
+    return out
+
+
+def check_join_uniqueness(es: Elasticsearch, host: str, org: str, repo: str) -> list[str]:
+    """Join-uniqueness gate: verifies every content key maps to a correct
+    refs join doc. Split by content shape (no `mode` on content docs):
+
+    - Snapshot (git.commit IS NOT NULL): each commit must resolve to ≥1 complete refs doc
+      (presence check -- multi-ref-per-commit is legal; the snapshot FORK arm no longer joins
+      so the uniqueness requirement there is already removed).
+    - Incremental (git.ref IS NOT NULL): each ref must resolve to EXACTLY ONE refs doc with
+      `mode == "delta"` -- the anti-fan-out invariant for the surviving join.
+
+    Returns the sorted list of offending keys (commits/refs that fail their respective check);
+    an empty list means the invariant holds."""
+    offending: list[str] = []
+
+    # --- snapshot: each commit must have ≥1 complete (or in-progress) refs doc ---
+    # Accept "indexing" status as non-offending: an active run holding this commit is not stale.
+    commits = _enumerate_content_field(es, host, org, repo, "git.commit")
+    if commits:
+        try:
+            resp = es.search(
+                index=REFS_ALIAS, size=0,
+                query={"bool": {"filter": [
+                    {"term": {"git.host": host}},
+                    {"term": {"git.org": org}},
+                    {"term": {"git.repo": repo}},
+                    {"terms": {"git.commit": sorted(commits)}},
+                    {"terms": {"status": ["complete", "indexing"]}},
+                ]}},
+                aggs={"commits": {"terms": {"field": "git.commit", "size": len(commits)}}},
+            )
+            found_commits = {b["key"] for b in resp["aggregations"]["commits"]["buckets"]}
+        except NotFoundError:
+            found_commits = set()
+        offending.extend(sorted(commits - found_commits))
+
+    # --- incremental: each (ref_type, ref_pattern) pair must have EXACTLY ONE incremental join doc ---
+    # Content docs carry git.ref_pattern (= the stream identity) and git.ref_type; a same-named
+    # branch and tag are distinct (ref_type, ref_pattern) pairs, each allowed exactly one join doc.
+    # On the refs side the join key is git.ref_pattern (= the stream identity), NOT git.ref
+    # (which holds the concrete resolved ref for delta-tag streams). Filter and aggregate by
+    # (git.ref_type, git.ref_pattern) so the pair-counts align with the content-side key.
+    ref_pairs = _enumerate_incremental_content_ref_pairs(es, host, org, repo)
+    if ref_pairs:
+        try:
+            resp = es.search(
+                index=REFS_ALIAS, size=0,
+                query={"bool": {"filter": [
+                    {"term": {"git.host": host}},
+                    {"term": {"git.org": org}},
+                    {"term": {"git.repo": repo}},
+                    {"terms": {"git.ref_pattern": sorted({r for _, r in ref_pairs})}},
+                    {"term": {"mode": "delta"}},
+                ]}},
+                aggs={"ref_pairs": {"composite": {"size": 1000, "sources": [
+                    {"ref_type": {"terms": {"field": "git.ref_type"}}},
+                    {"ref_pattern": {"terms": {"field": "git.ref_pattern"}}},
+                ]}}},
+            )
+            pair_counts = {
+                (b["key"]["ref_type"], b["key"]["ref_pattern"]): b["doc_count"]
+                for b in resp["aggregations"]["ref_pairs"]["buckets"]
+            }
+        except NotFoundError:
+            pair_counts = {}
+        offending.extend(
+            sorted(f"{rt}/{ref_pattern}" for rt, ref_pattern in ref_pairs if pair_counts.get((rt, ref_pattern), 0) != 1)
+        )
+
+    return sorted(offending)
+
+
+# Legacy alias: used by tests and any external callers referencing the old name.
+# Prefer check_join_uniqueness for new code.
+check_ref_key_uniqueness = check_join_uniqueness
 
 
 def resolve_content_commit(

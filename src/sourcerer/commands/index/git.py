@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 
 # App packages
 from ...queries import _parse_dt
@@ -345,6 +346,112 @@ def count_tracked_files(repo_dir: pathlib.Path) -> int:
     """Count git-tracked files via a quick `git ls-files` pass, so per-ref progress
     has a real total before indexing begins. Reuses iter_tracked_files."""
     return sum(1 for _ in iter_tracked_files(repo_dir))
+
+
+@dataclass
+class ChangePlan:
+    """A pure plan for turning one incremental branch update (old commit -> new commit) into
+    Elasticsearch work. `delete_paths` are the prior file/line docs to remove synchronously;
+    `index_paths` are the current tree paths to (re)index. A modified or type-changed file
+    appears in BOTH (delete its stale docs, then re-index every current line). `base_missing`
+    is True when the old commit object is unavailable locally -- the caller must then fall back
+    to full branch-namespace reconciliation instead of trusting an empty diff."""
+
+    delete_paths: list[str] = field(default_factory=list)
+    index_paths: list[str] = field(default_factory=list)
+    base_missing: bool = False
+
+
+def base_commit_available(repo_dir: pathlib.Path, old_sha: str) -> bool:
+    """True if `old_sha` resolves to a commit object present in the local clone. Uses
+    `git cat-file -e <sha>^{commit}` so a tag or partial object still fails closed. A False
+    here means the diff base is gone (e.g. force-push, shallow clone) and the caller must
+    rebuild rather than treat the missing base as an empty diff."""
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "cat-file", "-e", f"{old_sha}^{{commit}}"],
+            check=True,
+            capture_output=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return False
+    return True
+
+
+def _dedupe(paths: list[str]) -> list[str]:
+    """Order-preserving de-duplication (dict keeps first-seen order)."""
+    return list(dict.fromkeys(paths))
+
+
+def _parse_name_status_z(raw: bytes) -> tuple[list[str], list[str]]:
+    """Parse `git diff --name-status -z` output into (delete_paths, index_paths).
+
+    The `-z` stream is a flat run of NUL-terminated tokens: a status token, then one path
+    (add/modify/delete/type-change) or two paths (rename/copy: old then new). Parsing by NUL
+    boundary -- never by whitespace -- preserves spaces, tabs, and unusual bytes in paths.
+    Mapping (rename detection is an optimization; delete+add of the same paths is equivalent):
+      A (add)          -> index new
+      M (modify)       -> delete + index (replace at file granularity)
+      T (type change)  -> delete + index
+      D (delete)       -> delete
+      R (rename)       -> delete old + index new
+      C (copy)         -> index new (source is unchanged, stays indexed)
+    An unrecognized status fails safe as delete + index of its path."""
+    tokens = raw.split(b"\x00")
+    # Each real token is NUL-terminated, so a well-formed stream ends in an empty tail token;
+    # drop trailing empties so a complete record's last path isn't misread as "present but
+    # empty" and a truncated record is detected by running past the end.
+    while tokens and tokens[-1] == b"":
+        tokens.pop()
+    delete_paths: list[str] = []
+    index_paths: list[str] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        status = tokens[i]
+        if not status:
+            i += 1
+            continue
+        code = status.decode("utf-8", errors="surrogateescape")[0]
+        if code in ("R", "C"):
+            if i + 2 >= n:
+                break  # truncated record
+            old = tokens[i + 1].decode("utf-8", errors="surrogateescape")
+            new = tokens[i + 2].decode("utf-8", errors="surrogateescape")
+            i += 3
+            if code == "R":
+                delete_paths.append(old)
+            index_paths.append(new)
+        else:
+            if i + 1 >= n:
+                break  # truncated record
+            path = tokens[i + 1].decode("utf-8", errors="surrogateescape")
+            i += 2
+            if code == "A":
+                index_paths.append(path)
+            elif code == "D":
+                delete_paths.append(path)
+            else:  # M, T, or an unknown status -> replace the whole file
+                delete_paths.append(path)
+                index_paths.append(path)
+    return _dedupe(delete_paths), _dedupe(index_paths)
+
+
+def plan_changes(repo_dir: pathlib.Path, old_sha: str, new_sha: str) -> ChangePlan:
+    """Build the ChangePlan for advancing an incremental branch from `old_sha` to `new_sha`.
+    Returns a `base_missing` plan (no paths) when the old commit is unavailable locally; the
+    caller then rebuilds the branch namespace. Otherwise runs a NUL-delimited name-status diff
+    with rename (-M) and copy (-C) detection and maps each record (see _parse_name_status_z)."""
+    if not base_commit_available(repo_dir, old_sha):
+        return ChangePlan(base_missing=True)
+    result = subprocess.run(
+        ["git", "-C", str(repo_dir), "diff", "--name-status", "-z", "-M", "-C",
+         old_sha, new_sha],
+        check=True,
+        capture_output=True,
+    )
+    delete_paths, index_paths = _parse_name_status_z(result.stdout)
+    return ChangePlan(delete_paths=delete_paths, index_paths=index_paths)
 
 
 def _ls_remote(url: str, *patterns: str, flags: tuple[str, ...] = ()) -> str | None:

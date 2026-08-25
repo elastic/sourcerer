@@ -14,8 +14,10 @@ from elasticsearch.helpers import bulk
 from ...indices import REFS_INDEX, files_index, lines_index
 from ...planner import OrphanPlan, content_delete_set, plan_orphans
 from ...queries import (
-    empty_content_indices, enumerate_ref_tuples, gather_content_by_index,
-    gather_content_commit_tuples, gather_intended_index_by_commit, list_sourcerer_indices,
+    empty_content_indices, enumerate_ref_tuples, fetch_complete_commits_for_repo,
+    fetch_stale_markers, gather_content_by_index, gather_content_commit_tuples,
+    gather_incremental_content_by_index, gather_intended_incremental_index_by_ref,
+    gather_intended_index_by_commit, list_sourcerer_indices,
 )
 
 
@@ -146,6 +148,65 @@ def delete_index(es: Elasticsearch, name: str) -> bool:
         return False
 
 
+def execute_stale_marker_deletions(es: Elasticsearch) -> tuple[int, int]:
+    """Reclaim snapshot content that was superseded by a mode switch to incremental indexing.
+
+    The flip-status switchover in `index_incremental_branch_in_dir` marks old snapshot ref-name
+    markers as status="stale" BEFORE publishing the incremental join doc as "complete", so the
+    two-complete-docs fan-out window never opens. Stale markers carry git.commit (so their content
+    can be reclaimed) but are invisible to all content tools (which gate on status=="complete").
+
+    This function:
+      1. Enumerates all status="stale" snapshot markers cluster-wide.
+      2. Groups them by (host, org, repo) so the commit-safety guard can be applied per-repo.
+      3. For each stale marker, drops its snapshot content ONLY if the commit is not referenced
+         by any surviving complete marker in the same repo (the same commit-safety guard used by
+         execute_deletions via content_delete_set). A commit shared with another snapshot ref is
+         left in place.
+      4. Deletes the stale marker doc from sourcerer-v3-refs.
+
+    Returns (stale_markers_deleted, stale_commits_content_dropped).
+
+    Crash-safety: if a crash occurs between step 3 and step 4, the stale marker doc remains and
+    this function is idempotent -- it will reattempt the same cleanup on the next prune run.
+    Unreachable content left by a crashed step 3 is also reclaimed by the orphan sweep."""
+    stale_hits = fetch_stale_markers(es)
+    if not stale_hits:
+        return (0, 0)
+
+    # Group stale markers by repo for the per-repo commit-safety check.
+    from collections import defaultdict
+    by_repo: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for hit in stale_hits:
+        g = hit["_source"].get("git", {})
+        host = g.get("host", "")
+        org = g.get("org", "")
+        repo = g.get("repo", "")
+        if host and org and repo:
+            by_repo[(host, org, repo)].append(hit)
+
+    markers_deleted = 0
+    commits_dropped = 0
+    for (host, org, repo), hits in by_repo.items():
+        # Fetch commits currently protected by any complete marker in this repo.
+        protected_commits = fetch_complete_commits_for_repo(es, host, org, repo)
+        for hit in hits:
+            commit = hit["_source"].get("git", {}).get("commit")
+            if commit and commit not in protected_commits:
+                # Safe to delete this commit's content.
+                delete_commit_content(es, host, org, repo, commit)
+                commits_dropped += 1
+            # Delete the stale marker doc regardless (the content is either dropped or still
+            # protected by another marker, so the stale marker itself is never useful again).
+            try:
+                es.delete(index=REFS_INDEX, id=hit["_id"])
+            except NotFoundError:
+                pass  # already gone -- race with another prune run
+            markers_deleted += 1
+
+    return (markers_deleted, commits_dropped)
+
+
 def plan_orphans_now(es: Elasticsearch) -> OrphanPlan:
     """Take one read-only snapshot of the cluster (index names, ref tuples, content tuples) via
     the read helpers in sourcerer/queries.py, and compute the full orphan plan from it via
@@ -159,13 +220,19 @@ def plan_orphans_now(es: Elasticsearch) -> OrphanPlan:
     # detection (the index.level/suffix migration backstop).
     content_by_index = gather_content_by_index(es, index_names)
     intended_by_commit = gather_intended_index_by_commit(es)
+    # Class D-I: incremental (ref-addressed, commit-less) stale-location detection -- the
+    # incremental mirror of Class D, since the commit-keyed sweep can't see incremental docs.
+    incremental_content_by_index = gather_incremental_content_by_index(es, index_names)
+    intended_incremental_by_ref = gather_intended_incremental_index_by_ref(es)
     # Class E: content indices already drained to zero docs (a fully-pruned repo, or a suffix
     # a->b migration that emptied ~repo^a while its identity still has markers at ~repo^b).
     empty = empty_content_indices(es, index_names)
     return plan_orphans(index_names, ref_tuples, content_tuples,
                         content_by_index_commit=content_by_index,
                         intended_index_by_commit=intended_by_commit,
-                        empty_index_names=empty)
+                        empty_index_names=empty,
+                        incremental_content_by_index=incremental_content_by_index,
+                        intended_incremental_index_by_ref=intended_incremental_by_ref)
 
 
 def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, int, int, int, int]:
@@ -173,7 +240,7 @@ def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, 
     indices and Class E empty indices -- both near-instant), then the per-repo content
     delete_by_query (Class B -- expensive, one call per content index per repo), then the
     per-index stale-location delete_by_query (Class D -- the index.level/suffix migration backstop,
-    one call per index holding stale docs), then a single delete_by_query against sourcerer-v2-refs
+    one call per index holding stale docs), then a single delete_by_query against sourcerer-v3-refs
     covering every orphaned marker tuple across every repo (Class C -- refs is tiny, so one
     combined query costs one merge cycle instead of one per repo). Repo keys are (host, org, repo).
     Returns (indices_deleted, content_commits_dropped, marker_commits_dropped,
@@ -230,6 +297,30 @@ def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, 
             )
         except NotFoundError:
             pass
+
+    # Class D-I: stale-location incremental content (ref-addressed, no git.commit). Mirrors Class D
+    # but keyed on (host, org, repo, ref_type, ref_pattern) tuples -- the commit-keyed filter above
+    # cannot match incremental docs whose git.commit is absent.
+    for index_name, ref_tuples in plan.orphan_stale_incremental.items():
+        stale_dropped += len(ref_tuples)
+        for (host, org, repo, ref_type, ref_pattern) in ref_tuples:
+            try:
+                es.delete_by_query(
+                    index=index_name,
+                    query={"bool": {"filter": [
+                        {"term": {"git.host": host}},
+                        {"term": {"git.org": org}},
+                        {"term": {"git.repo": repo}},
+                        {"term": {"git.ref_type": ref_type}},
+                        {"term": {"git.ref_pattern": ref_pattern}},
+                    ]}},
+                    conflicts="proceed",
+                    refresh=False,
+                    scroll_size=5000,
+                    wait_for_completion=False,
+                )
+            except NotFoundError:
+                pass
 
     markers_dropped = sum(len(commits) for commits in plan.orphan_marker_commits.values())
     if plan.orphan_marker_commits:

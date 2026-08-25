@@ -40,7 +40,7 @@ class Unit:
 
     `ref` may be None until a default branch is resolved. `kind` is one of
     branch|tag|commit|default. `status` is set once on completion to one of
-    indexed|skipped|tagged|recorded|error.
+    indexed|skipped|no-changes|tagged|recorded|error.
     """
 
     host: str
@@ -67,6 +67,16 @@ class Unit:
     # unit's content docs are written to; defaults reproduce the historical repo-level name.
     index_level: str = "repo"
     index_suffix: str | None = None
+    # sources[i].mode carried from the selector that emitted this unit: "snapshot" (default,
+    # commit-addressed) or "delta" (ref-addressed, branch or tag). Routes the unit to the
+    # incremental delta-index path instead of the snapshot pre-clone/skip/retention flow.
+    mode: str = "snapshot"
+    # Stream identity for delta-tag moving streams. For a delta-mode tag selector whose `match`
+    # pattern covers many concrete tags (e.g. "deploy@{major}"), `ref_pattern` holds the literal
+    # pattern string and is stored as `git.ref_pattern` on all content and refs docs.  `ref`
+    # advances to the resolved concrete tag post-clone.  For all other units (branches, snapshots,
+    # concrete tags) `ref_pattern` == `ref` so the split is transparent to non-stream code paths.
+    ref_pattern: str | None = None
 
     @property
     def label(self) -> str:
@@ -184,6 +194,8 @@ class ProgressReporter:
             return f"✓ {unit.label} - tagged existing content ({counts})"
         if unit.status == "recorded":
             return f"✓ {unit.label} - content already indexed, recorded ref ({counts})"
+        if unit.status == "no-changes":
+            return f"• {unit.label} - no changes, skipped"
         if unit.status == "skipped":
             return f"• {unit.label} - already indexed, skipped"
         if unit.status == "error":
@@ -203,7 +215,7 @@ class ProgressReporter:
         files = sum(u.files for u in self.units)
         lines = sum(u.lines for u in self.units)
         order = [("indexed", "indexed"), ("tagged", "tagged"), ("recorded", "recorded"),
-                 ("skipped", "skipped"), ("error", "failed")]
+                 ("skipped", "skipped"), ("no-changes", "no changes"), ("error", "failed")]
         parts = [f"{by[k]} {label}" for k, label in order if by.get(k)]
         body = ", ".join(parts) or "nothing to do"
         return f"Done in {format_elapsed(time.monotonic() - self.start_time)} - {body}; {files:,} files, {lines:,} lines"

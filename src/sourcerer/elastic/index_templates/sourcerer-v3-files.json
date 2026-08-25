@@ -3,7 +3,7 @@
     "description": "sourcerer-files"
   },
   "index_patterns": [
-    "sourcerer-v2-files*"
+    "sourcerer-v3-files*"
   ],
   "template": {
     "aliases": {
@@ -24,9 +24,13 @@
             "git.org",
             "git.repo",
             "git.commit",
+            "git.ref_pattern",
+            "git.ref_type",
             "file.path"
           ],
           "order": [
+            "asc",
+            "asc",
             "asc",
             "asc",
             "asc",
@@ -55,6 +59,15 @@
             "commit": {
               "type": "keyword",
               "normalizer": "lowercase"
+            },
+            "ref": {
+              "type": "keyword"
+            },
+            "ref_pattern": {
+              "type": "keyword"
+            },
+            "ref_type": {
+              "type": "keyword"
             }
           }
         },
