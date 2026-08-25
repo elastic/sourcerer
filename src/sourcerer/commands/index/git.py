@@ -355,7 +355,7 @@ class ChangePlan:
     `index_paths` are the current tree paths to (re)index. A modified or type-changed file
     appears in BOTH (delete its stale docs, then re-index every current line). `base_missing`
     is True when the old commit object is unavailable locally -- the caller must then fall back
-    to full branch-namespace reconciliation instead of trusting an empty diff (INV-007)."""
+    to full branch-namespace reconciliation instead of trusting an empty diff."""
 
     delete_paths: list[str] = field(default_factory=list)
     index_paths: list[str] = field(default_factory=list)

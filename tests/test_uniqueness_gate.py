@@ -1,5 +1,5 @@
 """Tests for the post-index join-uniqueness gate: sourcerer.queries.check_join_uniqueness
-(INV-011) and its command.py wiring in _run_uniqueness_gate. Every ES call is mocked.
+and its command.py wiring in _run_uniqueness_gate. Every ES call is mocked.
 
 The gate is split by content shape (no mode on content docs):
   - Snapshot (git.commit IS NOT NULL): each commit must have ≥1 complete refs doc.

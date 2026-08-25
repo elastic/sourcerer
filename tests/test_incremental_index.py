@@ -154,7 +154,7 @@ class TestIncrementalIndexFailure:
                 pass
             mocks["write_incremental_ready"].assert_not_called()
             mocks["write_incremental_failed"].assert_called_once()
-            # The completed pointer stays at OLD -- a failed run must not advance it (INV-006).
+            # The completed pointer stays at OLD -- a failed run must not advance it.
             assert mocks["write_incremental_failed"].call_args.kwargs["completed_commit"] == OLD
         finally:
             _stop(patchers)
@@ -359,7 +359,7 @@ class TestIncrementalIndexTagFirstRun:
             _stop(patchers)
 
     def test_tag_missing_diff_base_triggers_full_rebuild(self):
-        """Newest tag's diff base gone → base_missing → full rebuild (INV-007)."""
+        """Newest tag's diff base gone → base_missing → full rebuild."""
         prior = {"git": {"commit": OLD}}
         plan = ChangePlan(base_missing=True)
         patchers, mocks = _patch_common(prior=prior, plan=plan, ref_dates_return=self.TAG_DATES)

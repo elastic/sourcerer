@@ -61,7 +61,7 @@ from .selection import _effective_since_floor, _load_config, _resolve_entry
 
 
 def _run_uniqueness_gate(es: Elasticsearch, host: str, org: str, repo: str) -> bool:
-    """Post-index join-uniqueness gate (INV-011 backstop): every distinct content commit/ref in
+    """Post-index join-uniqueness gate: every distinct content commit/ref in
     this repo must resolve to a complete refs join doc. For snapshot content (git.commit IS NOT
     NULL) each commit must have at least one complete refs doc; for incremental (git.ref IS NOT
     NULL) each ref must have exactly one incremental join doc. Prints offenders to stderr and
@@ -268,14 +268,14 @@ def index_incremental_branch_in_dir(
     Reads the ref's prior completed commit (its refs join doc, `_id = ref_key`), checks out
     the fetched tip, and either:
       - does nothing (already at the completed commit and not `--force`),
-      - does a full rebuild (first index, `--force`, or a missing diff base -- INV-007): delete
+      - does a full rebuild (first index, `--force`, or a missing diff base): delete
         the whole ref namespace, then index every currently-tracked path, or
       - does a delta update: `git diff --name-status` (via `plan_changes`) between the prior and
         new commit, deleting only the paths git reports removed/changed and (re)indexing only the
-        paths git reports added/changed (INV-008 -- scoped by the exact
+        paths git reports added/changed (scoped by the exact
         (host,org,repo,ref_type,ref) 5-tuple, never a whole namespace sweep).
     The refs join doc is published `indexing` before any mutation and `complete` only after the
-    content deletes/indexes and a refresh all succeed (INV-006); a raised exception instead
+    content deletes/indexes and a refresh all succeed; a raised exception instead
     records `write_incremental_failed` and leaves the completed pointer untouched, then
     re-raises so the caller's per-unit error handling reports it.
     """
@@ -953,7 +953,7 @@ def run_config(
             # errors are handled inside process_group and counted in `failures`.
             list(pool.map(process_group, groups.items()))
 
-    # Post-index uniqueness gate (INV-011), one distinct repo at a time, skipped on abort (the
+    # Post-index uniqueness gate, one distinct repo at a time, skipped on abort (the
     # plan is incomplete). Every offending repo's ref_key(s) are reported before exiting.
     if not _aborted.is_set():
         distinct_repos = {(c.host, c.org, c.repo) for c in entries}

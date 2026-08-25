@@ -470,7 +470,7 @@ def _enumerate_incremental_content_ref_pairs(
 
 
 def check_join_uniqueness(es: Elasticsearch, host: str, org: str, repo: str) -> list[str]:
-    """Join-uniqueness gate (INV-011 backstop): verifies every content key maps to a correct
+    """Join-uniqueness gate: verifies every content key maps to a correct
     refs join doc. Split by content shape (no `mode` on content docs):
 
     - Snapshot (git.commit IS NOT NULL): each commit must resolve to ≥1 complete refs doc

@@ -240,7 +240,7 @@ class TestIncrementalDocs:
         assert snap_id != incr_id
 
     def test_branch_and_tag_same_name_have_distinct_ids(self, tmp_path):
-        # A same-named branch and tag in delta mode must produce distinct content ids (INV-004).
+        # A same-named branch and tag in delta mode must produce distinct content ids.
         p = tmp_path / "a.txt"
         p.write_text("hello")
         branch_id, _ = build_incremental_file_doc("github", "acme", "widgets", "branch", "deploy", "a.txt", p)

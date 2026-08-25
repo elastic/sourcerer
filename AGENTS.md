@@ -386,7 +386,7 @@ Content docs come in two disjoint shapes depending on how they were indexed:
   and status. `git.commit` on the content row is already the answer; no join is needed to resolve it.
 - **Delta** (`mode: delta`): content docs carry `git.ref` and no `git.commit`. A
   dedicated refs join doc at `_id = build_ref_key(host,org,repo,ref)` (one per branch) holds the
-  live HEAD commit and is advanced two-phase (INV-006). The join resolves `git.commit` from this doc.
+  live HEAD commit and is advanced two-phase. The join resolves `git.commit` from this doc.
 
 Every Agent Builder content tool (`sourcerer.code.*`, `sourcerer.files.*`) uses
 the same shape that handles both modes without fan-out:
@@ -459,7 +459,7 @@ Every `sourcerer-v3-refs` document — snapshot ref-name markers and incremental
 | `complete` | Fully indexed and ready to query. `indexed_at` is set; `indexing_started_at` is absent/null (the terminal write drops it). Written by `write_ref_marker` (snapshot markers) and `write_incremental_ready` (incremental join docs). The scheduler's "last indexed" aggregation and `sourcerer.refs.list`'s default `?status == "complete"` filter both use this value. |
 | `stale` | A snapshot marker superseded by a mode switch to `delta`. Written by `mark_snapshot_markers_stale` (called BEFORE the incremental join doc is published as `complete`). The prune command reclaims their content and deletes the marker via `execute_stale_marker_deletions`. |
 
-#### Uniqueness gate (INV-011 backstop)
+#### Uniqueness gate
 
 `_run_uniqueness_gate` (`commands/index/command.py`) runs after each index pass and calls
 `check_join_uniqueness` (`queries.py`) to verify:

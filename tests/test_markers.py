@@ -404,7 +404,7 @@ def _indexed_doc(es):
 
 
 class TestWriteRefMarker:
-    """write_ref_marker is the single refs doc per snapshot source (INV-004). git.ref_key has
+    """write_ref_marker is the single refs doc per snapshot source. git.ref_key has
     been removed; snapshot refs are identified by (host, org, repo, ref, commit) on the marker."""
 
     def test_marker_carries_commit_no_ref_key(self):
@@ -434,7 +434,7 @@ class TestWriteRefMarker:
 
     def test_refresh_true_is_propagated(self):
         # write_ref_marker accepts refresh=True for callers that need the doc visible before
-        # the next gate (INV-011) runs.
+        # the next gate runs.
         es = MagicMock()
         write_ref_marker(es, "github", "acme", "widgets", "tag", "v1.0.0", OLD, None,
                          files_count=1, lines_count=1, refresh=True)
@@ -537,7 +537,7 @@ class TestWriteIncrementalIndexing:
                                     completed_commit=OLD, commit_target=NEW)
         doc = _indexed_doc(es)
         assert doc["status"] == "indexing"
-        assert doc["git"]["commit"] == OLD  # completed pointer unchanged (INV-006)
+        assert doc["git"]["commit"] == OLD  # completed pointer unchanged
         assert doc["git"]["commit_target"] == NEW
         assert doc["mode"] == "delta"
         assert doc["git"]["ref_type"] == "branch"
@@ -594,7 +594,7 @@ class TestWriteIncrementalReady:
                                  files_count=5, lines_count=99)
         doc = _indexed_doc(es)
         assert doc["status"] == "complete"
-        assert doc["git"]["commit"] == NEW  # advances only after a successful run (INV-006)
+        assert doc["git"]["commit"] == NEW  # advances only after a successful run
         assert doc["git"]["commit_target"] is None
         assert doc["files_count"] == 5 and doc["lines_count"] == 99
         assert es.index.call_args.kwargs["refresh"] is True  # publication boundary
@@ -616,7 +616,7 @@ class TestWriteIncrementalFailed:
                                   completed_commit=OLD, commit_target=NEW, error="boom")
         doc = _indexed_doc(es)
         assert doc["status"] == "failed"
-        assert doc["git"]["commit"] == OLD   # completed pointer unchanged (INV-006)
+        assert doc["git"]["commit"] == OLD   # completed pointer unchanged
         assert doc["git"]["commit_target"] == NEW
         assert "error" not in doc
         assert "failed_at" not in doc
@@ -688,7 +688,7 @@ class TestDeleteIncrementalBranch:
 
     def test_isolated_from_another_branch(self):
         # Two incremental branches indexed; deleting one's docs must never scope to the other's
-        # (host,org,repo,ref) quadruple (INV-008) -- asserted here at the query-construction level.
+        # (host,org,repo,ref) quadruple -- asserted here at the query-construction level.
         es_a = MagicMock()
         es_b = MagicMock()
         delete_incremental_branch(es_a, "github", "acme", "widgets", "main")

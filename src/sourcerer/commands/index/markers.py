@@ -544,10 +544,10 @@ def pre_clone_skip(
 
 
 # --- incremental refs join docs, keyed by `_id = build_ref_key(...)` ----------------------
-# One document per incremental ref (INV-004): a delta-mode ref's single join doc lives at
+# One document per incremental ref: a delta-mode ref's single join doc lives at
 # `_id = {host}~{org}~{repo}~{ref_type}~{ref}` (constructed by build_ref_key, a plain
 # tilde-joined string -- not a stored field) and its `git.commit` is the ref's live target
-# commit, advanced only by a two-phase indexing -> complete publication (INV-006). ref_type
+# commit, advanced only by a two-phase indexing -> complete publication. ref_type
 # ("branch" or "tag") is part of the key so a same-named branch and tag each get a distinct
 # join doc. This is a DISTINCT id space from `build_ref_id`'s hashed, append-only ref-name
 # markers above; a join doc's `_id` is a plain, unhashed build_ref_key() string, which a
@@ -637,7 +637,7 @@ def write_incremental_indexing(
     """Publish `status: indexing`: the completed pointer (`git.commit`) stays at the LAST
     completed SHA (or None on a first index) while `git.commit_target` advertises the candidate
     SHA the run is advancing to. A failed run never overwrites `git.commit` with `commit_target`
-    (INV-006) -- only `write_incremental_ready` does that, after delete+index+refresh succeed.
+    -- only `write_incremental_ready` does that, after delete+index+refresh succeed.
 
     `ref` is the CONCRETE resolved ref (git.ref payload); `ref_pattern` is the STREAM IDENTITY
     stored as `git.ref_pattern` and used as the doc _id. For delta-tag streams these differ
@@ -678,7 +678,7 @@ def write_incremental_ready(
     index_suffix: str | None = None,
 ) -> None:
     """Publish `status: complete` at the NEW completed commit, clearing `commit_target` and any
-    prior failure fields. This is the pointer-advancing publication boundary (INV-006): callers
+    prior failure fields. This is the pointer-advancing publication boundary: callers
     must delete+index+refresh the content indices FIRST, then call this.
 
     `ref` is the CONCRETE resolved ref (git.ref payload); `ref_pattern` is the STREAM IDENTITY
@@ -717,7 +717,7 @@ def write_incremental_failed(
     index_suffix: str | None = None,
 ) -> None:
     """Record a failed update WITHOUT advancing the completed pointer: status becomes `failed`,
-    `git.commit` remains the last completed SHA (INV-006). The next run retries old -> current.
+    `git.commit` remains the last completed SHA. The next run retries old -> current.
 
     `ref` is the CONCRETE resolved ref (git.ref payload); `ref_pattern` is the STREAM IDENTITY
     (stored as `git.ref_pattern`, used as the doc _id). Defaults to `ref`."""
@@ -773,7 +773,7 @@ def delete_incremental_paths(
 ) -> None:
     """Synchronously delete the file and line docs for `paths` on this exact ref. Scoped by
     the exact (git.host, git.org, git.repo, git.ref_type, git.ref_pattern) 5-term filter
-    (INV-008: one ref's docs can never bleed into another's) plus a `file.path` terms filter.
+    (one ref's docs can never bleed into another's) plus a `file.path` terms filter.
     A no-op for an empty path set."""
     paths = list(paths)
     if not paths:
@@ -809,8 +809,8 @@ def delete_incremental_branch(
     refresh: bool = False,
 ) -> None:
     """Delete EVERY incremental content doc for this ref (full namespace), scoped by the exact
-    (git.host, git.org, git.repo, git.ref_type, git.ref_pattern) 5-term filter (INV-008). Used
-    for the initial index and the missing-diff-base rebuild (INV-007). `ref_type` defaults to
+    (git.host, git.org, git.repo, git.ref_type, git.ref_pattern) 5-term filter. Used
+    for the initial index and the missing-diff-base rebuild. `ref_type` defaults to
     "branch" for back-compat with existing callers that pass `ref_pattern` positionally."""
     query = {"bool": {"filter": [
         {"term": {"git.host": host}},
@@ -860,7 +860,7 @@ def refresh_incremental_content(
     index_level: str = "repo", index_suffix: str | None = None,
 ) -> None:
     """Make the branch's just-written incremental content visible before the ready pointer is
-    published (INV-006: content refresh precedes the final refs write). Best-effort over
+    published (content refresh precedes the final refs write). Best-effort over
     missing indices."""
     es.indices.refresh(
         index=[
