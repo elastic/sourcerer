@@ -427,11 +427,24 @@ def plan_orphans(
     empty_index_names: list[str] | None = None,
     incremental_content_by_index: dict[str, set[tuple[str, str, str, str, str]]] | None = None,
     intended_incremental_index_by_ref: dict[tuple[str, str, str, str, str], set[str]] | None = None,
+    ref_identity_tuples: set[tuple[str, str, str]] | None = None,
 ) -> OrphanPlan:
     """Combine the orphan classes into one plan from cheap snapshots: the physical index names, the
     distinct (host, org, repo, commit) tuples in refs, and the distinct (host, org, repo, commit)
     tuples with content docs (unioned across the files and lines indices present). Pure -- no ES
     calls -- so this is the one seam orphan-sweep tests need to hit.
+
+    `ref_commit_tuples` contains SNAPSHOT-only (host, org, repo, commit) tuples (mode != "delta",
+    status != "stale"). It feeds the Class-B/C commit-level comparison (orphan_content_commits,
+    orphan_markers). Delta join docs must NOT be included here -- their git.commit is a live ref
+    pointer, not a content-addressed snapshot, and delta content carries no git.commit, so a delta
+    HEAD would always appear as a Class-C orphan marker and be deleted.
+
+    `ref_identity_tuples` is an optional (host, org, repo) set covering ALL refs -- snapshot AND
+    delta. When provided, ref_orgs/ref_repos (Class-A identity) are derived from it instead of from
+    ref_commit_tuples, so a delta-only repo (no snapshot markers) still contributes its (host, org,
+    repo) identity and its content index is not falsely flagged orphan:index and deleted. When None
+    (back-compat default), identity is derived from ref_commit_tuples as before.
 
     `content_by_index_commit` (index name -> content commit tuples in it) and
     `intended_index_by_commit` (commit tuple -> index names its markers intend) enable Class-D
@@ -443,8 +456,12 @@ def plan_orphans(
     Class-D-I stale-location detection for incremental (ref-addressed, commit-less) content -- the
     incremental mirror of Class D since the commit-keyed sweep can't see incremental docs.  When
     omitted, Class D-I is empty -- back-compat for callers without incremental location data."""
-    ref_orgs = {(host, org) for host, org, _, _ in ref_commit_tuples}
-    ref_repos = {(host, org, repo) for host, org, repo, _ in ref_commit_tuples}
+    if ref_identity_tuples is not None:
+        ref_orgs = {(host, org) for host, org, _ in ref_identity_tuples}
+        ref_repos = set(ref_identity_tuples)
+    else:
+        ref_orgs = {(host, org) for host, org, _, _ in ref_commit_tuples}
+        ref_repos = {(host, org, repo) for host, org, repo, _ in ref_commit_tuples}
 
     orphan_index_names = orphan_indices(index_names, ref_orgs, ref_repos, ref_commit_tuples)
 

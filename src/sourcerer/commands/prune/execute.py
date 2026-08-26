@@ -14,7 +14,8 @@ from elasticsearch.helpers import bulk
 from ...indices import REFS_INDEX, files_index, lines_index
 from ...planner import OrphanPlan, content_delete_set, plan_orphans
 from ...queries import (
-    empty_content_indices, enumerate_ref_tuples, fetch_complete_commits_for_repo,
+    empty_content_indices, enumerate_ref_repo_identities,
+    enumerate_snapshot_ref_commit_tuples, fetch_complete_commits_for_repo,
     fetch_stale_markers, gather_content_by_index, gather_content_commit_tuples,
     gather_incremental_content_by_index, gather_intended_incremental_index_by_ref,
     gather_intended_index_by_commit, list_sourcerer_indices,
@@ -214,7 +215,18 @@ def plan_orphans_now(es: Elasticsearch) -> OrphanPlan:
     orphan is computed, so the plan reflects one consistent view rather than re-reading state
     between classes."""
     index_names = list_sourcerer_indices(es)
-    ref_tuples = enumerate_ref_tuples(es)
+    # Snapshot-only (mode != "delta", status != "stale") commit tuples feed the Class-B/C
+    # commit-level comparison. Delta join docs carry git.commit = live HEAD but their content is
+    # ref-addressed (no git.commit on content docs), so including them would mark every delta HEAD
+    # as a Class-C orphan marker and delete the join doc -- causing a full re-index on every run.
+    # Stale markers are owned by execute_stale_marker_deletions and excluded here to avoid
+    # double-handling. The exclude-delta (must_not mode=delta) filter is used rather than
+    # require-snapshot (must mode=snapshot) so legacy markers without the mode field are retained.
+    ref_tuples = enumerate_snapshot_ref_commit_tuples(es)
+    # Broad (host, org, repo) identity set -- snapshot AND delta -- feeds Class-A orphan_indices.
+    # A delta-only repo (delta branch, no snapshot tags) has no entries in ref_tuples, so without
+    # a separate identity set its content index would be falsely flagged orphan:index and deleted.
+    ref_identities = enumerate_ref_repo_identities(es)
     content_tuples = gather_content_commit_tuples(es)
     # Per-index content + each commit's marker-intended locations feed Class-D stale-location
     # detection (the index.level/suffix migration backstop).
@@ -232,7 +244,8 @@ def plan_orphans_now(es: Elasticsearch) -> OrphanPlan:
                         intended_index_by_commit=intended_by_commit,
                         empty_index_names=empty,
                         incremental_content_by_index=incremental_content_by_index,
-                        intended_incremental_index_by_ref=intended_incremental_by_ref)
+                        intended_incremental_index_by_ref=intended_incremental_by_ref,
+                        ref_identity_tuples=ref_identities)
 
 
 def execute_orphan_deletions(es: Elasticsearch, plan: OrphanPlan) -> tuple[int, int, int, int, int]:

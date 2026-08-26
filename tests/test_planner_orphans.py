@@ -181,6 +181,65 @@ class TestPlanOrphans:
         assert plan.orphan_content == {}  # gitlab content subsumed by the Class-A index DELETE
         assert plan.orphan_marker_commits == {("github", "acme", "widgets"): {"aaa"}}
 
+    # --- ref_identity_tuples: the delta-orphan regression tests ---
+
+    def test_delta_only_repo_identity_protects_content_index(self):
+        """Regression: a delta-only repo (delta join doc, no snapshot markers) must NOT have its
+        content index flagged orphan:index (Class A), and the delta HEAD commit in the join doc
+        must NOT appear as an orphan:marker (Class C). This is the exact bug that caused every
+        delta branch to be fully re-indexed after each prune: enumerate_snapshot_ref_commit_tuples
+        now excludes delta join docs from ref_commit_tuples, and plan_orphans_now passes a separate
+        ref_identity_tuples (all-refs identity) to protect the content index from Class A."""
+        names = [
+            "sourcerer-v3-files~github~elastic~docs-content",
+            "sourcerer-v3-lines~github~elastic~docs-content",
+        ]
+        # ref_commit_tuples is snapshot-only: the delta join doc's HEAD is NOT in this set.
+        ref_commit_tuples: set[tuple[str, str, str, str]] = set()
+        content_commit_tuples: set[tuple[str, str, str, str]] = set()
+        # ref_identity_tuples carries the delta repo's (host, org, repo) identity.
+        ref_identity_tuples = {("github", "elastic", "docs-content")}
+        plan = plan_orphans(names, ref_commit_tuples, content_commit_tuples,
+                            ref_identity_tuples=ref_identity_tuples)
+        # Content index must NOT be flagged orphan:index -- identity is protected by the delta ref.
+        assert plan.orphan_index_names == []
+        # No marker orphan either -- the delta HEAD was not in ref_commit_tuples.
+        assert plan.orphan_marker_commits == {}
+        assert plan.orphan_content == {}
+
+    def test_mixed_snapshot_and_delta_repo(self):
+        """A repo with both snapshot tags (Class B/C eligible) and a delta branch (exempt): a
+        genuinely-orphaned snapshot marker fires Class C while the delta HEAD (excluded from
+        ref_commit_tuples by the snapshot-only filter) does not."""
+        names = ["sourcerer-v3-files~github~elastic~kibana",
+                 "sourcerer-v3-lines~github~elastic~kibana"]
+        # Snapshot commit "snap_abc" has a marker but no content -> Class-C orphan marker.
+        # Delta commit "delta_head" is intentionally absent (enumerate_snapshot_ref_commit_tuples
+        # filters it out), so it never appears as a marker orphan.
+        ref_commit_tuples = {("github", "elastic", "kibana", "snap_abc")}
+        content_commit_tuples: set[tuple[str, str, str, str]] = set()
+        # Identity covers both the snapshot and delta aspects of the same repo.
+        ref_identity_tuples = {("github", "elastic", "kibana")}
+        plan = plan_orphans(names, ref_commit_tuples, content_commit_tuples,
+                            ref_identity_tuples=ref_identity_tuples)
+        assert plan.orphan_index_names == []
+        # Snapshot orphan marker fires for the snapshot commit.
+        assert plan.orphan_marker_commits == {("github", "elastic", "kibana"): {"snap_abc"}}
+        assert plan.orphan_content == {}
+
+    def test_ref_identity_tuples_omitted_falls_back_to_ref_commit_tuples(self):
+        """Back-compat: when ref_identity_tuples is not passed, identity is derived from
+        ref_commit_tuples exactly as before. Existing callers (all test_planner_orphans.py
+        positional calls) must be unaffected."""
+        names = ["sourcerer-v3-files~github~acme~widgets", "sourcerer-v3-lines~github~acme~widgets"]
+        ref_tuples = {("github", "acme", "widgets", "aaa")}
+        content_tuples = {("github", "acme", "widgets", "aaa")}
+        # No ref_identity_tuples -- falls back to the pre-fix behaviour.
+        plan = plan_orphans(names, ref_tuples, content_tuples)
+        assert plan.orphan_index_names == []
+        assert plan.orphan_marker_commits == {}
+        assert plan.orphan_content == {}
+
 
 class TestOrphanStaleContent:
     """Class D: content in an index none of its commit's markers point at (the index.level/suffix

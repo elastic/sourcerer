@@ -158,6 +158,63 @@ def enumerate_ref_tuples(es: Elasticsearch) -> set[tuple[str, str, str, str]]:
     return _composite_host_org_repo_commit_tuples(es, REFS_ALIAS)
 
 
+def enumerate_snapshot_ref_commit_tuples(es: Elasticsearch) -> set[tuple[str, str, str, str]]:
+    """Snapshot-only (mode != "delta") (git.host, git.org, git.repo, git.commit) tuples from the
+    refs alias, also excluding stale markers (status == "stale").
+
+    This is the correct commit set for the orphan-sweep Class-B/C comparison. Delta join docs
+    carry git.commit = live HEAD but their content is ref-addressed (no git.commit on content docs),
+    so including them in the commit comparison would mark every delta HEAD as an orphan marker and
+    delete the join doc. Using must_not mode=delta (exclude-delta) rather than must mode=snapshot
+    (require-snapshot) preserves legacy markers that predate the mode field and would otherwise be
+    dropped, causing their content to become false Class-B orphans. Stale markers are owned by
+    execute_stale_marker_deletions and must not also be processed by the orphan sweep.
+
+    Returns an empty set if the refs index doesn't exist yet."""
+    query = {"bool": {"must_not": [{"term": {"mode": "delta"}}, {"term": {"status": "stale"}}]}}
+    return _composite_host_org_repo_commit_tuples(es, REFS_ALIAS, query=query)
+
+
+def enumerate_ref_repo_identities(es: Elasticsearch) -> set[tuple[str, str, str]]:
+    """Every distinct (git.host, git.org, git.repo) with any ref doc -- snapshot OR delta --
+    via a paginated composite aggregation over git.host/git.org/git.repo only (no commit source).
+
+    Feeds the Class-A orphan_indices identity protection so that a delta-only repo (one with a
+    delta join doc but no snapshot markers) still contributes (host, org, repo) identity and its
+    content index is not falsely flagged orphan:index and deleted. The commit source is intentionally
+    absent: a delta first-index join doc has git.commit=None (invisible to a git.commit terms agg)
+    but still has host/org/repo and must contribute identity. No mode filter is applied so legacy,
+    snapshot, and delta docs all contribute equally.
+
+    Returns an empty set if the refs index doesn't exist yet."""
+    out: set[tuple[str, str, str]] = set()
+    after: dict | None = None
+    while True:
+        composite: dict = {
+            "size": _COMPOSITE_PAGE_SIZE,
+            "sources": [
+                {"host": {"terms": {"field": "git.host"}}},
+                {"org": {"terms": {"field": "git.org"}}},
+                {"repo": {"terms": {"field": "git.repo"}}},
+            ],
+        }
+        if after is not None:
+            composite["after"] = after
+        try:
+            resp = es.search(index=REFS_ALIAS, size=0, aggs={"ids": {"composite": composite}})
+        except NotFoundError:
+            return out
+        agg = resp["aggregations"]["ids"]
+        buckets = agg["buckets"]
+        if not buckets:
+            return out
+        for b in buckets:
+            out.add((b["key"]["host"], b["key"]["org"], b["key"]["repo"]))
+        after = agg.get("after_key")
+        if after is None:
+            return out
+
+
 def enumerate_content_commits(es: Elasticsearch, index: str) -> set[tuple[str, str, str, str]]:
     """Every distinct (git.host, git.org, git.repo, git.commit) tuple with at least one doc in
     `index` (a single files or lines physical index). Returns an empty set if `index` doesn't
@@ -165,7 +222,9 @@ def enumerate_content_commits(es: Elasticsearch, index: str) -> set[tuple[str, s
     return _composite_host_org_repo_commit_tuples(es, index)
 
 
-def _composite_host_org_repo_commit_tuples(es: Elasticsearch, index: str) -> set[tuple[str, str, str, str]]:
+def _composite_host_org_repo_commit_tuples(
+    es: Elasticsearch, index: str, query: dict | None = None,
+) -> set[tuple[str, str, str, str]]:
     out: set[tuple[str, str, str, str]] = set()
     after: dict | None = None
     while True:
@@ -180,8 +239,11 @@ def _composite_host_org_repo_commit_tuples(es: Elasticsearch, index: str) -> set
         }
         if after is not None:
             composite["after"] = after
+        search_kwargs: dict = {"index": index, "size": 0, "aggs": {"tuples": {"composite": composite}}}
+        if query is not None:
+            search_kwargs["query"] = query
         try:
-            resp = es.search(index=index, size=0, aggs={"tuples": {"composite": composite}})
+            resp = es.search(**search_kwargs)
         except NotFoundError:
             return out
         agg = resp["aggregations"]["tuples"]
