@@ -88,16 +88,16 @@ The [`sourcerer.yml` specification](specs/sourcerer-yml.md) has the full referen
 ### Snapshot vs. delta indexing (`mode`)
 
 Each source can set `mode: snapshot` (the default) or `mode: delta` (branch or tag). Every
-Agent Builder content tool takes the same `git_commit_ish` param either way (a commit SHA or a
-branch/tag name, `*`/`?` wildcards supported) and resolves a commit the same way regardless of
-mode.
+Agent Builder content tool exposes the same optional filters either way — `git_commit`,
+`git_ref`, and `git_ref_type` (all support `*`/`?` wildcards) — and resolves each result to a
+concrete commit the same way regardless of mode.
 
 - **`snapshot`** (default): content is commit-addressed. Every ref (branch, tag, or pinned commit)
   that resolves to the same commit collapses to one snapshot. A moving branch's HEAD advance indexes
   a brand-new snapshot under the new commit.
-- **`delta`** (branch or tag): content is ref-addressed instead. Content docs carry `git.ref`
-  but no `git.commit` of their own — the ref's current commit lives only on its refs join doc,
-  resolved at query time via a LOOKUP JOIN. A HEAD advance re-indexes only the files
+- **`delta`** (branch or tag): content is ref-addressed instead. Content docs carry
+  `git.ref_pattern` (the stream identity) but no `git.commit` of their own — the ref's current
+  commit lives only on its refs join doc, resolved at query time via a LOOKUP JOIN. A HEAD advance re-indexes only the files
   `git diff --name-status` reports changed (add/modify/delete/rename), not the whole tree, so
   staying current on a fast-moving branch or tag is cheap. Particularly useful for fast-moving
   tags that are force-updated frequently (e.g. `deploy@8`-style Serverless promotion tags) where
@@ -111,9 +111,61 @@ sources:
   mode: delta
 ```
 
-Upgrading from a pre-`ref_key` install is automatic and invisible: every `index` run backfills
-pre-existing snapshot content in place (idempotent -- a repeat run changes nothing) unless you
-pass `--no-backfill`.
+#### Delta mode with tags
+
+A delta **tag** source is a *moving stream* whose identity is the `match` **pattern**, not any
+one tag name. On every `index` run Sourcerer finds the tags matching the pattern, picks the
+**newest one by tag-creation date**, and delta-updates from the last indexed commit to that
+tag's commit (only the changed files).
+
+Because the pattern is the identity, every tag it matches folds into a **single** stream that
+always reflects the newest matching tag. Only that latest tag stays queryable — earlier ones
+are replaced in place, not kept as separate snapshots. Reach for a delta tag when you want to
+*track the latest* cheaply; use `snapshot` mode (optionally with `retain`) when you want each
+release kept and independently searchable.
+
+**Good fit — one force-updated tag.** A promotion tag that is re-pointed over time (e.g. a
+`deploy@N`-style Serverless tag) is a single moving pointer. Each re-point delta-updates in
+place instead of minting a new snapshot:
+
+```yaml
+- git: { host: "github", org: "elastic", repo: "serverless-gitops", ref_type: "tag" }
+  match: "deploy@*"
+  mode: delta
+```
+
+**Careful — "newest" means newest by date, not highest version.** Version placeholders
+(`{major}.{minor}.{patch}`) only *filter* which tags match; they do **not** order the
+selection. If a repo tags several release lines in overlapping windows, a broad pattern has no
+stable "newest." Kibana, for example, ships `9.5.x`, `9.4.x`, and `8.19.x` at the same time,
+and a backport such as `v8.19.20` is often tagged *after* `v9.5.1` — so a single stream
+matching them all would jump between lines and re-index large, meaningless cross-line diffs:
+
+```yaml
+# Unstable on a multi-line repo: the newest tag by date flips between release lines.
+- git: { host: "github", org: "elastic", repo: "kibana", ref_type: "tag" }
+  match: "v{major}.{minor}.{patch}"
+  mode: delta
+```
+
+Pin the pattern to a single release line with a glob so the newest match is always monotonic:
+
+```yaml
+# Track the latest 9.5.x patch as one stable stream.
+- git: { host: "github", org: "elastic", repo: "kibana", ref_type: "tag" }
+  match: "v9.5.*"
+  mode: delta
+```
+
+If you instead want every release kept and independently searchable, use snapshot mode with
+retention rather than delta:
+
+```yaml
+# One snapshot per release; keep the newest patch of the two latest majors.
+- git: { host: "github", org: "elastic", repo: "kibana", ref_type: "tag" }
+  match: "v{major}.{minor}.{patch}"
+  retain: { version: { majors: 2, patches: 1 } }
+```
 
 ### Cloning with SSH
 
