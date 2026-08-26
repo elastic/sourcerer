@@ -68,3 +68,19 @@ def lines_index(
     """Lines index name for a source's `index.level`/`index.suffix`. The 3-arg call reproduces the
     historical repo-level name, e.g. sourcerer-v3-lines~github~elastic~elasticsearch."""
     return _content_index(LINES_INDEX_PREFIX, host, org, repo, commit, level, suffix)
+
+
+def files_index_pattern(host: str, org: str, repo: str) -> str:
+    """Wildcard pattern matching ALL physical v3 files indices for a repo, regardless of
+    index.level or index.suffix.
+
+    Examples:
+    - repo-level (default):  sourcerer-v3-files~github~elastic~logstash*  (matches that exact index)
+    - commit-level:          sourcerer-v3-files~github~elastic~logstash*  (matches all commit shards)
+    - suffixed:              sourcerer-v3-files~github~elastic~logstash*  (matches ^deploy, ^prod, …)
+
+    Scoping a query to this pattern confines it to the current v3 physical indices and excludes any
+    older-version files indices (e.g. sourcerer-v2-files~…) that may be reachable via the
+    sourcerer-files alias during a version upgrade. Lowercased to match the normalizer applied by
+    `_content_index`."""
+    return f"{FILES_INDEX_PREFIX}~{host.lower()}~{org.lower()}~{repo.lower()}*"

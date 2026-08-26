@@ -1,8 +1,11 @@
 # sourcerer/commands/index/markers.py
 # Refs-index idempotency: content-addressing a ref's indexed state, the guards that decide
-# whether a ref needs (re)indexing, and writing the completion marker. Reads use the sourcerer
-# aliases; writes use sourcerer-v3-refs and the physical per-repo content indices;
-# broader read-only queries across the whole cluster live in sourcerer/queries.py.
+# whether a ref needs (re)indexing, and writing the completion marker. Skip-decision reads use the
+# physical v3 indices (REFS_INDEX / files_index_pattern) so that a version-upgrade scenario --
+# where the read aliases still point at the previous version's indices -- never causes live refs
+# to be wrongly reported as "already indexed". Marker writes and broader read-only queries across
+# the whole cluster continue to use sourcerer-v3-refs and the physical per-repo content indices
+# (as before); queries that legitimately span all versions live in sourcerer/queries.py.
 
 # Standard packages
 import datetime
@@ -11,7 +14,10 @@ import datetime
 from elasticsearch import Elasticsearch, NotFoundError
 
 # App packages
-from ...indices import FILES_ALIAS, LINES_ALIAS, REFS_ALIAS, REFS_INDEX, files_index, lines_index
+from ...indices import (
+    FILES_ALIAS, LINES_ALIAS, REFS_ALIAS, REFS_INDEX,
+    files_index, files_index_pattern, lines_index,
+)
 from ...utils import build_ref_key, make_doc_id
 from .git import resolve_remote
 
@@ -51,7 +57,7 @@ def recorded_routing(
     ref_id = build_ref_id(host, org, repo, ref_type, ref, commit_sha)
     try:
         resp = es.search(
-            index=REFS_ALIAS, size=1, query={"ids": {"values": [ref_id]}},
+            index=REFS_INDEX, size=1, query={"ids": {"values": [ref_id]}},
             source_includes=["status", "index_level", "index_suffix"],
         )
     except NotFoundError:
@@ -66,8 +72,12 @@ def markers_status_by_id(es: Elasticsearch, ref_ids: list[str]) -> dict[str, dic
     """Fetch the status, commit, and indexing_started_at for a batch of ref marker ids.
 
     Returns a mapping of {ref_id: {"status": ..., "commit": ..., "indexing_started_at": ...}}
-    for every id that exists in the refs alias. Missing ids (never indexed) are absent from the
-    result. Returns {} when the refs index does not exist yet.
+    for every id that exists in the physical refs index. Missing ids (never indexed) are absent from
+    the result. Returns {} when the refs index does not exist yet.
+
+    Queries the physical REFS_INDEX (not the alias) so that a version upgrade -- where the alias
+    still points at an older index -- does not cause markers from that older index to mask the
+    absence of v3 markers and wrongly report refs as "already indexed".
 
     This is the batched equivalent of the per-ref `should_index` ids-lookup: instead of N
     serial searches (one per ref), callers compute all ref_ids up front and fetch them in one
@@ -77,7 +87,7 @@ def markers_status_by_id(es: Elasticsearch, ref_ids: list[str]) -> dict[str, dic
         return {}
     try:
         resp = es.search(
-            index=REFS_ALIAS,
+            index=REFS_INDEX,
             size=len(ref_ids),
             query={"ids": {"values": ref_ids}},
             source_includes=[
@@ -123,7 +133,7 @@ def _parse_marker_started(value: object) -> datetime.datetime | None:
 def commits_with_content(
     es: Elasticsearch, host: str, org: str, repo: str, commit_shas: set[str],
 ) -> set[str]:
-    """Return the subset of `commit_shas` that have at least one content doc in the files alias.
+    """Return the subset of `commit_shas` that have at least one content doc in the v3 files index.
 
     This is the batched equivalent of `content_present`: instead of one `es.count` per
     (complete-marker) commit, a single terms aggregation resolves all of them at once.
@@ -131,13 +141,17 @@ def commits_with_content(
     Used to detect the GC'd-out-from-under case: a ref whose marker is `status:complete` but
     whose content was deleted needs re-indexing even though its marker exists.
 
+    Queries the physical v3 files index pattern (not the alias) so that a version upgrade -- where
+    the alias still points at an older index -- does not cause content from that older index to be
+    treated as existing v3 content and wrongly skip re-indexing into v3.
+
     Returns an empty set when `commit_shas` is empty or the files index does not exist yet.
     """
     if not commit_shas:
         return set()
     try:
         resp = es.search(
-            index=FILES_ALIAS,
+            index=files_index_pattern(host, org, repo),
             size=0,
             query={
                 "bool": {
@@ -229,17 +243,24 @@ def count_commit_docs(es: Elasticsearch, index: str, host: str, org: str, repo: 
 def content_present(
     es: Elasticsearch, host: str, org: str, repo: str, commit_sha: str, at_index: str | None = None,
 ) -> bool:
-    """True if ANY content doc exists for this commit. A cheap presence probe -- NOT proof of a
-    complete snapshot, since an interrupted run (Ctrl-C) leaves a partial set of docs behind with
-    no marker (see commit_fully_indexed). Used only to detect content GC'd out from under a
-    surviving complete marker.
+    """True if ANY content doc exists for this commit in the v3 files index. A cheap presence
+    probe -- NOT proof of a complete snapshot, since an interrupted run (Ctrl-C) leaves a partial
+    set of docs behind with no marker (see commit_fully_indexed). Used only to detect content GC'd
+    out from under a surviving complete marker.
 
     `at_index` scopes the probe to one physical files index (the source's expected target) instead
-    of the whole alias. This makes presence *location-aware*: content sitting only in an OLD index
-    after an index.level/suffix change reads as absent at the new target, so the caller re-indexes
-    (migrates) rather than wrongly skipping and leaving alias duplicates. A not-yet-created target
-    index yields 0 (NotFound), i.e. absent -> index."""
-    return count_commit_docs(es, at_index or FILES_ALIAS, host, org, repo, commit_sha) > 0
+    of the repo's v3 wildcard pattern. This makes presence *location-aware*: content sitting only
+    in an OLD index after an index.level/suffix change reads as absent at the new target, so the
+    caller re-indexes (migrates) rather than wrongly skipping and leaving alias duplicates. A
+    not-yet-created target index yields 0 (NotFound), i.e. absent -> index.
+
+    When `at_index` is not given, falls back to the v3 repo wildcard (files_index_pattern) rather
+    than the FILES_ALIAS, so a version-upgrade scenario -- where the alias still points at an older
+    files index -- does not cause content from that older index to mask the need to re-index into
+    v3."""
+    return count_commit_docs(
+        es, at_index or files_index_pattern(host, org, repo), host, org, repo, commit_sha,
+    ) > 0
 
 
 def commit_fully_indexed(es: Elasticsearch, host: str, org: str, repo: str, commit_sha: str) -> bool:
@@ -264,7 +285,7 @@ def commit_fully_indexed(es: Elasticsearch, host: str, org: str, repo: str, comm
         }
     }
     try:
-        return int(es.count(index=REFS_ALIAS, query=query)["count"]) > 0
+        return int(es.count(index=REFS_INDEX, query=query)["count"]) > 0
     except NotFoundError:
         return False
 
@@ -297,7 +318,7 @@ def fully_indexed_counts(
     }
     try:
         resp = es.search(
-            index=REFS_ALIAS, size=1, query=query,
+            index=REFS_INDEX, size=1, query=query,
             source_includes=["files_count", "lines_count"],
         )
     except NotFoundError:
@@ -330,7 +351,7 @@ def commit_prefix_indexed(es: Elasticsearch, host: str, org: str, repo: str, sha
         }
     }
     try:
-        resp = es.search(index=REFS_ALIAS, size=1, query=query)
+        resp = es.search(index=REFS_INDEX, size=1, query=query)
     except NotFoundError:
         return None
     hits = resp["hits"]["hits"]
@@ -363,10 +384,14 @@ def should_index(
     marker whose recorded routing differs means the source now targets a different physical index,
     so we must (re)index there (migrate); and the content-presence check is scoped to that target
     index rather than the whole alias, so an old-location copy doesn't mask the need to migrate.
+
+    Queries the physical REFS_INDEX (not the alias) so that a version upgrade -- where the alias
+    still points at an older index -- does not cause markers from that older index to mask the
+    absence of v3 markers and wrongly report refs as "already indexed".
     """
     ref_id = build_ref_id(host, org, repo, ref_type, ref, commit_sha)
     try:
-        resp = es.search(index=REFS_ALIAS, size=1, query={"ids": {"values": [ref_id]}})
+        resp = es.search(index=REFS_INDEX, size=1, query={"ids": {"values": [ref_id]}})
     except NotFoundError:
         return True
     hits = resp["hits"]["hits"]

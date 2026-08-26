@@ -16,7 +16,7 @@ from elasticsearch import Elasticsearch, NotFoundError
 
 # App packages
 from ...config import Config, RepoConfig, Selector, Schedule, ScheduleRule, resolve_schedule
-from ...indices import REFS_ALIAS
+from ...indices import REFS_INDEX
 
 # Default retry window: how long an "indexing" marker is trusted as an active run before
 # being treated as stuck/abandoned and retried. Configurable via --retry-window; default 1h.
@@ -88,7 +88,7 @@ def source_state(
         },
     }
     try:
-        resp = es.search(index=REFS_ALIAS, size=0, query=query, aggregations=aggs)
+        resp = es.search(index=REFS_INDEX, size=0, query=query, aggregations=aggs)
     except NotFoundError:
         # Refs index doesn't exist yet (first-ever run).
         return SourceState(last_indexed_at=None, active_indexing=False)

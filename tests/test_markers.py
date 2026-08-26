@@ -30,7 +30,7 @@ from sourcerer.commands.index.markers import (
     write_indexing_marker,
     write_ref_marker,
 )
-from sourcerer.indices import FILES_ALIAS, REFS_ALIAS, REFS_INDEX
+from sourcerer.indices import FILES_ALIAS, REFS_ALIAS, REFS_INDEX, files_index_pattern
 from sourcerer.utils import build_ref_key
 
 FULL_SHA = "cfefb3b2378ccbadefa7c8f4f9e21b3a1d2e5f60"
@@ -54,7 +54,7 @@ class TestCommitPrefixIndexed:
         es.search.return_value = _search_hits(FULL_SHA)
         assert commit_prefix_indexed(es, "github", "acme", "widgets", "cfefb3b") == FULL_SHA
         query = es.search.call_args.kwargs["query"]
-        assert es.search.call_args.kwargs["index"] == REFS_ALIAS
+        assert es.search.call_args.kwargs["index"] == REFS_INDEX
         assert {"prefix": {"git.commit": "cfefb3b"}} in query["bool"]["filter"]
         assert {"term": {"status": "complete"}} in query["bool"]["filter"]
         assert {"term": {"git.host": "github"}} in query["bool"]["filter"]
@@ -101,14 +101,14 @@ class TestPreCloneSkipCommit:
 
 
 class TestShouldIndex:
-    def test_reads_marker_by_searching_the_refs_alias(self):
+    def test_reads_marker_by_searching_the_refs_index(self):
         es = MagicMock()
         es.search.return_value = {"hits": {"hits": [{"_source": {"status": "complete"}}]}}
 
         assert should_index(es, "github", "acme", "widgets", "branch", "main", FULL_SHA) is False
 
         assert es.search.call_args.kwargs == {
-            "index": REFS_ALIAS,
+            "index": REFS_INDEX,
             "size": 1,
             "query": {"ids": {"values": [build_ref_id("github", "acme", "widgets", "branch", "main", FULL_SHA)]}},
         }
@@ -166,7 +166,7 @@ class TestShouldIndex:
         es.search.return_value = {"hits": {"hits": [{"_source": {"status": "complete"}}]}}
         should_index(es, "github", "acme", "widgets", "branch", "main", FULL_SHA, retry_window=window)
         assert es.search.call_args.kwargs == {
-            "index": REFS_ALIAS,
+            "index": REFS_INDEX,
             "size": 1,
             "query": {"ids": {"values": [build_ref_id("github", "acme", "widgets", "branch", "main", FULL_SHA)]}},
         }
@@ -185,7 +185,7 @@ class TestMarkersStatusById:
         assert result == {ref_id: {"status": "complete", "commit": FULL_SHA, "indexing_started_at": None,
                                    "index_level": None, "index_suffix": None}}
         call = es.search.call_args.kwargs
-        assert call["index"] == REFS_ALIAS
+        assert call["index"] == REFS_INDEX
         assert call["query"] == {"ids": {"values": [ref_id]}}
         assert "status" in call["source_includes"]
         assert "git.commit" in call["source_includes"]
@@ -227,7 +227,7 @@ class TestMarkersStatusById:
 
 
 class TestCommitsWithContent:
-    def test_returns_commits_present_in_files_alias(self):
+    def test_returns_commits_present_in_v3_files_index(self):
         es = MagicMock()
         es.search.return_value = {
             "aggregations": {"present": {"buckets": [{"key": FULL_SHA}]}}
@@ -235,7 +235,7 @@ class TestCommitsWithContent:
         result = commits_with_content(es, "github", "acme", "widgets", {FULL_SHA})
         assert result == {FULL_SHA}
         call = es.search.call_args.kwargs
-        assert call["index"] == FILES_ALIAS
+        assert call["index"] == files_index_pattern("github", "acme", "widgets")
         assert call["size"] == 0
         assert {"terms": {"git.commit": [FULL_SHA]}} in call["query"]["bool"]["filter"]
 
@@ -361,7 +361,7 @@ class TestFullyIndexedCounts:
         result = fully_indexed_counts(es, "github", "acme", "widgets", FULL_SHA)
         assert result == (42, 3400)
         call = es.search.call_args.kwargs
-        assert call["index"] == REFS_ALIAS
+        assert call["index"] == REFS_INDEX
         assert call["size"] == 1
         assert {"term": {"git.host": "github"}} in call["query"]["bool"]["filter"]
         assert {"term": {"git.org": "acme"}} in call["query"]["bool"]["filter"]
