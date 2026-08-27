@@ -167,7 +167,8 @@ def commits_with_content(
         )
     except NotFoundError:
         return set()
-    return {b["key"] for b in resp["aggregations"]["present"]["buckets"]}
+    buckets = resp.get("aggregations", {}).get("present", {}).get("buckets", [])
+    return {b["key"] for b in buckets}
 
 
 def _needs_index(

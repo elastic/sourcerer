@@ -251,6 +251,15 @@ class TestCommitsWithContent:
         result = commits_with_content(es, "github", "acme", "widgets", {FULL_SHA})
         assert result == set()
 
+    def test_wildcard_matches_no_index_returns_empty_set(self):
+        # When the wildcard pattern matches zero indices, ES returns a successful response
+        # without an 'aggregations' key (allow_no_indices=true default, no NotFoundError raised).
+        # The function must return set() rather than crashing with KeyError.
+        es = MagicMock()
+        es.search.return_value = {"hits": {"total": {"value": 0}, "hits": []}, "_shards": {}}
+        result = commits_with_content(es, "github", "acme", "widgets", {"abc1234"})
+        assert result == set()
+
     def test_empty_input_returns_empty_without_querying(self):
         es = MagicMock()
         result = commits_with_content(es, "github", "acme", "widgets", set())
