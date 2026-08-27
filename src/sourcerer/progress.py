@@ -102,7 +102,8 @@ _STATUS_STYLE = {
 def _bar(frac: float, width: int = 24) -> str:
     frac = 0.0 if frac < 0 else 1.0 if frac > 1 else frac
     filled = int(frac * width)
-    return "[" + "█" * filled + "░" * (width - filled) + f"] {frac * 100:3.0f}%"
+    pct = int(frac * 100)  # floor: only reads 100% at frac == 1.0, aligning with the glyph fill
+    return "[" + "█" * filled + "░" * (width - filled) + f"] {pct:3d}%"
 
 
 class ProgressReporter:
@@ -288,20 +289,25 @@ class _Dashboard:
         head.append(f"files {files:,} · lines {lines:,} · {elapsed}")
         rows.append(head)
 
-        # Pick the most informative active unit: prefer one that is actually
-        # checking out or indexing over one that is only cloning or resolving.
-        # This matters because start() marks every ref in a repo as "resolving"
-        # up front (before the clone), and set_stage marks just one unit as
-        # "cloning" while the rest of the repo's refs are still "resolving" --
-        # so without this preference the bar would pin on an older ref for the
-        # whole duration of the clone and any newer-first indexing that follows.
+        # Show one active line per concurrently-indexing repo group, in stable
+        # first-seen order (so lines don't jump between refresh ticks). Within
+        # each repo group, pick the most informative unit: prefer one that is
+        # actually checking out or indexing over one that is only cloning or
+        # resolving. This matters because start() marks every ref in a repo as
+        # "resolving" up front (before the clone), and set_stage marks just one
+        # unit as "cloning" while the rest are still "resolving" -- without this
+        # preference the bar would pin on an older ref for the whole clone and
+        # any newer-first indexing that follows.
         working = [u for u in units if u.status is None and u.started_at is not None]
-        active = (
-            next((u for u in working if u.stage in ("checkout", "indexing")), None)
-            or next((u for u in working if u.stage == "cloning"), None)
-            or (working[0] if working else None)
-        )
-        if active is not None:
+        by_repo: dict[tuple[str, str, str], list[Unit]] = {}
+        for u in working:
+            by_repo.setdefault((u.host, u.org, u.repo), []).append(u)
+        for group in by_repo.values():
+            active = (
+                next((u for u in group if u.stage in ("checkout", "indexing")), None)
+                or next((u for u in group if u.stage == "cloning"), None)
+                or group[0]
+            )
             rows.append(self._unit_line(active))
         return Group(*rows)
 
@@ -320,7 +326,14 @@ class _Dashboard:
             t.append(" - resolving…")
         elif u.stage == "indexing":
             if u.total_files:
-                t.append(f" - indexing {_bar(u.files / u.total_files, 16)} "
+                # Cap the displayed fraction at 0.99 while the unit is still
+                # in-progress: the denominator (count_tracked_files) and
+                # numerator (emitted file-docs) can diverge (binary/skipped
+                # files), so the raw ratio can reach 1.0 before finish() fires.
+                # The floored _bar already prevents early "100%" in the common
+                # case; this cap makes it robust against denominator overshoot.
+                frac = min(u.files / u.total_files, 0.99)
+                t.append(f" - indexing {_bar(frac, 16)} "
                          f"{u.files:,}/{u.total_files:,} files · {u.lines:,} lines · "
                          f"{format_elapsed(u.elapsed())}")
             else:
