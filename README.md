@@ -1,9 +1,10 @@
 # Sourcerer
 
-**Ask the source.** Sourcerer is a code intelligence agent for people who
-support complex software deployments. It indexes git repos over time, searches
-them, and grounds its answers in the source, scaling to hundreds of repos and
-billions of lines of code.
+**Ask the source.** Sourcerer is a code research agent for understanding complex
+versioned software deployments. It indexes git repos over time, searches them,
+and grounds its answers in the source, scaling to hundreds of repos and billions
+of lines of code. [Read the blog](https://www.elastic.co/search-labs/blog/code-search-sourcerer-elasticsearch)
+to see the research.
 
 ---
 
