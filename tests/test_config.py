@@ -289,6 +289,13 @@ class TestParseCommitSource:
         with pytest.raises(ValueError, match="only 'age' retention"):
             _cfg([_source(ref_type="commit", match="cfefb3b", retain={"prerelease": "superseded"})])
 
+    def test_retain_version_prereleases_raises(self):
+        # Commit sources have no versioned match, so retain.version is rejected before the
+        # commit-specific check (hits "has no version tokens" first).
+        with pytest.raises(ValueError, match="has no version tokens"):
+            _cfg([_source(ref_type="commit", match="cfefb3b",
+                          retain={"version": {"prereleases": 2}})])
+
 
 class TestParseSince:
     def test_exactly_one_required_zero_raises(self):
@@ -329,6 +336,68 @@ class TestParseRetain:
     def test_no_retain_key_means_keep_forever(self):
         cfg = _cfg([_source()])
         assert cfg.repos[0].selectors[0].retain is None
+
+    def test_version_prereleases_parses_to_policy(self):
+        cfg = _cfg([_source(
+            ref_type="tag",
+            match=["v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}"],
+            retain={"version": {"prereleases": 3}},
+        )])
+        pol = cfg.repos[0].selectors[0].retain.version
+        assert pol.prereleases == 3
+        assert pol.counts == {}
+
+    def test_version_prereleases_lt_1_raises(self):
+        with pytest.raises(ValueError, match="version.prereleases"):
+            _cfg([_source(
+                ref_type="tag",
+                match="v{major}.{minor}.{patch}-{prerelease}",
+                retain={"version": {"prereleases": 0}},
+            )])
+
+    def test_version_prereleases_without_versioned_match_raises(self):
+        with pytest.raises(ValueError, match="has no version tokens"):
+            _cfg([_source(ref_type="tag", match="my-dev-tag", retain={"version": {"prereleases": 2}})])
+
+    def test_version_prereleases_only_is_non_empty(self):
+        # A VersionPolicy with only prereleases set should not collapse to None.
+        cfg = _cfg([_source(
+            ref_type="tag",
+            match="v{major}.{minor}.{patch}-{prerelease}",
+            retain={"version": {"prereleases": 2}},
+        )])
+        assert cfg.repos[0].selectors[0].retain is not None
+        assert cfg.repos[0].selectors[0].retain.version is not None
+
+    def test_version_prereleases_null_is_no_constraint(self):
+        cfg = _cfg([_source(
+            ref_type="tag",
+            match=["v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}"],
+            retain={"version": {"majors": 2, "prereleases": None}},
+        )])
+        pol = cfg.repos[0].selectors[0].retain.version
+        assert pol.prereleases is None
+        assert pol.counts == {"major": 2}
+
+    def test_version_prereleases_major_minor_arity_accepted(self):
+        # major/minor/prerelease: levels=(major,minor), has_versioned=True -- must be accepted.
+        cfg = _cfg([_source(
+            ref_type="tag",
+            match=["v{major}.{minor}", "v{major}.{minor}-{prerelease}"],
+            retain={"version": {"prereleases": 2}},
+        )])
+        pol = cfg.repos[0].selectors[0].retain.version
+        assert pol.prereleases == 2
+
+    def test_version_prereleases_major_minor_patch_build_arity_accepted(self):
+        # major/minor/patch/build/prerelease: four numeric levels -- must be accepted.
+        cfg = _cfg([_source(
+            ref_type="tag",
+            match=["v{major}.{minor}.{patch}.{build}", "v{major}.{minor}.{patch}.{build}-{prerelease}"],
+            retain={"version": {"prereleases": 3}},
+        )])
+        pol = cfg.repos[0].selectors[0].retain.version
+        assert pol.prereleases == 3
 
 
 class TestSelectorMatches:

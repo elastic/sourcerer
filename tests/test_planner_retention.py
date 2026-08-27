@@ -82,6 +82,74 @@ class TestDeleteByEachCriterion:
         assert decisions["rc"].criteria == ("prerelease",)
         assert decisions["final"].action == "keep"
 
+    def test_version_prereleases_cap(self):
+        cfg = _cfg([_sel(
+            type_="tag",
+            match=["v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}"],
+            retain={"version": {"prereleases": 2}},
+        )])
+        final = make_marker("final", ref="v9.0.0", ref_type="tag", commit_date=dt(2024, 1, 1))
+        rc1 = make_marker("rc1", ref="v9.0.0-rc1", ref_type="tag", commit_date=dt(2024, 2, 1))
+        rc2 = make_marker("rc2", ref="v9.0.0-rc2", ref_type="tag", commit_date=dt(2024, 3, 1))
+        rc3 = make_marker("rc3", ref="v9.0.0-rc3", ref_type="tag", commit_date=dt(2024, 4, 1))
+        decisions = {d.marker.id: d for d in plan_repo([final, rc1, rc2, rc3], cfg)}
+        assert decisions["final"].action == "keep"     # finals never dropped
+        assert decisions["rc1"].action == "delete"     # oldest prerelease, outside cap of 2
+        assert decisions["rc1"].criteria == ("version",)
+        assert decisions["rc2"].action == "keep"
+        assert decisions["rc3"].action == "keep"
+
+    def test_version_prereleases_cap_major_minor_arity(self):
+        # major/minor/prerelease arity: groups by (major,minor), no patch level.
+        cfg = _cfg([_sel(
+            type_="tag",
+            match=["v{major}.{minor}", "v{major}.{minor}-{prerelease}"],
+            retain={"version": {"prereleases": 1}},
+        )])
+        final = make_marker("final", ref="v9.0", ref_type="tag", commit_date=dt(2024, 1, 1))
+        rc1 = make_marker("rc1", ref="v9.0-rc1", ref_type="tag", commit_date=dt(2024, 2, 1))
+        rc2 = make_marker("rc2", ref="v9.0-rc2", ref_type="tag", commit_date=dt(2024, 3, 1))
+        decisions = {d.marker.id: d for d in plan_repo([final, rc1, rc2], cfg)}
+        assert decisions["final"].action == "keep"
+        assert decisions["rc1"].action == "delete"
+        assert decisions["rc1"].criteria == ("version",)
+        assert decisions["rc2"].action == "keep"
+
+    def test_version_prereleases_combined_with_numeric_and_superseded(self):
+        # Mirrors real-world config: majors:1, prereleases:1, prerelease:superseded.
+        # Uses two majors (8 and 9) to exercise majors:1, and two prerelease tags for the
+        # same unreleased version to exercise the prereleases cap.
+        # A surviving prerelease must pass ALL three criteria.
+        cfg = _cfg([_sel(
+            type_="tag",
+            match=["v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}"],
+            retain={"version": {"majors": 1, "prereleases": 1},
+                    "prerelease": "superseded"},
+        )])
+        # Major 8 is below the majors:1 threshold (latest is 9) -> deleted by version.
+        v8_final = make_marker("v8", ref="v8.0.0", ref_type="tag", commit_date=dt(2023, 1, 1))
+        # Major 9 finals: both survive majors:1 (major value 9 is the only major).
+        v900 = make_marker("v900", ref="v9.0.0", ref_type="tag", commit_date=dt(2023, 6, 1))
+        v910 = make_marker("v910", ref="v9.1.0", ref_type="tag", commit_date=dt(2024, 1, 1))
+        # Prerelease for 9.1.0 with a matching final -> dropped by superseded.
+        v910_rc = make_marker("v910rc", ref="v9.1.0-rc1", ref_type="tag",
+                              commit_date=dt(2024, 2, 1))
+        # Prerelease for 9.2.0 (no final yet): two candidates; cap is 1, newer wins.
+        v920_rc1 = make_marker("v920rc1", ref="v9.2.0-rc1", ref_type="tag",
+                               commit_date=dt(2024, 3, 1))
+        v920_rc2 = make_marker("v920rc2", ref="v9.2.0-rc2", ref_type="tag",
+                               commit_date=dt(2024, 4, 1))
+        decisions = {
+            d.marker.id: d
+            for d in plan_repo([v8_final, v900, v910, v910_rc, v920_rc1, v920_rc2], cfg)
+        }
+        assert decisions["v8"].action == "delete"      # below majors:1 threshold
+        assert decisions["v900"].action == "keep"      # major 9 final, survives majors:1
+        assert decisions["v910"].action == "keep"      # major 9 final, survives majors:1
+        assert decisions["v910rc"].action == "delete"  # superseded: 9.1.0 final exists
+        assert decisions["v920rc1"].action == "delete" # older of the two 9.2.0 prereleases
+        assert decisions["v920rc2"].action == "keep"   # newest prerelease for 9.2.0
+
 
 class TestUnionAcrossSelectors:
     def test_keep_forever_selector_acts_as_allowlist(self):
@@ -198,6 +266,23 @@ class TestDateIndependentOnly:
         assert decisions["v8"].action == "delete"
         assert decisions["v8"].criteria == ("version",)
 
+    def test_prereleases_skipped_under_date_independent_only(self):
+        # prereleases is date-dependent (commit-date ordered); must not apply in the pre-filter.
+        cfg = _cfg([_sel(
+            type_="tag",
+            match=["v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}"],
+            retain={"version": {"prereleases": 1}},
+        )])
+        rc1 = make_marker("rc1", ref="v9.0.0-rc1", ref_type="tag", commit_date=dt(2024, 1, 1))
+        rc2 = make_marker("rc2", ref="v9.0.0-rc2", ref_type="tag", commit_date=dt(2024, 2, 1))
+        decisions = {
+            d.marker.id: d
+            for d in plan_repo([rc1, rc2], cfg, date_independent_only=True)
+        }
+        # date_independent_only=True: prereleases cap is skipped, so both survive.
+        assert decisions["rc1"].action == "keep"
+        assert decisions["rc2"].action == "keep"
+
 
 class TestContentDeleteSet:
     def test_commit_shared_by_a_surviving_marker_is_not_dropped(self):
@@ -228,3 +313,12 @@ class TestDescribe:
         assert "version(majors:2)" in desc
         assert "count:5" in desc
         assert "drop-superseded-pre" in desc
+
+    def test_prereleases_rendered_in_version_bits(self):
+        cfg = _cfg([_sel(
+            type_="tag",
+            match=["v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}"],
+            retain={"version": {"majors": 2, "prereleases": 3}},
+        )])
+        desc = _describe(cfg.selectors[0])
+        assert "prereleases:3" in desc

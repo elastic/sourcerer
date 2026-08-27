@@ -187,6 +187,7 @@ constraint at that level.
 | `minors` | Newest N minor values per (major). |
 | `patches` | Newest N patch values per (major, minor). `patches: 1` = newest patch per minor. |
 | `builds` | Newest N build values per (major, minor, patch). |
+| `prereleases` | Newest N prerelease tags per final-version group (by commit date). E.g. `prereleases: 2` keeps the 2 most-recently committed prereleases for each `(major,minor,patch[,build])` tuple. Finals are never dropped. Unlike the numeric levels, ordering is by commit date (not by value), so it is date-dependent and applied post-clone (not in the index-time pre-filter). Requires `{prerelease}` in at least one match pattern. Independent of `retain.prerelease: keep|superseded` — both may be set and intersect as normal. |
 
 Because it is value- not count-based, with majors `{2, 9}` indexed, `majors: 2` keeps `{9}`
 (threshold 8), not `{9, 2}`.

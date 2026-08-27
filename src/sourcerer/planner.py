@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 # App packages
 from .config import RepoConfig, Selector
-from .version import age_keep, drop_superseded_prereleases, recent_keep, version_keep
+from .version import age_keep, drop_superseded_prereleases, prerelease_count_keep, recent_keep, version_keep
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
@@ -52,8 +52,10 @@ def _describe(sel: Selector) -> str:
         return f"{sel.ref_type} {sel.raw_patterns} (keep forever)"
     bits = []
     if pa.version is not None:
-        bits.append("version(" + ",".join(f"{_LEVEL_TO_PLURAL[k]}:{v}"
-                                           for k, v in pa.version.counts.items()) + ")")
+        vbits = [f"{_LEVEL_TO_PLURAL[k]}:{v}" for k, v in pa.version.counts.items()]
+        if pa.version.prereleases is not None:
+            vbits.append(f"prereleases:{pa.version.prereleases}")
+        bits.append("version(" + ",".join(vbits) + ")")
     if pa.prerelease == "superseded":
         bits.append("drop-superseded-pre")
     if pa.count is not None:
@@ -96,6 +98,10 @@ def _selector_keep_ids(
     if pa.prerelease == "superseded":
         survivors = drop_superseded_prereleases(versions)
         apply("prerelease", {m.id for m, v in cohort if v in survivors})
+    if pa.version is not None and pa.version.prereleases is not None and not date_independent_only:
+        survivors = prerelease_count_keep(
+            ((v, m.commit_date) for m, v in cohort), pa.version.prereleases)
+        apply("version", {m.id for m, v in cohort if v in survivors})
     if pa.count is not None and not date_independent_only:
         if sel.ref_type == "branch":
             groups: dict = defaultdict(list)

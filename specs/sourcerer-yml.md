@@ -566,7 +566,7 @@ The number of patch versions to retain for each retained major/minor version
 
 ### `sources[i].retain.version.builds`
 
-The number of build versions to retain for each retained major/minor/build
+The number of build versions to retain for each retained major/minor/patch
 version (whichever is most specific) before a ref qualifies for pruning.
 
 - Required: No
@@ -575,7 +575,7 @@ version (whichever is most specific) before a ref qualifies for pruning.
 
 ### `sources[i].retain.version.prereleases`
 
-The number of prerelease versions to retain for each retained major/minor/build/patch
+The number of prerelease versions to retain for each retained major/minor/patch/build
 version (whichever is most specific) before a ref qualifies for pruning.
 
 - Required: No

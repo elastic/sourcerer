@@ -259,6 +259,7 @@ class Since:
 @dataclass
 class VersionPolicy:
     counts: dict[str, int]   # level -> count (>= 1), only for levels the user set
+    prereleases: int | None = None   # keep newest N prereleases per final-version group (by commit date)
 
 
 @dataclass
@@ -397,13 +398,15 @@ def _parse_retain(raw: dict, ctx: str, has_versioned: bool, levels: tuple[str, .
         if not has_versioned:
             raise ValueError(f"{ctx} retain.version: match has no version tokens to compare")
         vraw = raw["version"]
-        vunknown = set(vraw) - set(_PLURAL_TO_LEVEL)
+        _VERSION_KEYS = set(_PLURAL_TO_LEVEL) | {"prereleases"}
+        vunknown = set(vraw) - _VERSION_KEYS
         if vunknown:
             raise ValueError(f"{ctx} retain.version: unknown levels {sorted(vunknown)} "
-                             f"(use {sorted(_PLURAL_TO_LEVEL)}; prerelease is a sibling of version)")
+                             f"(use {sorted(_VERSION_KEYS)}; prerelease: keep|superseded is a sibling of version)")
         counts = {_PLURAL_TO_LEVEL[p]: _parse_count_level(vraw.get(p), p, ctx) for p in _PLURAL_TO_LEVEL}
         counts = {lvl: n for lvl, n in counts.items() if n is not None}
-        version = VersionPolicy(counts=counts)
+        prereleases = _parse_count_level(vraw.get("prereleases"), "prereleases", ctx)
+        version = VersionPolicy(counts=counts, prereleases=prereleases)
 
     prerelease = raw.get("prerelease", "keep")
     if prerelease not in ("keep", "superseded"):

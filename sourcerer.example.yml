@@ -156,7 +156,8 @@ sources:
       minors: null
       patches: 1                  # newest patch per (major, minor)
       builds: null
-    prerelease: superseded        # drop -rc once its final ships
+      prereleases: 3              # newest 3 prereleases per final-version group, by commit date
+    prerelease: superseded        # drop -rc once its final ships (independent of prereleases cap)
 
 # Index the latest commit of an ad-hoc tag; never prune it (no retain).
 - git:

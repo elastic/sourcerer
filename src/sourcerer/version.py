@@ -154,6 +154,26 @@ def drop_superseded_prereleases(versions) -> set:
     return {v for v in versions if not (v.is_prerelease and v.components in finals)}
 
 
+def prerelease_count_keep(versions_with_dates, n: int) -> set:
+    """Keep the newest N prereleases per final-version group (by commit date). Non-prerelease
+    versions are never dropped by this criterion. Groups prereleases by their full numeric
+    `components` tuple (the (major,minor,patch[,build]) tuple of the release they belong to);
+    within each group keeps the n most-recently committed. `versions_with_dates` is an iterable
+    of (Version, commit_date | None); None dates sort as oldest (same convention as _EPOCH)."""
+    _epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    groups: dict = defaultdict(list)
+    kept = set()
+    for v, ts in versions_with_dates:
+        if v.is_prerelease:
+            groups[v.components].append((v, ts))
+        else:
+            kept.add(v)
+    for _, pairs in groups.items():
+        ordered = sorted(pairs, key=lambda p: p[1] if p[1] is not None else _epoch, reverse=True)
+        kept.update(v for v, _ in ordered[:n])
+    return kept
+
+
 def recent_keep(refs_with_ts, n: int) -> set:
     """Keep the n most-recent refs. `refs_with_ts`: iterable of (key, timestamp)."""
     ordered = sorted(refs_with_ts, key=lambda p: p[1], reverse=True)
