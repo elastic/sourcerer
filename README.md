@@ -3,8 +3,7 @@
 **Ask the source.** Sourcerer is a code research agent for understanding complex
 versioned software deployments. It indexes git repos over time, searches them,
 and grounds its answers in the source, scaling to hundreds of repos and billions
-of lines of code. [Read the blog](https://www.elastic.co/search-labs/blog/code-search-sourcerer-elasticsearch)
-to see the research.
+of lines of code. See the [research blog](https://www.elastic.co/search-labs/blog/code-search-sourcerer-elasticsearch).
 
 ---
 
@@ -30,6 +29,7 @@ code in seconds.
 **Search like a coding agent at scale.** Sourcerer is statistically tied with frontier coding agents for code retrieval based on its results from [SWE-Explore-Bench](https://github.com/Qiushao-E/SWE-Explore-Bench) (see chart below). You can expect Sourcerer to search your code as well as any coding agent, while scaling across many historical repository snapshots as if it was a single repo.
 
 ![Sourcerer: SWE-Explore-Bench Results](https://storage.googleapis.com/sourcerer-public/sourcerer-swe-explore-bench-results.png)
+![Sourcerer: Grep Performance](https://storage.googleapis.com/sourcerer-public/sourcerer-grep-bench-results.png)
 
 **Code is the source of truth for its own behavior.** Always authoriative,
 never outdated. While documentation and tribal knowledge offers context, they
@@ -43,7 +43,12 @@ scale, relevance, security, collaboration, and customization.
 
 ## Quickstart
 
-Make sure you have [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.com/downloads/) on your machine, and [Elasticsearch and Kibana](https://www.elastic.co/cloud/serverless) running somewhere.
+**Prerequisites**
+
+- [uv](https://docs.astral.sh/uv/) and [git](https://git-scm.com/downloads/) on your machine
+- [Elasticsearch and Kibana](https://www.elastic.co/cloud/serverless) (v9.5.0+) reachable from your machine
+
+**Setup**
 
 1. Install the `sourcerer` CLI:
    ```sh

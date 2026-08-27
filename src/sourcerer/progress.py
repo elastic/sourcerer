@@ -141,6 +141,18 @@ class ProgressReporter:
             self.units.extend(new_units)
             self.total += len(new_units)
 
+    def drop_units(self, units_to_drop: list["Unit"]) -> None:
+        """Silently remove units from the plan so they produce no completion line and don't
+        appear in the summary. Used for refs that are retain-doomed (they will be pruned) so
+        they are simply not listed rather than shown as 'already indexed, skipped'. Thread-safe:
+        called from process_group workers alongside add_units. `total` is decremented so progress
+        fractions stay correct."""
+        drop_set = set(id(u) for u in units_to_drop)
+        with self._lock:
+            kept = [u for u in self.units if id(u) not in drop_set]
+            self.total -= len(self.units) - len(kept)
+            self.units = kept
+
     def reorder_group(self, host: str, org: str, repo: str, dates: dict[tuple[str, str], int]) -> None:
         """Reorder this repo's units newest-first by creation date to match the
         actual indexing order (which also uses `dates`). Called once per repo after

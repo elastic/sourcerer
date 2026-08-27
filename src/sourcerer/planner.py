@@ -151,6 +151,15 @@ def plan_repo(markers: list[Marker], cfg: RepoConfig, now: datetime | None = Non
     return out
 
 
+def retain_doomed_ids(cohort: list[Marker], cfg: "RepoConfig | None", now: "datetime | None" = None) -> set[str]:
+    """Marker ids that plan_repo would delete over this cohort. Returns the empty set when cfg is
+    None (no retain config) or the cohort is empty. Shared by the live index path and the dry-run
+    path so the two can't drift in their doomed-set computation."""
+    if cfg is None or not cohort:
+        return set()
+    return {d.marker.id for d in plan_repo(cohort, cfg, now) if d.action == "delete"}
+
+
 def content_delete_set(decisions: list[Decision]) -> set[str]:
     """Commits safe to drop: referenced by a deleted marker and by no surviving marker."""
     kept = {d.marker.commit for d in decisions if d.action != "delete"}

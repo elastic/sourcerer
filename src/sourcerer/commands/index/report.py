@@ -18,7 +18,7 @@ from elasticsearch import Elasticsearch
 from ...config import RepoConfig
 from ...hosts import Host
 from ...indices import REFS_INDEX, files_index
-from ...planner import Marker, content_delete_set, plan_repo
+from ...planner import Marker, content_delete_set, plan_repo, retain_doomed_ids
 from ...progress import Unit
 from ...queries import fetch_markers
 from ...utils import ES_ERRORS
@@ -120,10 +120,28 @@ def _dry_run_repo(
             except ES_ERRORS:
                 pass  # fall through: all refs treated as needing indexing
 
+        # Compute the retain-doomed set over the FULL cohort (already-indexed + candidates) before
+        # Pass 3 classifies individual refs. retain.count/age are cohort-relative: scoring only the
+        # pending candidates would misidentify "newest N" when the survivor is one of the
+        # already-indexed refs. marker_ref is used as Marker.ref so retain.count-per-branch groups
+        # all expanded branch history entries under the same branch name (matching the real path).
+        # Doomed refs are silently dropped from all row output — they should not appear in the
+        # report at all, not as "already indexed" and not as "pruned by retain".
+        full_cohort = [
+            Marker(id=f"{rt}:{mr}:{sha}", ref=mr, ref_type=rt, commit=sha, commit_date=cd, indexed_at=now)
+            for (u, rt, sha, cd, mr) in resolved
+        ]
+        doomed: set[str] = retain_doomed_ids(full_cohort, cfg, now)
+
         # Pass 3: classify resolved refs.
         indexing_cutoff = (now - retry_window) if retry_window is not None else None
         pending: list[tuple[Unit, str, str, datetime.datetime | None, str]] = []
         for unit, ref_type, sha, cd, marker_ref in resolved:
+            # Silently drop refs that retain would immediately delete. This covers both
+            # already-indexed-and-doomed refs (previously shown as "already indexed, skipped")
+            # and fresh-candidate-and-doomed refs (previously shown as "skip (pruned by retain)").
+            if f"{ref_type}:{marker_ref}:{sha}" in doomed:
+                continue
             ref_id = build_ref_id(host, org, repo, ref_type, marker_ref, sha)
             expected_routing = (unit.index_level, unit.index_suffix)
             if not force and not _needs_index(ref_id, sha, status_map, content_commits,
@@ -159,23 +177,7 @@ def _dry_run_repo(
                 continue
             pending.append((unit, ref_type, sha, cd, marker_ref))
 
-        # Prune-aware pre-filter over the fresh candidates, exactly as process_group does before
-        # indexing: a ref this run would immediately re-prune (e.g. an older patch superseded by a
-        # newer one also new this run) is never indexed. Scored over the candidate set only.
-        # marker_ref is used for Marker.ref and Marker.id so retain.count-per-branch groups all
-        # expanded history entries under the same branch name, matching the real indexing path.
-        doomed: set[str] = set()
-        if cfg is not None and pending:
-            candidates = [
-                Marker(id=f"{rt}:{mr}:{sha}", ref=mr, ref_type=rt, commit=sha, commit_date=cd, indexed_at=now)
-                for (u, rt, sha, cd, mr) in pending
-            ]
-            doomed = {d.marker.id for d in plan_repo(candidates, cfg, now) if d.action == "delete"}
-
         for unit, ref_type, sha, cd, marker_ref in pending:
-            if f"{ref_type}:{marker_ref}:{sha}" in doomed:
-                rows.append((unit, "skip", "pruned by retain", sha, cd))
-                continue
             # Content is keyed by commit: if another ref already fully indexed this exact commit
             # (and we're not forcing a rewrite), a real run only records the marker -- no
             # re-ingest. A commit with only partial content from an aborted run has no complete

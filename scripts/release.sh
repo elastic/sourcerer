@@ -114,7 +114,7 @@ with open(path, 'w') as f:
 
   printf 'Committing...\n'
   git add pyproject.toml uv.lock .claude-plugin/marketplace.json README.md
-  git commit -m "Release $TAG"
+  git commit -m "Prepare release $TAG"
 
   printf '\nPrepared release commit for %s. Review, then merge to main before running:\n' "$TAG"
   printf '  ./scripts/release.sh publish %s\n' "$TAG"
@@ -182,7 +182,7 @@ print(plugins[0].get('version', ''))
   read -r -p "Continue? [y/N] " CONFIRM
   [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]] || die "release cancelled"
 
-  git tag -a "$TAG" -m "Release $TAG"
+  git tag -a "$TAG" -m "Publish release $TAG"
   if ! git push origin "refs/tags/$TAG"; then
     printf 'error: push failed; remove the local tag with: git tag -d %s\n' "$TAG" >&2
     exit 1
