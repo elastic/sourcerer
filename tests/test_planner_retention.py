@@ -115,6 +115,54 @@ class TestDeleteByEachCriterion:
         assert decisions["rc1"].criteria == ("version",)
         assert decisions["rc2"].action == "keep"
 
+    def test_range_keeps_in_range_deletes_out_of_range(self):
+        cfg = _cfg([_sel(
+            type_="tag", match="v{major}.{minor}.{patch}",
+            retain={"version": {"range": ">=6.0.0"}},
+        )])
+        v5 = make_marker("v5", ref="v5.9.9", ref_type="tag")
+        v6 = make_marker("v6", ref="v6.0.0", ref_type="tag")
+        v7 = make_marker("v7", ref="v7.0.0", ref_type="tag")
+        decisions = {d.marker.id: d for d in plan_repo([v5, v6, v7], cfg)}
+        assert decisions["v5"].action == "delete"
+        assert decisions["v5"].criteria == ("version",)
+        assert decisions["v6"].action == "keep"
+        assert decisions["v7"].action == "keep"
+
+    def test_range_and_patches_intersect(self):
+        # range: >=6.0.0, patches:1 -- out-of-range (v5.x) deleted by range;
+        # in-range but non-latest-patch (v6.0.0) deleted by version.counts;
+        # latest patch for each in-range minor (v6.0.1, v6.1.0) kept.
+        cfg = _cfg([_sel(
+            type_="tag", match="v{major}.{minor}.{patch}",
+            retain={"version": {"range": ">=6.0.0", "patches": 1}},
+        )])
+        v5 = make_marker("v5", ref="v5.9.9", ref_type="tag")
+        v6_0_0 = make_marker("v600", ref="v6.0.0", ref_type="tag")
+        v6_0_1 = make_marker("v601", ref="v6.0.1", ref_type="tag")
+        v6_1_0 = make_marker("v610", ref="v6.1.0", ref_type="tag")
+        decisions = {d.marker.id: d for d in plan_repo([v5, v6_0_0, v6_0_1, v6_1_0], cfg)}
+        assert decisions["v5"].action == "delete"      # below range floor
+        assert decisions["v600"].action == "delete"    # in range but older patch for minor 0
+        assert decisions["v601"].action == "keep"      # newest patch for (6, 0)
+        assert decisions["v610"].action == "keep"      # only patch for (6, 1)
+
+    def test_keep_forever_selector_protects_out_of_range_marker(self):
+        # A bare allowlist selector (no retain) unions with the range selector;
+        # v5.9.9 is explicitly allowlisted and must survive despite being out of range.
+        cfg = _cfg([
+            _sel(type_="tag", match="v5.9.9"),  # no retain -> keep forever
+            _sel(type_="tag", match="v{major}.{minor}.{patch}",
+                 retain={"version": {"range": ">=6.0.0"}}),
+        ])
+        v5 = make_marker("v5", ref="v5.9.9", ref_type="tag")
+        v4 = make_marker("v4", ref="v4.0.0", ref_type="tag")
+        v6 = make_marker("v6", ref="v6.0.0", ref_type="tag")
+        decisions = {d.marker.id: d for d in plan_repo([v5, v4, v6], cfg)}
+        assert decisions["v5"].action == "keep"     # protected by allowlist selector
+        assert decisions["v4"].action == "delete"   # matches range selector but out of range
+        assert decisions["v6"].action == "keep"
+
     def test_version_prereleases_combined_with_numeric_and_superseded(self):
         # Mirrors real-world config: majors:1, prereleases:1, prerelease:superseded.
         # Uses two majors (8 and 9) to exercise majors:1, and two prerelease tags for the

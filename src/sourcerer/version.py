@@ -124,6 +124,105 @@ from datetime import datetime, timedelta, timezone  # noqa: E402
 from collections import defaultdict  # noqa: E402
 
 
+_OP_TOKEN_RE = re.compile(r"^(>=|<=|>|<|=)")
+
+
+def _parse_range_str(range_str: str, levels: tuple[str, ...]) -> list[tuple[str, tuple[int, ...]]]:
+    """Parse a range string (e.g. ">=6.0.0 <7.0.0") into a list of (op, components) pairs.
+    Validates grammar and arity against `levels`; raises ValueError on any violation."""
+    if "||" in range_str:
+        raise ValueError(f"range {range_str!r}: '||' is not supported")
+    # Reject hyphen ranges ("6.0.0 - 7.0.0") -- digit, space-dash-space, digit
+    if re.search(r"\d\s+-\s+\d", range_str):
+        raise ValueError(
+            f"range {range_str!r}: hyphen ranges (e.g. '6.0.0 - 7.0.0') are not supported"
+        )
+    for bad in ("~", "^", "x", "X", "*"):
+        if bad in range_str:
+            raise ValueError(
+                f"range {range_str!r}: {bad!r} is not supported; "
+                "use >=, <=, >, <, = and bare numbers only"
+            )
+
+    n = len(levels)
+
+    # Split by whitespace; each token must be "OP NUMBER" or bare "NUMBER" (exact match)
+    tokens = range_str.split()
+    if not tokens:
+        raise ValueError(f"range {range_str!r}: empty range string")
+
+    result: list[tuple[str, tuple[int, ...]]] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        # Check if token starts with a comparator or is a bare number
+        m = _OP_TOKEN_RE.match(tok)
+        if m:
+            op = m.group(1)
+            num_part = tok[m.end():]
+            if not num_part:
+                # Operator and number may be separate tokens (e.g. ">= 6.0.0")
+                i += 1
+                if i >= len(tokens):
+                    raise ValueError(f"range {range_str!r}: operator {op!r} has no operand")
+                num_part = tokens[i]
+        elif re.match(r"^\d", tok):
+            op = "="
+            num_part = tok
+        else:
+            raise ValueError(
+                f"range {range_str!r}: unexpected token {tok!r}; "
+                f"expected a comparator (>=, <=, >, <, =) or a bare number"
+            )
+
+        if not re.match(r"^\d+(\.\d+)*$", num_part):
+            raise ValueError(
+                f"range {range_str!r}: {num_part!r} is not a valid version number "
+                f"(no 'v' prefix; use bare numbers like 6.0.0)"
+            )
+        parts = [int(x) for x in num_part.split(".")]
+        if len(parts) != n:
+            raise ValueError(
+                f"range {range_str!r}: literal {num_part!r} has {len(parts)} component(s) "
+                f"but the match pattern captures {n} ({', '.join('{' + lvl + '}' for lvl in levels)}); "
+                f"arities must match exactly"
+            )
+        result.append((op, tuple(parts)))
+        i += 1
+
+    return result
+
+
+def _apply_range_op(components: tuple[int, ...], op: str, bound: tuple[int, ...]) -> bool:
+    """True if `components op bound` holds, compared tuple-lexicographically."""
+    if op == ">=":
+        return components >= bound
+    if op == "<=":
+        return components <= bound
+    if op == ">":
+        return components > bound
+    if op == "<":
+        return components < bound
+    if op == "=":
+        return components == bound
+    raise ValueError(f"unknown op {op!r}")
+
+
+def version_range_keep(versions, range_str: str, levels: tuple[str, ...]) -> set:
+    """Keep only versions whose numeric components satisfy all clauses in `range_str`.
+    Prerelease field is ignored (retain.prerelease is the sole prerelease control).
+    Versions without numeric components (empty levels) pass through unchanged."""
+    clauses = _parse_range_str(range_str, levels)
+    kept = set()
+    for v in versions:
+        if not v.components:
+            kept.add(v)
+            continue
+        if all(_apply_range_op(v.components, op, bound) for op, bound in clauses):
+            kept.add(v)
+    return kept
+
+
 def version_keep(versions, counts: dict[str, int], levels: tuple[str, ...]) -> set:
     """Value-relative retention. `counts` maps a level -> N >= 1: keep the newest N *values*
     at that level *within its parent group* (threshold = latest - (N - 1)).

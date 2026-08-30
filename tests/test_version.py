@@ -18,6 +18,7 @@ from sourcerer.version import (
     prerelease_count_keep,
     recent_keep,
     version_keep,
+    version_range_keep,
 )
 
 from conftest import dt, make_version
@@ -139,6 +140,115 @@ class TestParseBound:
 
     def test_truncates_long_input_to_levels_length(self):
         assert parse_bound("9.10.1.5", ("major", "minor")) == (9, 10)
+
+
+_LEVELS_3 = ("major", "minor", "patch")
+_LEVELS_2 = ("major", "minor")
+
+
+class TestVersionRangeKeep:
+    def _v(self, ref, *components, prerelease=""):
+        return Version(ref=ref, components=components, prerelease=prerelease)
+
+    def test_gte_lower_bound_keeps_at_and_above(self):
+        v5 = self._v("v5.9.9", 5, 9, 9)
+        v6 = self._v("v6.0.0", 6, 0, 0)
+        v7 = self._v("v7.1.0", 7, 1, 0)
+        result = version_range_keep([v5, v6, v7], ">=6.0.0", _LEVELS_3)
+        assert result == {v6, v7}
+
+    def test_window_keeps_only_versions_inside(self):
+        v5 = self._v("v5.0.0", 5, 0, 0)
+        v6_0 = self._v("v6.0.0", 6, 0, 0)
+        v6_4 = self._v("v6.4.9", 6, 4, 9)
+        v6_5 = self._v("v6.5.0", 6, 5, 0)
+        v7 = self._v("v7.0.0", 7, 0, 0)
+        result = version_range_keep([v5, v6_0, v6_4, v6_5, v7], ">=6.0.0 <6.5.0", _LEVELS_3)
+        assert result == {v6_0, v6_4}
+
+    def test_exact_match(self):
+        v6 = self._v("v6.0.0", 6, 0, 0)
+        v7 = self._v("v7.0.0", 7, 0, 0)
+        result = version_range_keep([v6, v7], "6.0.0", _LEVELS_3)
+        assert result == {v6}
+
+    def test_eq_operator_explicit(self):
+        v6 = self._v("v6.0.0", 6, 0, 0)
+        v7 = self._v("v7.0.0", 7, 0, 0)
+        result = version_range_keep([v6, v7], "=6.0.0", _LEVELS_3)
+        assert result == {v6}
+
+    def test_prerelease_ignored_in_range_check(self):
+        # A prerelease v6.0.0-rc1 has components (6,0,0) — in range, kept.
+        v6_rc = self._v("v6.0.0-rc1", 6, 0, 0, prerelease="rc1")
+        v5 = self._v("v5.0.0", 5, 0, 0)
+        result = version_range_keep([v6_rc, v5], ">=6.0.0", _LEVELS_3)
+        assert result == {v6_rc}
+
+    def test_two_level_arity(self):
+        v6_0 = self._v("v6.0", 6, 0)
+        v6_4 = self._v("v6.4", 6, 4)
+        v7 = self._v("v7.0", 7, 0)
+        result = version_range_keep([v6_0, v6_4, v7], ">=6.0 <7.0", _LEVELS_2)
+        assert result == {v6_0, v6_4}
+
+    def test_empty_versions_returns_empty(self):
+        assert version_range_keep([], ">=6.0.0", _LEVELS_3) == set()
+
+    def test_versions_with_empty_components_pass_through(self):
+        # Non-versioned (empty components) versions are not filtered by range.
+        v = Version(ref="main", components=(), prerelease="")
+        result = version_range_keep([v], ">=6.0.0", _LEVELS_3)
+        assert result == {v}
+
+    # --- grammar validation ---
+
+    def test_arity_mismatch_raises(self):
+        v = self._v("v6.0.0", 6, 0, 0)
+        with pytest.raises(ValueError, match="arities must match exactly"):
+            version_range_keep([v], ">=6.0", _LEVELS_3)  # 2 components, pattern needs 3
+
+    def test_v_prefix_raises(self):
+        v = self._v("v6.0.0", 6, 0, 0)
+        with pytest.raises(ValueError, match="not a valid version number"):
+            version_range_keep([v], ">=v6.0.0", _LEVELS_3)
+
+    def test_or_operator_raises(self):
+        v = self._v("v6.0.0", 6, 0, 0)
+        with pytest.raises(ValueError, match=r"\|\|"):
+            version_range_keep([v], ">=6.0.0 || >=7.0.0", _LEVELS_3)
+
+    def test_hyphen_range_raises(self):
+        v = self._v("v6.0.0", 6, 0, 0)
+        with pytest.raises(ValueError, match="hyphen ranges"):
+            version_range_keep([v], "6.0.0 - 7.0.0", _LEVELS_3)
+
+    def test_tilde_raises(self):
+        v = self._v("v6.0.0", 6, 0, 0)
+        with pytest.raises(ValueError, match="'~'"):
+            version_range_keep([v], "~6.0.0", _LEVELS_3)
+
+    def test_caret_raises(self):
+        v = self._v("v6.0.0", 6, 0, 0)
+        with pytest.raises(ValueError, match=r"'\^'"):
+            version_range_keep([v], "^6.0.0", _LEVELS_3)
+
+    def test_x_range_raises(self):
+        v = self._v("v6.0.0", 6, 0, 0)
+        with pytest.raises(ValueError, match="'x'"):
+            version_range_keep([v], "6.x.0", _LEVELS_3)
+
+    def test_dangling_operator_raises(self):
+        v = self._v("v6.0.0", 6, 0, 0)
+        with pytest.raises(ValueError, match="has no operand"):
+            version_range_keep([v], ">=", _LEVELS_3)
+
+    def test_space_separated_op_and_number(self):
+        # ">= 6.0.0" (operator and number in separate tokens) should work.
+        v6 = self._v("v6.0.0", 6, 0, 0)
+        v5 = self._v("v5.0.0", 5, 0, 0)
+        result = version_range_keep([v6, v5], ">= 6.0.0", _LEVELS_3)
+        assert result == {v6}
 
 
 class TestVersionKeep:

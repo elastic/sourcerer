@@ -46,6 +46,7 @@ performs its `setup`, `index`, and `prune` commands.
 |`sources[i].retain.version.patches`    |Integer              |No      ||
 |`sources[i].retain.version.builds`     |Integer              |No      ||
 |`sources[i].retain.version.prereleases`|Integer              |No      ||
+|`sources[i].retain.version.range`      |String               |No      ||
 |`sources[i].retain.prerelease`         |String               |No      ||
 |`sources[i].schedule`                  |String               |No      ||
 |`sources[i].index`                     |Object               |No      ||
@@ -581,6 +582,71 @@ version (whichever is most specific) before a ref qualifies for pruning.
 - Required: No
 - Type: Integer
 - Default: `null` (omitted)
+
+### `sources[i].retain.version.range`
+
+A comparator expression that keeps only refs whose numeric version components fall within the
+specified window. Every clause in the expression must be satisfied simultaneously (logical AND).
+
+**Grammar** (closed set — anything else is a validation error):
+
+- Comparators: `>=`, `<=`, `>`, `<`, `=`. A bare number with no operator means exact match (`=`).
+- Multiple clauses are joined by a single space: `">=6.0.0 <6.5.0"`.
+- Values are bare numeric — no `v` prefix (the literal prefix lives in `match`).
+- Not supported (validation error): x-ranges (`6.x`), hyphen ranges (`6.0.0 - 6.5.0`), `||`,
+  `~`, `^`.
+
+**Semantics:**
+
+- **Arity must match exactly.** Each literal in the expression must have the same number of
+  components as the numeric levels captured by the source's `match` pattern. If `match` captures
+  `{major}.{minor}.{patch}`, every literal must be three components (e.g. `>=6.0.0`); if `match`
+  captures `{major}.{minor}.{patch}.{build}`, literals must be four components (e.g. `>=6.0.0.1`).
+  A mismatch is a validation error — components are never zero-padded or inferred.
+- **Prerelease ignored.** Range comparison only looks at numeric components; `{prerelease}` is
+  always ignored. Use `retain.prerelease: keep|superseded` to control prerelease handling.
+- **Composition.** `range` composes with `majors`/`minors`/`patches`/`builds`/`prereleases`
+  as an intersection: a ref is kept only if it is both within the range *and* satisfies every
+  other criterion in the same selector. Across selectors, keeps union as usual (a keep-forever
+  selector protects a ref even if it falls outside the range in another selector).
+
+Examples:
+
+```yaml
+- git: { host: github, org: elastic, repo: whatever, ref_type: tag }
+  match: "v{major}.{minor}.{patch}"
+  retain.version.range: ">=6.0.0" # anything v6 and later
+
+- git: { host: github, org: elastic, repo: whatever, ref_type: tag }
+  match: "v{major}.{minor}.{patch}"
+  retain:
+    version:
+      range: ">=6.0.0" # anything v6 and later
+      patches: 1       # keeping only the latest patch releases within that range
+
+- git: { host: github, org: elastic, repo: whatever, ref_type: tag }
+  match: "v{major}.{minor}.{patch}"
+  retain.version.range: ">=6.0.0 <6.5.0" # first half of v6
+
+- git: { host: github, org: elastic, repo: whatever, ref_type: tag }
+  match: "v{major}.{minor}.{patch}"
+  retain.version.range: ">=6.5.0 <7.0.0" # second half of v6
+```
+
+- Required: No
+- Type: String
+- Default: `null` (omitted, no range filter)
+- Validation:
+  - Must be a non-empty string of one or more comparator clauses separated by spaces.
+  - Each clause must start with a comparator (`>=`, `<=`, `>`, `<`, `=`) or be a bare number
+    (treated as `=`).
+  - Values must be bare numeric (no `v` prefix).
+  - Component count of each literal must equal the number of numeric levels captured by the
+    source's `match` pattern (arity mismatch is a validation error).
+  - The following syntaxes are explicitly rejected: x-ranges (`6.x`), hyphen ranges
+    (`6.0.0 - 6.5.0`), `||`, `~`, `^`.
+  - `range` requires at least `{major}` in `match` (i.e. invalid when `match` captures no
+    numeric version levels — the same rule that guards the whole `retain.version` block).
 
 ### `sources[i].retain.prerelease`
 

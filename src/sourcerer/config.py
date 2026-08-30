@@ -57,7 +57,7 @@ from croniter import croniter
 
 # App packages
 from .hosts import _FORBIDDEN_HOST_CHARS, Host, resolve_hosts, validate_host_id
-from .version import CompiledPattern, Version, compile_pattern, match_version, parse_bound
+from .version import CompiledPattern, Version, compile_pattern, match_version, parse_bound, version_range_keep
 
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*(s|m|h|d|w|M|y)\s*$")
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "M": 2592000, "y": 31536000}
@@ -260,6 +260,7 @@ class Since:
 class VersionPolicy:
     counts: dict[str, int]   # level -> count (>= 1), only for levels the user set
     prereleases: int | None = None   # keep newest N prereleases per final-version group (by commit date)
+    range: str | None = None         # comparator expression, e.g. ">=6.0.0 <7.0.0"; None = no range filter
 
 
 @dataclass
@@ -398,7 +399,7 @@ def _parse_retain(raw: dict, ctx: str, has_versioned: bool, levels: tuple[str, .
         if not has_versioned:
             raise ValueError(f"{ctx} retain.version: match has no version tokens to compare")
         vraw = raw["version"]
-        _VERSION_KEYS = set(_PLURAL_TO_LEVEL) | {"prereleases"}
+        _VERSION_KEYS = set(_PLURAL_TO_LEVEL) | {"prereleases", "range"}
         vunknown = set(vraw) - _VERSION_KEYS
         if vunknown:
             raise ValueError(f"{ctx} retain.version: unknown levels {sorted(vunknown)} "
@@ -406,7 +407,17 @@ def _parse_retain(raw: dict, ctx: str, has_versioned: bool, levels: tuple[str, .
         counts = {_PLURAL_TO_LEVEL[p]: _parse_count_level(vraw.get(p), p, ctx) for p in _PLURAL_TO_LEVEL}
         counts = {lvl: n for lvl, n in counts.items() if n is not None}
         prereleases = _parse_count_level(vraw.get("prereleases"), "prereleases", ctx)
-        version = VersionPolicy(counts=counts, prereleases=prereleases)
+        range_expr = None
+        if vraw.get("range") is not None:
+            raw_range = vraw["range"]
+            if not isinstance(raw_range, str):
+                raise ValueError(f"{ctx} retain.version.range: must be a string (got {raw_range!r})")
+            try:
+                version_range_keep([], raw_range, levels)  # validate grammar + arity eagerly
+            except ValueError as e:
+                raise ValueError(f"{ctx} retain.version.range: {e}") from e
+            range_expr = raw_range
+        version = VersionPolicy(counts=counts, prereleases=prereleases, range=range_expr)
 
     prerelease = raw.get("prerelease", "keep")
     if prerelease not in ("keep", "superseded"):

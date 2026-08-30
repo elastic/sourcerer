@@ -399,6 +399,65 @@ class TestParseRetain:
         pol = cfg.repos[0].selectors[0].retain.version
         assert pol.prereleases == 3
 
+    def test_range_parses_to_policy(self):
+        cfg = _cfg([_source(
+            ref_type="tag",
+            match="v{major}.{minor}.{patch}",
+            retain={"version": {"range": ">=6.0.0"}},
+        )])
+        pol = cfg.repos[0].selectors[0].retain.version
+        assert pol.range == ">=6.0.0"
+        assert pol.counts == {}
+        assert pol.prereleases is None
+
+    def test_range_combined_with_patches(self):
+        cfg = _cfg([_source(
+            ref_type="tag",
+            match="v{major}.{minor}.{patch}",
+            retain={"version": {"range": ">=6.0.0", "patches": 1}},
+        )])
+        pol = cfg.repos[0].selectors[0].retain.version
+        assert pol.range == ">=6.0.0"
+        assert pol.counts == {"patch": 1}
+
+    def test_range_only_version_policy_does_not_collapse_to_none(self):
+        cfg = _cfg([_source(
+            ref_type="tag",
+            match="v{major}.{minor}.{patch}",
+            retain={"version": {"range": ">=6.0.0"}},
+        )])
+        assert cfg.repos[0].selectors[0].retain is not None
+        assert cfg.repos[0].selectors[0].retain.version is not None
+
+    def test_range_on_non_versioned_match_raises(self):
+        with pytest.raises(ValueError, match="has no version tokens"):
+            _cfg([_source(ref_type="tag", match="my-dev-tag", retain={"version": {"range": ">=6.0.0"}})])
+
+    def test_range_arity_mismatch_raises_at_config_load(self):
+        # match captures 3 levels, range literal has 2 -- rejected at config parse time.
+        with pytest.raises(ValueError, match="retain.version.range"):
+            _cfg([_source(
+                ref_type="tag",
+                match="v{major}.{minor}.{patch}",
+                retain={"version": {"range": ">=6.0"}},
+            )])
+
+    def test_range_invalid_syntax_raises_at_config_load(self):
+        with pytest.raises(ValueError, match="retain.version.range"):
+            _cfg([_source(
+                ref_type="tag",
+                match="v{major}.{minor}.{patch}",
+                retain={"version": {"range": "6.x.0"}},
+            )])
+
+    def test_range_non_string_raises(self):
+        with pytest.raises(ValueError, match="retain.version.range"):
+            _cfg([_source(
+                ref_type="tag",
+                match="v{major}.{minor}.{patch}",
+                retain={"version": {"range": 6}},
+            )])
+
 
 class TestSelectorMatches:
     def test_ref_type_mismatch_returns_none(self):

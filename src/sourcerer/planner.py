@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 # App packages
 from .config import RepoConfig, Selector
-from .version import age_keep, drop_superseded_prereleases, prerelease_count_keep, recent_keep, version_keep
+from .version import age_keep, drop_superseded_prereleases, prerelease_count_keep, recent_keep, version_keep, version_range_keep
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
@@ -55,6 +55,8 @@ def _describe(sel: Selector) -> str:
         vbits = [f"{_LEVEL_TO_PLURAL[k]}:{v}" for k, v in pa.version.counts.items()]
         if pa.version.prereleases is not None:
             vbits.append(f"prereleases:{pa.version.prereleases}")
+        if pa.version.range is not None:
+            vbits.append(f"range:{pa.version.range}")
         bits.append("version(" + ",".join(vbits) + ")")
     if pa.prerelease == "superseded":
         bits.append("drop-superseded-pre")
@@ -92,6 +94,9 @@ def _selector_keep_ids(
             exclusions[mid].add(name)
 
     versions = [v for _, v in cohort]
+    if pa.version is not None and pa.version.range is not None:
+        survivors = version_range_keep(versions, pa.version.range, sel.levels)
+        apply("version", {m.id for m, v in cohort if v in survivors})
     if pa.version is not None and pa.version.counts:
         survivors = version_keep(versions, pa.version.counts, sel.levels)
         apply("version", {m.id for m, v in cohort if v in survivors})
