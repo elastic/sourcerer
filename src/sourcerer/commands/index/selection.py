@@ -99,6 +99,8 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
             pattern, v = matched
             if floor is not None and v.components < floor:
                 continue  # below the since version floor
+            if not sel.range_admits(v):
+                continue  # outside this selector's retain.version.range -- let a sibling claim it
             key = (rt, name)
             if key in seen:
                 # Already claimed by an earlier selector: check for a mode conflict.

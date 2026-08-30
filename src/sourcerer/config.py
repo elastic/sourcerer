@@ -349,6 +349,17 @@ class Selector:
             return parse_bound(value, self.levels)
         return None
 
+    def range_admits(self, v: Version) -> bool:
+        """True if this selector's retain.version.range admits version `v` (or there is no range).
+        Used at selection time so a windowed selector only claims refs whose version falls within
+        its range, letting a sibling selector with a different range (and index.suffix) claim the
+        rest.  A selector with no range admits every version it matches.  Versions with empty
+        components (non-versioned patterns) pass through: they can't carry a range (rejected at
+        config parse time) so there is nothing to test."""
+        if self.retain is None or self.retain.version is None or self.retain.version.range is None:
+            return True
+        return bool(version_range_keep([v], self.retain.version.range, self.levels))
+
 
 @dataclass
 class RepoConfig:

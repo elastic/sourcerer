@@ -162,3 +162,95 @@ class TestDeltaTagStreamSelection:
         refs = {u.ref for u in units}
         assert "deploy@*" in refs
         assert "v{major}.{minor}.{patch}" in refs
+
+
+class TestRangeGatedSelection:
+    """retain.version.range gates which selector claims a ref, enabling version-windowed routing.
+
+    Regression tests for the bug where all tags went to the first selector's index.suffix because
+    match_pattern was the only selection gate (range was pruning-only).  With the fix, a ranged
+    selector only claims refs whose version falls inside its range, letting sibling selectors claim
+    the rest.
+    """
+
+    # Two adjacent windows with distinct suffixes — the minimal repro of the bug report.
+    WINDOWED_CONFIG = """
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v{major}.{minor}.{patch}"
+    index: {suffix: "10.x"}
+    retain:
+      version:
+        range: ">=10.0.0 <11.0.0"
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v{major}.{minor}.{patch}"
+    index: {suffix: "9.x"}
+    retain:
+      version:
+        range: ">=9.0.0 <10.0.0"
+"""
+
+    TAGS = {
+        "v10.1.0": "sha10_1_0",
+        "v10.0.5": "sha10_0_5",
+        "v9.9.0":  "sha9_9_0",
+        "v9.0.0":  "sha9_0_0",
+        # outside both windows: should produce no Unit
+        "v8.99.0": "sha8_99_0",
+    }
+
+    def test_each_tag_gets_its_windows_suffix(self):
+        """v10.x tags → suffix '10.x'; v9.x tags → suffix '9.x'."""
+        units = _resolve(self.WINDOWED_CONFIG, remote_tags=self.TAGS)
+        by_ref = {u.ref: u for u in units}
+
+        assert by_ref["v10.1.0"].index_suffix == "10.x"
+        assert by_ref["v10.0.5"].index_suffix == "10.x"
+        assert by_ref["v9.9.0"].index_suffix == "9.x"
+        assert by_ref["v9.0.0"].index_suffix == "9.x"
+
+    def test_tag_outside_all_windows_produces_no_unit(self):
+        """v8.99.0 matches the glob but falls outside both ranges → no Unit emitted."""
+        units = _resolve(self.WINDOWED_CONFIG, remote_tags=self.TAGS)
+        refs = {u.ref for u in units}
+        assert "v8.99.0" not in refs
+
+    def test_total_unit_count(self):
+        """Exactly one Unit per in-window tag (4 of 5 tags qualify)."""
+        units = _resolve(self.WINDOWED_CONFIG, remote_tags=self.TAGS)
+        assert len(units) == 4
+
+    def test_range_gate_is_order_independent(self):
+        """Swapping window order in the config must not change which suffix each tag gets."""
+        swapped_config = """
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v{major}.{minor}.{patch}"
+    index: {suffix: "9.x"}
+    retain:
+      version:
+        range: ">=9.0.0 <10.0.0"
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v{major}.{minor}.{patch}"
+    index: {suffix: "10.x"}
+    retain:
+      version:
+        range: ">=10.0.0 <11.0.0"
+"""
+        units = _resolve(swapped_config, remote_tags=self.TAGS)
+        by_ref = {u.ref: u for u in units}
+        assert by_ref["v10.1.0"].index_suffix == "10.x"
+        assert by_ref["v9.9.0"].index_suffix == "9.x"
+
+    def test_rangeless_catch_all_claims_outside_windowed_tags(self):
+        """A selector with no range still claims everything its match covers (it's not windowed)."""
+        config_with_catchall = self.WINDOWED_CONFIG + """
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v{major}.{minor}.{patch}"
+    index: {suffix: "old"}
+"""
+        units = _resolve(config_with_catchall, remote_tags=self.TAGS)
+        by_ref = {u.ref: u for u in units}
+        # Tags in the two windows still go to their window suffix.
+        assert by_ref["v10.1.0"].index_suffix == "10.x"
+        assert by_ref["v9.9.0"].index_suffix == "9.x"
+        # The tag outside all windows is now claimed by the rangeless catch-all.
+        assert by_ref["v8.99.0"].index_suffix == "old"

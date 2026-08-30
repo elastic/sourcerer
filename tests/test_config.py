@@ -520,6 +520,58 @@ class TestSinceVersionFloor:
         assert cfg.repos[0].selectors[0].since_version_floor() is None
 
 
+class TestSelectorRangeAdmits:
+    """Selector.range_admits() gates ref-claiming by the selector's retain.version.range."""
+
+    def _sel(self, range_expr=None):
+        retain = {"version": {"range": range_expr}} if range_expr else None
+        return _cfg([_source(ref_type="tag", match="v{major}.{minor}.{patch}",
+                             retain=retain)]).repos[0].selectors[0]
+
+    def _version(self, major, minor, patch):
+        from sourcerer.version import Version
+        return Version(ref=f"v{major}.{minor}.{patch}", components=(major, minor, patch), prerelease="")
+
+    def test_no_range_admits_everything(self):
+        sel = self._sel()
+        assert sel.range_admits(self._version(1, 0, 0)) is True
+        assert sel.range_admits(self._version(99, 0, 0)) is True
+
+    def test_range_lower_bound_admits_on_and_above(self):
+        sel = self._sel(">=9.0.0")
+        assert sel.range_admits(self._version(9, 0, 0)) is True
+        assert sel.range_admits(self._version(9, 1, 0)) is True
+        assert sel.range_admits(self._version(10, 0, 0)) is True
+
+    def test_range_lower_bound_rejects_below(self):
+        sel = self._sel(">=9.0.0")
+        assert sel.range_admits(self._version(8, 99, 99)) is False
+
+    def test_range_window_admits_inside(self):
+        sel = self._sel(">=9.8.0 <9.10.0")
+        assert sel.range_admits(self._version(9, 8, 0)) is True
+        assert sel.range_admits(self._version(9, 9, 5)) is True
+
+    def test_range_window_rejects_below(self):
+        sel = self._sel(">=9.8.0 <9.10.0")
+        assert sel.range_admits(self._version(9, 7, 99)) is False
+
+    def test_range_window_rejects_above_or_equal(self):
+        sel = self._sel(">=9.8.0 <9.10.0")
+        assert sel.range_admits(self._version(9, 10, 0)) is False
+        assert sel.range_admits(self._version(10, 0, 0)) is False
+
+    def test_empty_components_pass_through(self):
+        """Non-versioned Version (components empty) always passes — can't carry a range anyway."""
+        from sourcerer.version import Version
+        # Simulate a non-versioned match that somehow gets a range_admits call (defensive).
+        # We use a Selector with a range but override the version manually for this edge-case test.
+        sel = self._sel(">=9.0.0")
+        v = Version(ref="v9.0.0", components=(), prerelease="")
+        # version_range_keep passes empty-components versions through, so range_admits returns True.
+        assert sel.range_admits(v) is True
+
+
 class TestDottedKeys:
     def test_git_host_dotted(self):
         cfg = parse_config({"sources": [{
