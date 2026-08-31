@@ -57,7 +57,17 @@ from croniter import croniter
 
 # App packages
 from .hosts import _FORBIDDEN_HOST_CHARS, Host, resolve_hosts, validate_host_id
-from .version import CompiledPattern, Version, compile_pattern, match_version, parse_bound, version_range_keep
+from .version import (
+    CompiledPattern,
+    Version,
+    compile_pattern,
+    match_version,
+    parse_bound,
+    render_suffix,
+    strip_suffix_tokens,
+    suffix_template_tokens,
+    version_range_keep,
+)
 
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*(s|m|h|d|w|M|y)\s*$")
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "M": 2592000, "y": 31536000}
@@ -292,6 +302,8 @@ class Selector:
     # source's content docs land in. Per-source, so two sources sharing a (host, org, repo) may
     # route differently.
     index_level: str = "repo"              # "host" | "org" | "repo" | "commit"
+    # May embed version variables ({major}, ... , {prerelease}) -- rendered per matched ref by
+    # resolve_index_suffix(), never stored in template form.
     index_suffix: str | None = None        # appended as ^{suffix}; None == no suffix
 
     def matches(self, ref_type: str, ref: str) -> Version | None:
@@ -359,6 +371,22 @@ class Selector:
         if self.retain is None or self.retain.version is None or self.retain.version.range is None:
             return True
         return bool(version_range_keep([v], self.retain.version.range, self.levels))
+
+    def resolve_index_suffix(self, v: Version) -> str | None:
+        """This selector's index.suffix for one concrete matched ref: a literal suffix as-is, or
+        a version template rendered from `v` (e.g. "{major}.{minor}.x" -> "9.5.x").
+
+        Called once per emitted Unit, so every downstream consumer -- the refs marker's
+        index_suffix, the physical index name, and the routing comparison that decides whether a
+        source migrated -- only ever sees a concrete value. That is what makes a template and the
+        equivalent set of hand-written literal suffixes fully interchangeable: swapping one for
+        the other cannot change index_suffix, so it triggers no reindex and no prune."""
+        if not self.index_suffix:
+            return self.index_suffix
+        tokens, _ = suffix_template_tokens(self.index_suffix)
+        if not tokens:
+            return self.index_suffix
+        return render_suffix(self.index_suffix, self.levels, v)
 
 
 @dataclass
@@ -460,12 +488,20 @@ _MODES = ("snapshot", "delta")
 _FORBIDDEN_SUFFIX_CHARS = _FORBIDDEN_HOST_CHARS | {"^"}
 
 
+_SUFFIX_VARIABLES = ", ".join("{" + lvl + "}" for lvl in (*_NUMERIC_LEVELS, "prerelease"))
+
+
 def _parse_index(raw: dict, ctx: str) -> tuple[str, str | None]:
     """Validate a source's `index:` block and return (level, suffix).
 
     `level` defaults to "repo"; `suffix` defaults to None. An empty-string suffix is treated as
     omitted (per the spec). The suffix charset mirrors the host-id rules (lowercase, no whitespace,
-    no index-name-forbidden chars) plus a ban on the `^` delimiter itself."""
+    no index-name-forbidden chars) plus a ban on the `^` delimiter itself.
+
+    A suffix may embed version variables ({major} ... {prerelease}), which are rendered per
+    matched ref later. The charset rules therefore apply only to the literal text between
+    variables -- whether the variables are usable at all depends on the source's `match`, which
+    isn't compiled yet, so that cross-check lives in _validate_index_suffix_template."""
     if not isinstance(raw, dict):
         raise ValueError(f"{ctx} index: must be a mapping with 'level' and/or 'suffix'")
     unknown = set(raw) - {"level", "suffix"}
@@ -484,16 +520,62 @@ def _parse_index(raw: dict, ctx: str) -> tuple[str, str | None]:
         if not isinstance(s, str):
             raise ValueError(f"{ctx} index.suffix: must be a string")
         if s != "":  # empty string == omitted
-            bad = sorted({c for c in s if c in _FORBIDDEN_SUFFIX_CHARS})
+            _, unknown_vars = suffix_template_tokens(s)
+            if unknown_vars:
+                raise ValueError(f"{ctx} index.suffix: {s!r} uses unknown variable(s) "
+                                 f"{list(unknown_vars)} (available: {_SUFFIX_VARIABLES})")
+            literal = strip_suffix_tokens(s)
+            if "{" in literal or "}" in literal:
+                raise ValueError(f"{ctx} index.suffix: {s!r} has an unmatched '{{' or '}}'")
+            bad = sorted({c for c in literal if c in _FORBIDDEN_SUFFIX_CHARS})
             if bad:
                 raise ValueError(f"{ctx} index.suffix: {s!r} contains forbidden character(s) {bad}")
-            if any(c.isupper() for c in s):
+            if any(c.isupper() for c in literal):
                 raise ValueError(f"{ctx} index.suffix: {s!r} must not contain uppercase characters")
-            if any(c.isspace() for c in s):
+            if any(c.isspace() for c in literal):
                 raise ValueError(f"{ctx} index.suffix: {s!r} must not contain whitespace")
             suffix = s
 
     return level, suffix
+
+
+def _validate_index_suffix_template(
+    suffix: str | None, ctx: str, ref_type: str, mode: str,
+    patterns: list[str], compiled: list[CompiledPattern],
+) -> None:
+    """Cross-check an index.suffix's version variables against the source's `match` patterns.
+
+    A no-op for a plain literal suffix. Rendering a variable needs a version captured from the
+    ref name, so a variable is only usable when the source captures it for *every* ref the
+    selector can claim: `ref_type` other than commit, `mode: snapshot`, and every match pattern
+    capturing every referenced level. Requiring every pattern (not just one) is what keeps
+    Version.components aligned with Selector.levels at render time. Same shape of check
+    retain.version.range's arity rule already applies to the same captured levels."""
+    if not suffix:
+        return
+    tokens, _ = suffix_template_tokens(suffix)   # unknown variables already rejected upstream
+    if not tokens:
+        return
+    listed = ", ".join("{" + t + "}" for t in tokens)
+    if ref_type == "commit":
+        raise ValueError(f"{ctx} index.suffix: {suffix!r} uses version variable(s) {listed}, but a "
+                         f"commit source matches literal SHAs and captures no version")
+    if mode != "snapshot":
+        raise ValueError(f"{ctx} index.suffix: {suffix!r} uses version variable(s) {listed}, but "
+                         f"'mode: {mode}' content is ref-addressed rather than per-version; "
+                         f"version variables require 'mode: snapshot'")
+    for pattern, cp in zip(patterns, compiled):
+        for tok in tokens:
+            if tok == "prerelease":
+                if not cp.has_prerelease:
+                    raise ValueError(f"{ctx} index.suffix: {{prerelease}} is not captured by match "
+                                     f"pattern {pattern!r}; every match pattern must capture every "
+                                     f"variable the suffix uses")
+            elif tok not in cp.levels:
+                captured = ", ".join("{" + lvl + "}" for lvl in cp.levels) or "no version levels"
+                raise ValueError(f"{ctx} index.suffix: {{{tok}}} is not captured by match pattern "
+                                 f"{pattern!r}, which captures {captured}; every match pattern must "
+                                 f"capture every variable the suffix uses")
 
 
 def _parse_git_scope(raw: dict, ctx: str) -> tuple[str, str, str, str]:
@@ -580,6 +662,10 @@ def _parse_source(raw: dict, ctx: str) -> tuple[str, str, str, Selector]:
             raise ValueError(f"{ctx}: match patterns disagree on version levels {sorted(level_sets)}")
         levels = next(iter(level_sets), ())
         has_versioned = bool(levels)
+
+    # Now that `match` is compiled, the suffix's version variables (if any) can be checked
+    # against the levels each pattern actually captures.
+    _validate_index_suffix_template(index_suffix, ctx, ref_type, mode, patterns, compiled)
 
     if ref_type == "commit" and raw.get("since") is not None:
         # A commit selector already names the exact point to index -- there is nothing to

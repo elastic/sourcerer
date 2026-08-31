@@ -17,6 +17,9 @@ from sourcerer.version import (
     parse_bound,
     prerelease_count_keep,
     recent_keep,
+    render_suffix,
+    strip_suffix_tokens,
+    suffix_template_tokens,
     version_keep,
     version_range_keep,
 )
@@ -140,6 +143,80 @@ class TestParseBound:
 
     def test_truncates_long_input_to_levels_length(self):
         assert parse_bound("9.10.1.5", ("major", "minor")) == (9, 10)
+
+
+class TestSuffixTemplateTokens:
+    """Splitting an index.suffix into its known version variables and unknown `{...}` spans."""
+
+    def test_literal_suffix_has_no_tokens(self):
+        assert suffix_template_tokens("deploy") == ((), ())
+
+    def test_known_tokens_in_appearance_order(self):
+        known, unknown = suffix_template_tokens("{major}.{minor}.x")
+        assert known == ("major", "minor")
+        assert unknown == ()
+
+    def test_duplicates_collapse(self):
+        known, _ = suffix_template_tokens("{major}-{major}")
+        assert known == ("major",)
+
+    def test_inner_whitespace_accepted(self):
+        known, unknown = suffix_template_tokens("{ major }.x")
+        assert known == ("major",) and unknown == ()
+
+    def test_unknown_spans_returned_verbatim(self):
+        known, unknown = suffix_template_tokens("{major}.{bogus}")
+        assert known == ("major",)
+        assert unknown == ("{bogus}",)
+
+    def test_prerelease_is_known(self):
+        known, _ = suffix_template_tokens("{major}-{prerelease}")
+        assert known == ("major", "prerelease")
+
+
+class TestStripSuffixTokens:
+    def test_removes_token_spans(self):
+        assert strip_suffix_tokens("{major}.{minor}.x") == "..x"
+
+    def test_leftover_brace_signals_unmatched_delimiter(self):
+        assert "{" in strip_suffix_tokens("9.{major")
+
+
+class TestRenderSuffix:
+    _LEVELS = ("major", "minor", "patch")
+
+    def test_all_referenced_levels_substituted(self):
+        v = Version(ref="v9.5.2", components=(9, 5, 2), prerelease="")
+        assert render_suffix("{major}.{minor}.{patch}", self._LEVELS, v) == "9.5.2"
+
+    def test_subset_of_captured_levels(self):
+        """A pattern may capture more levels than the suffix references."""
+        v = Version(ref="v9.5.2", components=(9, 5, 2), prerelease="")
+        assert render_suffix("{major}.{minor}.x", self._LEVELS, v) == "9.5.x"
+        assert render_suffix("{major}.x", self._LEVELS, v) == "9.x"
+
+    def test_literal_suffix_passes_through(self):
+        v = Version(ref="v9.5.2", components=(9, 5, 2), prerelease="")
+        assert render_suffix("deploy", self._LEVELS, v) == "deploy"
+
+    def test_prerelease_substituted_and_lowercased(self):
+        """{prerelease} can capture uppercase, which an index name cannot carry."""
+        v = Version(ref="v9.0.0-RC.1", components=(9, 0, 0), prerelease="RC.1")
+        assert render_suffix("{major}.{minor}-{prerelease}", self._LEVELS, v) == "9.0-rc.1"
+
+    def test_inner_whitespace_token_substituted(self):
+        v = Version(ref="v9.5.2", components=(9, 5, 2), prerelease="")
+        assert render_suffix("{ major }.x", self._LEVELS, v) == "9.x"
+
+    def test_uncaptured_level_raises(self):
+        v = Version(ref="v9", components=(9,), prerelease="")
+        with pytest.raises(ValueError, match="not a captured level"):
+            render_suffix("{major}.{minor}.x", ("major",), v)
+
+    def test_missing_prerelease_raises(self):
+        v = Version(ref="v9.5.2", components=(9, 5, 2), prerelease="")
+        with pytest.raises(ValueError, match="has no prerelease"):
+            render_suffix("{prerelease}", self._LEVELS, v)
 
 
 _LEVELS_3 = ("major", "minor", "patch")

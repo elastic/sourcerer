@@ -41,11 +41,17 @@ def _content_index(
     Segments are lowercased to match the git.host/org/repo normalizer in the index mappings and the
     `_id` scheme, so the same identity always resolves to the same physical name. `suffix` is
     assumed already validated (lowercase, no delimiter/forbidden chars, empty == None) by config
-    parsing; an empty string is treated as absent. A "commit" level requires a commit sha."""
+    parsing; an empty string is treated as absent. A "commit" level requires a commit sha.
+
+    A suffix may be configured as a version template ("{major}.{minor}.x"), but it is rendered to
+    a concrete value at unit selection, so any brace reaching here is a bug -- rejected rather
+    than silently creating an index named after the template."""
     n = _LEVEL_SEGMENTS[level]
     segments = [host, org, repo, commit]
     if n == 4 and not commit:
         raise ValueError("commit-level index name requires a commit sha")
+    if suffix and ("{" in suffix or "}" in suffix):
+        raise ValueError(f"index suffix {suffix!r} still contains an unrendered version variable")
     name = prefix + "~" + "~".join(s.lower() for s in segments[:n])  # type: ignore[union-attr]
     if suffix:
         name += "^" + suffix.lower()

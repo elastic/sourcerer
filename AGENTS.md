@@ -369,6 +369,15 @@ copy; `sourcerer prune` sweeps any crash-leftover as `orphan:stale-location`, an
 sourcerer content index drained to zero docs as `orphan:empty-index`). Commit-level indexing
 creates one index/shard per commit — see `specs/sourcerer-yml.md` for the caveat.
 
+`suffix` may embed the match pattern's version variables (`index.suffix: "{major}.{minor}.x"`),
+letting one source route each ref to a per-version sibling index instead of needing one source
+per version window. `Selector.resolve_index_suffix` renders the template from the matched ref's
+own version at unit selection (`selection.py`), so `index_suffix` is always stored and compared
+as a concrete value (`9.5.x`) — a template and the equivalent literal suffixes are
+interchangeable and swapping them migrates nothing. Variables require `mode: snapshot`, a
+non-`commit` `ref_type`, and every `match` pattern to capture every variable used; violations are
+config-parse errors.
+
 - **Tags** are *not* stored on content docs. Each tag is one tiny doc in `sourcerer-refs`
   mapping the tag to its commit. To search a tagged release, resolve it to a commit via the
   refs index (the `sourcerer.refs.list` tool), then filter content by `git.host` + `git.commit`.

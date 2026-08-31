@@ -119,6 +119,65 @@ def parse_bound(text: str, levels: tuple[str, ...]) -> tuple[int, ...]:
     return tuple(nums)
 
 
+# --- index.suffix templates (see specs/sourcerer-yml.md) --------------------------------
+# A source's index.suffix may embed the same version tokens a match pattern uses, so one
+# source can fan out to per-version sibling indices (index.suffix: "{major}.{minor}.x" ->
+# ^9.5.x, ^9.6.x, ...). Rendering happens once per matched ref, at Unit construction, so
+# every downstream consumer (refs markers, index names, migration checks) sees a concrete
+# value indistinguishable from a hand-written literal suffix.
+_ANY_TOKEN_RE = re.compile(r"\{[^{}]*\}")
+
+
+def suffix_template_tokens(template: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split a suffix template's `{...}` spans into (known version tokens, unknown spans).
+
+    Known tokens are returned as bare names ("major", "prerelease") in first-appearance order
+    with duplicates collapsed; unknown spans are returned verbatim (e.g. "{foo}") so a caller
+    can name them in an error message. A template with no `{...}` spans yields two empty
+    tuples, which is how callers detect a plain literal suffix."""
+    known: list[str] = []
+    unknown: list[str] = []
+    for span in _ANY_TOKEN_RE.findall(template):
+        m = _TOKEN_RE.fullmatch(span)
+        if m is None:
+            if span not in unknown:
+                unknown.append(span)
+        elif m.group(1) not in known:
+            known.append(m.group(1))
+    return tuple(known), tuple(unknown)
+
+
+def strip_suffix_tokens(template: str) -> str:
+    """The template's literal text with every `{...}` span removed, so a caller can apply
+    index-name charset rules to the parts a user actually wrote. A leftover brace in the
+    result means the template has an unmatched `{` or `}`."""
+    return _ANY_TOKEN_RE.sub("", template)
+
+
+def render_suffix(template: str, levels: tuple[str, ...], v: Version) -> str:
+    """Substitute a suffix template's version tokens from `v` and lowercase the result.
+
+    `levels` positions `v.components` (both are outermost-first), so a numeric token resolves
+    via its index in `levels`. Lowercasing matters: {prerelease} can capture uppercase (see
+    _PRERELEASE_RE) while index names cannot, and the rendered string is stored on the refs
+    marker AND used to build the index name -- normalizing here keeps those two byte-identical
+    so a re-run never reads back a mismatched routing and migrates needlessly.
+
+    Assumes config parsing has already verified every token is captured by every match pattern
+    (see config._validate_index_suffix_template); an uncaptured token raises ValueError."""
+    def sub(m: re.Match) -> str:
+        tok = m.group(1)
+        if tok == "prerelease":
+            if not v.prerelease:
+                raise ValueError(f"suffix template {template!r}: ref {v.ref!r} has no prerelease")
+            return v.prerelease
+        if tok not in levels:
+            raise ValueError(f"suffix template {template!r}: {{{tok}}} is not a captured level {levels}")
+        return str(v.components[levels.index(tok)])
+
+    return _TOKEN_RE.sub(sub, template).lower()
+
+
 # --- retention primitives (pure; feed Version objects or (key, value) pairs) ------------
 from datetime import datetime, timedelta, timezone  # noqa: E402
 from collections import defaultdict  # noqa: E402

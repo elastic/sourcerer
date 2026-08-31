@@ -242,6 +242,38 @@ sources:
     level: repo                   # host | org | repo (default) | commit
     suffix: deploy                # -> sourcerer-v3-*~github~elastic~elasticsearch^deploy
 
+# A suffix may embed the match pattern's version variables, fanning one source out across
+# per-version sibling indices instead of needing one source per version window. Each variable
+# is substituted from the ref's own version, so what gets stored (and what a later run compares
+# against) is always the concrete value — swapping a set of literal suffixes for an equivalent
+# template reindexes nothing. Requires snapshot mode and a match pattern that captures every
+# variable used.
+- git:
+    host: github
+    org: elastic
+    repo: kibana
+    ref_type: tag
+  match: v{major}.{minor}.{patch}
+  index:
+    suffix: "{major}.{minor}.x"   # v9.5.2 -> ^9.5.x, v8.19.0 -> ^8.19.x
+  retain:
+    version:
+      range: ">=7.0.0"
+
+# Pre-versioned tags of the same repo, where only the major is reliably parseable, land in
+# one index per major. A sibling range keeps the two sources' claims disjoint.
+- git:
+    host: github
+    org: elastic
+    repo: kibana
+    ref_type: tag
+  match: v{major}.*
+  index:
+    suffix: "{major}.x"           # v6.8.23 -> ^6.x, v5.6.16 -> ^5.x
+  retain:
+    version:
+      range: "<7"
+
 # A second host hosting a same-named org/repo is a distinct instance:
 - git:
     host: my_gitea

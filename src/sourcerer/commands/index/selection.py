@@ -113,7 +113,11 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
             units.append(Unit(
                 host=cfg.host, org=cfg.org, repo=cfg.repo, ref=name, kind=rt,
                 remote_sha=ref_map[name],
-                index_level=sel.index_level, index_suffix=sel.index_suffix,
+                # A version-templated index.suffix ("{major}.{minor}.x") is rendered here, from
+                # this ref's own version, so the Unit -- and everything it feeds -- carries a
+                # concrete suffix ("9.5.x"). The other Unit sites above are commit sources and
+                # delta streams, which config parsing forbids from using variables.
+                index_level=sel.index_level, index_suffix=sel.resolve_index_suffix(v),
                 mode=sel.mode, ref_pattern=pattern,
             ))
 

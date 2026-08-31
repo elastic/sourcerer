@@ -732,6 +732,11 @@ a routing change to guarantee the alias returns each doc exactly once. `prune` a
 sourcerer content index left with **zero docs** (e.g. `~repo^a` after an `index.suffix: a` → `b`
 change moved all of its content to `~repo^b`), so emptied indices don't linger.
 
+Only a change to the *resolved* routing migrates anything. Rewriting a set of
+sources with literal `index.suffix` values into one source with an equivalent
+[version-variable suffix](#version-variables) resolves to the same value per ref,
+so it is a no-op for already-indexed content.
+
 - Required: No
 - Type: Object
 - Default: `null` (omitted)
@@ -782,12 +787,51 @@ For instance:
 `sourcerer-v3-files~github~elastic~kibana^deploy`
 `sourcerer-v3-lines~github~elastic~kibana^deploy`
 
+#### Version variables
+
+A suffix may embed the same version variables `sources[i].match` uses
+(`{major}`, `{minor}`, `{patch}`, `{build}`, `{prerelease}`) to fan one source
+out across per-version sibling indices. Each variable is substituted from the
+version captured from the ref's own name, so a single source replaces what would
+otherwise be one source per version window:
+
+```yaml
+sources:
+- git: { host: github, org: elastic, repo: elasticsearch, ref_type: tag }
+  match: "v{major}.{minor}.{patch}"
+  index.suffix: "{major}.{minor}.x"     # v9.5.2 -> ^9.5.x, v8.19.0 -> ^8.19.x
+  retain.version.range: ">=7.0.0"
+- git: { host: github, org: elastic, repo: elasticsearch, ref_type: tag }
+  match: "v{major}.*"
+  index.suffix: "{major}.x"             # v6.8.23 -> ^6.x, v5.6.16 -> ^5.x
+  retain.version.range: "<7"
+```
+
+Substitution happens once per ref, when the ref is selected for indexing. The
+value recorded in `sourcerer-v3-refs.index_suffix` is therefore always the
+**concrete, rendered** suffix (`9.5.x`), never the template (`{major}.{minor}.x`).
+A templated suffix and the equivalent set of hand-written literal suffixes are
+thus fully interchangeable: replacing one with the other changes no stored
+value, so it triggers neither a migration nor a prune.
+
+A rendered `{prerelease}` is lowercased, since a prerelease identifier may
+legally contain uppercase but an index name may not.
+
 - Required: No
 - Type: String
 - Default: Omitted (`null`)
 - Validation:
-  - Cannot contain these characters: `~`, `^`, `\`, `/`, `*`, `?`, `"`, `<`, `>`, `|`, `:`
-  - Cannot contain uppercase characters or whitespace characters
+  - Text outside `{...}` variables cannot contain these characters: `~`, `^`, `\`, `/`, `*`, `?`, `"`, `<`, `>`, `|`, `:`
+  - Text outside `{...}` variables cannot contain uppercase characters or whitespace characters
+  - A `{...}` span must name one of `{major}`, `{minor}`, `{patch}`, `{build}`, `{prerelease}`;
+    an unrecognized name (or an unmatched `{` or `}`) is an error
+  - A suffix using variables requires `sources[i].git.ref_type` to be `branch` or `tag`
+    (a `commit` source matches literal SHAs and captures no version) and
+    `sources[i].mode` to be `snapshot` (delta content is ref-addressed, not per-version)
+  - Every pattern in `sources[i].match` must capture every variable the suffix uses
+    (the same arity rule `sources[i].retain.version.range` applies against the match
+    pattern's captured levels). So `index.suffix: "{major}.{minor}.x"` is an error when
+    `match` is `"v{major}.*"`, which captures only `{major}`
   - An empty string (`""`) is treated as omitted (`null`)
 
 ## Example

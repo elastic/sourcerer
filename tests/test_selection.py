@@ -254,3 +254,81 @@ class TestRangeGatedSelection:
         assert by_ref["v9.9.0"].index_suffix == "9.x"
         # The tag outside all windows is now claimed by the rangeless catch-all.
         assert by_ref["v8.99.0"].index_suffix == "old"
+
+
+class TestTemplatedIndexSuffix:
+    """A version-templated index.suffix is rendered per matched ref, so each Unit -- and every
+    marker/index name it feeds -- carries a concrete suffix. This is what lets one source replace
+    the long list of per-minor sources with literal suffixes."""
+
+    TAGS = {
+        "v9.5.2":   "sha9_5_2",
+        "v9.5.0":   "sha9_5_0",
+        "v9.4.1":   "sha9_4_1",
+        "v8.19.0":  "sha8_19_0",
+        "v7.17.0":  "sha7_17_0",
+        "v6.8.23":  "sha6_8_23",
+        "v5.6.16":  "sha5_6_16",
+    }
+
+    # One source per version window with a hand-written literal suffix.
+    BEFORE = """
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v{major}.{minor}.{patch}"
+    index: {suffix: "9.5.x"}
+    retain: {version: {range: ">=9.5.0 <9.6.0"}}
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v{major}.{minor}.{patch}"
+    index: {suffix: "9.4.x"}
+    retain: {version: {range: ">=9.4.0 <9.5.0"}}
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v{major}.{minor}.{patch}"
+    index: {suffix: "8.19.x"}
+    retain: {version: {range: ">=8.19.0 <8.20.0"}}
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v{major}.{minor}.{patch}"
+    index: {suffix: "7.17.x"}
+    retain: {version: {range: ">=7.17.0 <7.18.0"}}
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v6.*"
+    index: {suffix: "6.x"}
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v5.*"
+    index: {suffix: "5.x"}
+"""
+
+    # The same routing expressed as two templated sources.
+    AFTER = """
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v{major}.{minor}.{patch}"
+    index: {suffix: "{major}.{minor}.x"}
+    retain: {version: {range: ">=7.0.0"}}
+  - git: {host: github, org: elastic, repo: elasticsearch, ref_type: tag}
+    match: "v{major}.*"
+    index: {suffix: "{major}.x"}
+    retain: {version: {range: "<7"}}
+"""
+
+    def test_each_ref_gets_its_own_rendered_suffix(self):
+        units = _resolve(self.AFTER, remote_tags=self.TAGS)
+        by_ref = {u.ref: u.index_suffix for u in units}
+        assert by_ref["v9.5.2"] == "9.5.x"
+        assert by_ref["v9.4.1"] == "9.4.x"
+        assert by_ref["v8.19.0"] == "8.19.x"
+        assert by_ref["v6.8.23"] == "6.x"
+        assert by_ref["v5.6.16"] == "5.x"
+
+    def test_no_unit_carries_an_unrendered_template(self):
+        for u in _resolve(self.AFTER, remote_tags=self.TAGS):
+            assert "{" not in (u.index_suffix or ""), u.index_suffix
+
+    def test_templated_config_routes_identically_to_literal_config(self):
+        """The acceptance criterion: (index_level, index_suffix) is the tuple that
+        marker_routing/should_index compare, so identical maps mean swapping the literal config
+        for the templated one triggers no migration and no prune."""
+        before = {u.ref: (u.index_level, u.index_suffix)
+                  for u in _resolve(self.BEFORE, remote_tags=self.TAGS)}
+        after = {u.ref: (u.index_level, u.index_suffix)
+                 for u in _resolve(self.AFTER, remote_tags=self.TAGS)}
+        assert before == after
+        assert len(after) == len(self.TAGS)  # every tag routed by both configs

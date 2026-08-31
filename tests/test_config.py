@@ -653,3 +653,88 @@ class TestIndexRouting:
         assert len(cfg.repos) == 1
         sels = cfg.repos[0].selectors
         assert sels[0].index_suffix is None and sels[1].index_suffix == "deploy"
+
+
+class TestIndexSuffixVersionVariables:
+    """index.suffix may embed the match pattern's version variables, rendered per matched ref.
+
+    Parse keeps the template verbatim; Selector.resolve_index_suffix turns it into the concrete
+    value that gets stored on the refs marker and used to build the index name.
+    """
+
+    def _sel(self, match, suffix, ref_type="tag", **kw):
+        src = _source(ref_type=ref_type, match=match, index={"suffix": suffix}, **kw)
+        return _cfg([src]).repos[0].selectors[0]
+
+    def test_template_stored_verbatim(self):
+        sel = self._sel("v{major}.{minor}.{patch}", "{major}.{minor}.x")
+        assert sel.index_suffix == "{major}.{minor}.x"
+
+    def test_resolves_to_concrete_value_per_ref(self):
+        sel = self._sel("v{major}.{minor}.{patch}", "{major}.{minor}.x")
+        assert sel.resolve_index_suffix(sel.matches("tag", "v9.5.2")) == "9.5.x"
+        assert sel.resolve_index_suffix(sel.matches("tag", "v8.19.0")) == "8.19.x"
+
+    def test_resolves_against_partially_globbed_pattern(self):
+        """The consolidated form for pre-versioned tags: v{major}.* -> "{major}.x"."""
+        sel = self._sel("v{major}.*", "{major}.x")
+        assert sel.resolve_index_suffix(sel.matches("tag", "v6.8.23")) == "6.x"
+
+    def test_literal_suffix_resolves_to_itself(self):
+        sel = self._sel("v{major}.{minor}.{patch}", "deploy")
+        assert sel.resolve_index_suffix(sel.matches("tag", "v9.5.2")) == "deploy"
+
+    def test_prerelease_variable(self):
+        sel = self._sel("v{major}.{minor}.{patch}-{prerelease}", "{major}.{minor}-{prerelease}")
+        assert sel.resolve_index_suffix(sel.matches("tag", "v9.0.0-rc1")) == "9.0-rc1"
+
+    def test_versioned_branch_source_allowed(self):
+        sel = self._sel("{major}.{minor}", "{major}.x", ref_type="branch")
+        assert sel.resolve_index_suffix(sel.matches("branch", "9.5")) == "9.x"
+
+    def test_unknown_variable_rejected(self):
+        with pytest.raises(ValueError, match="unknown variable"):
+            self._sel("v{major}.{minor}.{patch}", "{bogus}.x")
+
+    def test_unmatched_brace_rejected(self):
+        with pytest.raises(ValueError, match="unmatched"):
+            self._sel("v{major}.{minor}.{patch}", "9.{major")
+
+    def test_forbidden_chars_still_rejected_in_literal_text(self):
+        with pytest.raises(ValueError, match="forbidden character"):
+            self._sel("v{major}.{minor}.{patch}", "{major}~x")
+
+    def test_uppercase_still_rejected_in_literal_text(self):
+        with pytest.raises(ValueError, match="uppercase"):
+            self._sel("v{major}.{minor}.{patch}", "{major}.X")
+
+    def test_level_not_captured_by_match_rejected(self):
+        with pytest.raises(ValueError, match=r"\{minor\} is not captured by match pattern"):
+            self._sel("v{major}.*", "{major}.{minor}.x")
+
+    def test_non_versioned_match_rejected(self):
+        with pytest.raises(ValueError, match="not captured by match pattern"):
+            self._sel("v6.*", "{major}.x")
+
+    def test_second_match_pattern_missing_the_level_rejected(self):
+        """Every pattern must capture every variable -- the selector can claim refs via any of
+        them, and Version.components must line up with the selector's levels for all of them."""
+        with pytest.raises(ValueError, match="not captured by match pattern 'my-dev-tag'"):
+            self._sel(["v{major}.{minor}.{patch}", "my-dev-tag"], "{major}.x")
+
+    def test_prerelease_not_captured_by_match_rejected(self):
+        with pytest.raises(ValueError, match=r"\{prerelease\} is not captured"):
+            self._sel("v{major}.{minor}.{patch}", "{major}-{prerelease}")
+
+    def test_commit_source_rejected(self):
+        src = _source(ref_type="commit", match="cfefb3b", index={"suffix": "{major}.x"})
+        with pytest.raises(ValueError, match="commit source matches literal SHAs"):
+            _cfg([src])
+
+    def test_delta_mode_rejected(self):
+        with pytest.raises(ValueError, match="require 'mode: snapshot'"):
+            self._sel("v{major}.*", "{major}.x", mode="delta")
+
+    def test_literal_suffix_still_allowed_in_delta_mode(self):
+        sel = self._sel("deploy@*", "deploy", mode="delta")
+        assert sel.index_suffix == "deploy"
