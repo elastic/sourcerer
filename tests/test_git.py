@@ -175,6 +175,56 @@ class TestBloblessClone:
         assert feature_sha not in _missing_objects(dest)
         assert (dest / "feature.bin").read_bytes() == b"feature-content"
 
+    def test_plan_changes_does_not_fault_in_blobs(self, tmp_path, promisor_origin):
+        """Planning a delta must be a pure tree comparison -- no blob contents required.
+
+        Regression test for rename/copy detection (`git diff -M -C`) in plan_changes. Both
+        score candidates by content, so on a blobless clone either one blocks on a promisor
+        fetch of the candidate blobs, turning a HEAD advance of a handful of files into a stall
+        of tens of seconds before any indexing began. The diff below trips both: an unpaired
+        add and delete for -M to score against each other, and a modified file for -C to treat
+        as a copy source. Asserting on the missing-object set (rather than on wall time or on
+        the constructed argv) pins the actual property: a diff base whose blobs were never
+        downloaded stays undownloaded.
+        """
+        origin_dir, url = promisor_origin
+        work = tmp_path / "work"
+        _run("clone", "-q", str(origin_dir), str(work))
+        _commit_file(work, "kept.txt", b"unchanged\n", "init kept")
+        _commit_file(work, "mod.txt", b"version one\n", "init mod")
+        _commit_file(work, "gone.txt", b"doomed\n", "init gone")
+        _run("-C", str(work), "push", "-q", "origin", "HEAD:main")
+        old_sha = _sha(work, "HEAD")
+
+        # Staged with `add -A` rather than _commit_file, which stages only the file it names
+        # and would silently drop the modification and the deletion from the commit.
+        (work / "mod.txt").write_bytes(b"version two\n")
+        (work / "gone.txt").unlink()
+        (work / "added.txt").write_bytes(b"brand new\n")
+        _run("-C", str(work), "add", "-A")
+        _run("-C", str(work), "-c", "user.email=test@example.com", "-c", "user.name=test",
+             "commit", "-q", "-m", "advance head")
+        _run("-C", str(work), "push", "-q", "origin", "HEAD:main")
+        new_sha = _sha(work, "HEAD")
+
+        dest = tmp_path / "dest"
+        gitmod._git_clone(url, dest)
+
+        # The clone checked out the new tip, so only the old side's distinct blobs are absent.
+        # These are exactly the blobs rename/copy detection would have reached for.
+        old_mod_blob = _blob_sha(dest, old_sha, "mod.txt")
+        gone_blob = _blob_sha(dest, old_sha, "gone.txt")
+        missing_before = _missing_objects(dest)
+        assert {old_mod_blob, gone_blob} <= missing_before
+
+        plan = gitmod.plan_changes(dest, old_sha, new_sha)
+
+        assert plan.base_missing is False
+        assert set(plan.index_paths) == {"mod.txt", "added.txt"}
+        assert set(plan.delete_paths) == {"mod.txt", "gone.txt"}
+        # Nothing was faulted in: the plan came from tree/OID comparison alone.
+        assert _missing_objects(dest) == missing_before
+
 
 class TestGitGc:
     def test_reclaims_objects_orphaned_by_a_moved_branch(self, tmp_path):

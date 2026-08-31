@@ -104,7 +104,7 @@ concrete commit the same way regardless of mode.
 - **`delta`** (branch or tag): content is ref-addressed instead. Content docs carry
   `git.ref_pattern` (the stream identity) but no `git.commit` of their own — the ref's current
   commit lives only on its refs join doc, resolved at query time via a LOOKUP JOIN. A HEAD advance re-indexes only the files
-  `git diff --name-status` reports changed (add/modify/delete/rename), not the whole tree, so
+  `git diff --name-status` reports changed (add/modify/delete), not the whole tree, so
   staying current on a fast-moving branch or tag is cheap. Particularly useful for fast-moving
   tags that are force-updated frequently (e.g. `deploy@8`-style Serverless promotion tags) where
   snapshot mode would mint a full snapshot per move. `since` and `retain` don't apply to a

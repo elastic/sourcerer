@@ -67,8 +67,11 @@ indexes a whole new snapshot under the new commit.
 `delta` (branch or tag; rejects `since`/`retain` -- there is no per-commit history for either
 to apply to): content is ref-addressed instead. A HEAD advance runs `git diff
 --name-status` between the previously-completed commit and the new tip and only deletes/
-reindexes the paths git reports changed -- add/modify/delete/rename/copy -- instead of
-reindexing the whole tree. A missing diff base (force-push, GC'd, or the first index) rebuilds
+reindexes the paths git reports changed -- add/modify/delete -- instead of
+reindexing the whole tree. Rename and copy detection are disabled (`--no-renames`): they score
+candidates by content, which on a blobless clone stalls the diff on a promisor fetch of every
+candidate blob, and they change nothing about the resulting plan (a rename is equivalent to the
+delete + add it degrades to). A missing diff base (force-push, GC'd, or the first index) rebuilds
 the whole ref namespace. The refs join doc publishes `status: indexing` before any content
 change and `status: complete` (with the new commit) only after the deletes/indexes/refresh all
 succeed, so a crash mid-update leaves the prior commit and content in place.

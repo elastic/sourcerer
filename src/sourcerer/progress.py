@@ -48,7 +48,7 @@ class Unit:
     repo: str
     ref: str | None
     kind: str
-    stage: str = "pending"  # pending|resolving|cloning|checkout|indexing|done
+    stage: str = "pending"  # pending|resolving|cloning|checkout|diffing|indexing|done
     total_files: int | None = None
     files: int = 0
     lines: int = 0
@@ -262,6 +262,8 @@ class PlainProgressReporter(ProgressReporter):
         super().set_stage(unit, stage)
         if stage == "checkout":
             click.echo(f"Checking out {unit.label} ...")
+        elif stage == "diffing":
+            click.echo(f"Diffing {unit.label} ...")
         elif stage == "indexing":
             click.echo(f"Indexing {unit.label} ...")
 
@@ -318,7 +320,7 @@ class _Dashboard:
             by_repo.setdefault((u.host, u.org, u.repo), []).append(u)
         for group in by_repo.values():
             active = (
-                next((u for u in group if u.stage in ("checkout", "indexing")), None)
+                next((u for u in group if u.stage in ("checkout", "diffing", "indexing")), None)
                 or next((u for u in group if u.stage == "cloning"), None)
                 or group[0]
             )
@@ -338,6 +340,11 @@ class _Dashboard:
             t.append(" - checking out…")
         elif u.stage == "resolving":
             t.append(" - resolving…")
+        elif u.stage == "diffing":
+            # Delta mode only: the diff and the delete-by-query of removed paths both run
+            # before the file total is known. Naming the stage keeps that work from rendering
+            # as a motionless "indexing 0 files · 0 lines", which reads as stalled ingest.
+            t.append(f" - diffing… · {format_elapsed(u.elapsed())}")
         elif u.stage == "indexing":
             if u.total_files:
                 # Cap the displayed fraction at 0.99 while the unit is still

@@ -356,7 +356,11 @@ def index_incremental_branch_in_dir(
         reporter.finish(unit, "no-changes")
         return
 
-    reporter.set_stage(unit, "indexing")
+    # "diffing" covers the marker write, the name-status diff, and the delete-by-query of
+    # removed paths -- all of which precede a known file total. The stage flips to "indexing"
+    # only once set_total_files can be called, so the bar never sits on a bare
+    # "indexing 0 files · 0 lines" while pre-ingest work is what's actually running.
+    reporter.set_stage(unit, "diffing")
     # `ref` = concrete tag/branch (payload stored as git.ref in the join doc and content docs).
     # `ref_pattern` = stream identity (pattern for tag streams; == ref for branches).
     # Content docs (files/lines) are keyed on `ref_pattern` for _id stability across promotions.
@@ -374,6 +378,7 @@ def index_incremental_branch_in_dir(
             delete_incremental_branch(es, host, org, repo, ref_pattern,
                                       ref_type=ref_type, index_level=level, index_suffix=suffix)
             reporter.set_total_files(unit, count_tracked_files(repo_dir))
+            reporter.set_stage(unit, "indexing")
             indexed_files, indexed_lines = index_incremental_paths(
                 es, host, org, repo, repo_dir, ref_pattern, None,
                 on_progress=lambda f, l: reporter.update_counts(unit, f, l),
@@ -383,6 +388,7 @@ def index_incremental_branch_in_dir(
             delete_incremental_paths(es, host, org, repo, ref_type, ref_pattern, plan.delete_paths,
                                      index_level=level, index_suffix=suffix)
             reporter.set_total_files(unit, len(plan.index_paths))
+            reporter.set_stage(unit, "indexing")
             indexed_files, indexed_lines = index_incremental_paths(
                 es, host, org, repo, repo_dir, ref_pattern, plan.index_paths,
                 on_progress=lambda f, l: reporter.update_counts(unit, f, l),

@@ -441,11 +441,25 @@ def plan_changes(repo_dir: pathlib.Path, old_sha: str, new_sha: str) -> ChangePl
     """Build the ChangePlan for advancing an incremental branch from `old_sha` to `new_sha`.
     Returns a `base_missing` plan (no paths) when the old commit is unavailable locally; the
     caller then rebuilds the branch namespace. Otherwise runs a NUL-delimited name-status diff
-    with rename (-M) and copy (-C) detection and maps each record (see _parse_name_status_z)."""
+    and maps each record (see _parse_name_status_z).
+
+    Rename and copy detection (-M / -C) are deliberately disabled, so this is a pure tree/OID
+    comparison that never reads a blob. Both flags score candidates by *content*, and clones
+    are blobless (`clone --filter=blob:none`), so on a partial clone either one blocks on a
+    promisor fetch of every candidate blob -- measured at tens of seconds before a single file
+    was indexed. -C is the worse of the two (it scans the whole preimage, so its cost tracks
+    tree size rather than diff size), but -M faults blobs too whenever a diff has unpaired
+    adds and deletes to score against each other.
+
+    Neither flag changes the resulting plan, which is why disabling them is free: an `R`
+    record yields "delete old + index new", exactly what the `D` + `A` pair it degrades to
+    produces, and a `C` record yields "index the destination", exactly what a plain `A`
+    produces. _parse_name_status_z still handles `R` and `C` so a caller that enables
+    detection stays correct."""
     if not base_commit_available(repo_dir, old_sha):
         return ChangePlan(base_missing=True)
     result = subprocess.run(
-        ["git", "-C", str(repo_dir), "diff", "--name-status", "-z", "-M", "-C",
+        ["git", "-C", str(repo_dir), "diff", "--name-status", "-z", "--no-renames",
          old_sha, new_sha],
         check=True,
         capture_output=True,
