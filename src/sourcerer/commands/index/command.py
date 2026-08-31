@@ -23,7 +23,7 @@ from elasticsearch import Elasticsearch
 
 # App packages
 from ...hosts import resolve_hosts
-from ...planner import Marker, plan_repo, retain_doomed_ids
+from ...planner import Marker, retain_doomed_ids
 from ...progress import ProgressReporter, Unit, make_reporter
 from ...indices import files_index, lines_index
 from ...queries import check_join_uniqueness, fetch_markers
@@ -93,6 +93,25 @@ def _branch_has_since(branch_name: str, cfg) -> bool:
         if sel.since is not None and sel.since_version_floor() is None:
             return True
     return False
+
+
+def _settle_already_markers(
+    reporter: ProgressReporter,
+    already_markers: list[tuple[Unit, Marker]],
+    doomed: set[str],
+) -> None:
+    """Final disposition of the already-indexed cohort given a doomed set: silently drop
+    (no completion line, not counted) each one retain would delete, and finish every survivor
+    "skipped" as before. Shared by every path that reaches a doomed set for this cohort --
+    no-clone-needed, locked, clone-failed (best-effort, cohort-only), and the normal post-clone
+    full-cohort path -- so a future change to one path can't reintroduce the "already indexed,
+    skipped" mislabeling in another."""
+    to_drop = [u for u, m in already_markers if m.id in doomed]
+    if to_drop:
+        reporter.drop_units(to_drop)
+    for unit, m in already_markers:
+        if m.id not in doomed:
+            reporter.finish(unit, "skipped")
 
 
 def index_ref_in_dir(
@@ -717,6 +736,12 @@ def run_config(
             for unit in group:
                 reporter.start(unit)
 
+            # Already-indexed refs are not finished immediately: retain may doom some of
+            # them, and those should be silently dropped rather than shown as "already indexed,
+            # skipped". Collected below (only the non-force path appends to it -- --force treats
+            # everything as pending); resolved + dropped/finished once markers are fetched.
+            already_indexed: list[tuple[Unit, str]] = []  # (unit, sha)
+
             if force:
                 # --force bypasses all pre-clone checks; everything is pending.
                 pending: list[tuple[Unit, str | None, str | None, str | None]] = []
@@ -760,11 +785,6 @@ def run_config(
                         content_commits = commits_with_content(es, host, org, repo, complete_commits)
                     except ES_ERRORS as e:
                         batch_error = e
-
-                # Already-indexed refs are not finished immediately: retain may doom some of
-                # them, and those should be silently dropped rather than shown as "already indexed,
-                # skipped". Collect them here; resolve + drop/finish below after fetching markers.
-                already_indexed: list[tuple[Unit, str]] = []  # (unit, sha)
 
                 pending = []
                 for unit, sha in batchable:
@@ -824,8 +844,9 @@ def run_config(
 
             # Retain-aware resolution of already-indexed refs. Fetch their markers (which carry
             # commit_date, unlike markers_status_by_id) to build a cohort for plan_repo. Refs that
-            # retain would delete are silently dropped from the report; survivors are finished
-            # "skipped" as before. When pending is also empty the clone is skipped entirely.
+            # retain would delete are silently dropped from the report (via _settle_already_markers
+            # below); survivors are finished "skipped" as before. When pending is also empty the
+            # clone is skipped entirely.
             #
             # The full cohort includes already-indexed refs because retain.count/age are
             # cohort-relative: scoring only pending candidates would misidentify "newest N" when the
@@ -852,12 +873,7 @@ def run_config(
                 if already_markers:
                     now_ts = datetime.datetime.now(datetime.timezone.utc)
                     doomed_pre = retain_doomed_ids([m for _, m in already_markers], cfg_for_retain, now_ts)
-                    to_drop = [u for u, m in already_markers if m.id in doomed_pre]
-                    if to_drop:
-                        reporter.drop_units(to_drop)
-                    for unit, m in already_markers:
-                        if m.id not in doomed_pre:
-                            reporter.finish(unit, "skipped")
+                    _settle_already_markers(reporter, already_markers, doomed_pre)
                 return  # whole repo already indexed -> no clone at all
 
             # 2b. Clone/fetch once, then check out and index each pending ref. A failure on one
@@ -870,8 +886,14 @@ def run_config(
                     if repo_dir is None:
                         for unit, _branch, _tag, _commit in pending:
                             reporter.finish(unit, "locked", detail="another sourcerer run holds this repo's cache lock")
-                        for unit, _m in already_markers:
-                            reporter.finish(unit, "skipped")
+                        # No clone -> no commit dates for `pending`, so only the already-indexed
+                        # cohort (which carries commit_date from its ES markers) can be scored;
+                        # best-effort retain filtering rather than skipping it entirely.
+                        if already_markers:
+                            now_ts = datetime.datetime.now(datetime.timezone.utc)
+                            doomed_locked = retain_doomed_ids(
+                                [m for _, m in already_markers], cfg_for_retain, now_ts)
+                            _settle_already_markers(reporter, already_markers, doomed_locked)
                         return
                     # Reorder pending refs newest-first by creation date so more-recent refs
                     # are indexed first. creatordate is available now that the clone exists;
@@ -903,6 +925,11 @@ def run_config(
                     # actually indexed (no index-then-prune waste). A branch without `since` and
                     # non-branch refs are unchanged (single entry, tip-date gate as before).
                     prospective: list[tuple[Unit, str | None, str | None, str | None, str | None, Marker]] = []
+                    # Units excluded by `since` before they ever become a plan_repo candidate.
+                    # Dropped silently (not finished "skipped") -- they were never "already
+                    # indexed", so that label would be as false here as it is for retain-doomed
+                    # refs below.
+                    since_excluded: list[Unit] = []
                     for unit, branch, tag, commit in pending:
                         ref_type = "branch" if branch else "tag" if tag else "commit"
                         floor = _effective_since_floor(cfg, repo_dir, ref_type, unit.ref, now)
@@ -951,12 +978,15 @@ def run_config(
                         # then fail too, reported as a per-unit error).
                         marker_ref = sha if (ref_type == "commit" and sha) else unit.ref
                         if floor is not None and cd is not None and cd < floor:
-                            reporter.finish(unit, "skipped", detail=f"before since floor {floor.date()}")
+                            since_excluded.append(unit)
                             continue
                         prospective.append((unit, branch, tag, commit, None, Marker(
                             id=f"{ref_type}:{marker_ref}", ref=marker_ref, ref_type=ref_type,
                             commit=sha, commit_date=cd, indexed_at=now,
                         )))
+
+                    if since_excluded:
+                        reporter.drop_units(since_excluded)
 
                     # Score plan_repo once over the FULL cohort: prospective (pending, clone-dated)
                     # PLUS already-indexed markers from ES (which carry commit_date from the refs
@@ -969,18 +999,19 @@ def run_config(
 
                     # Handle already-indexed refs now that we have the full-cohort doomed set:
                     # drop those retain would delete; finish survivors as "skipped".
-                    ai_to_drop = [u for u, m in already_markers if m.id in doomed]
-                    if ai_to_drop:
-                        reporter.drop_units(ai_to_drop)
-                    for unit, m in already_markers:
-                        if m.id not in doomed:
-                            reporter.finish(unit, "skipped")
+                    _settle_already_markers(reporter, already_markers, doomed)
+
+                    # Drop fresh candidates retain would immediately re-prune, silently -- they
+                    # were never "already indexed" either, so they get no completion line at all
+                    # (matching the dry-run path in report.py, which `continue`s past them).
+                    prospective_to_drop = [u for u, *_, marker in prospective if marker.id in doomed]
+                    if prospective_to_drop:
+                        reporter.drop_units(prospective_to_drop)
 
                     for unit, branch, tag, commit, at_commit, marker in prospective:
                         if _aborted.is_set():
                             break
                         if marker.id in doomed:
-                            reporter.finish(unit, "skipped", detail="pruned by retain")
                             continue
                         try:
                             index_ref_in_dir(
@@ -997,10 +1028,15 @@ def run_config(
             except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
                 # Clone failed: fail every still-pending ref of this repo, continue others.
                 # Also finish any already-indexed refs that hadn't been classified yet (they were
-                # awaiting the full-cohort doomed set from 2c; fall back to "skipped" without drop).
-                for unit, _m in already_markers:
-                    if unit.status is None:
-                        reporter.finish(unit, "skipped")
+                # awaiting the full-cohort doomed set from 2c). Best-effort retain filtering over
+                # the already-indexed cohort alone -- there's no clone, so `pending`'s commit dates
+                # are unknown and can't be scored -- so a clone failure doesn't reintroduce the
+                # "already indexed, skipped" mislabeling for refs that never got a chance to drop.
+                unsettled = [(u, m) for u, m in already_markers if u.status is None]
+                if unsettled:
+                    now_ts = datetime.datetime.now(datetime.timezone.utc)
+                    doomed_fallback = retain_doomed_ids([m for _, m in unsettled], cfg_for_retain, now_ts)
+                    _settle_already_markers(reporter, unsettled, doomed_fallback)
                 for unit, _branch, _tag, _commit in pending:
                     if unit.status is None:
                         with failures_lock:

@@ -210,6 +210,8 @@ class ProgressReporter:
         if unit.status == "no-changes":
             return f"• {unit.label} - no changes, skipped"
         if unit.status == "skipped":
+            if unit.detail:
+                return f"• {unit.label} - skipped ({unit.detail})"
             return f"• {unit.label} - already indexed, skipped"
         if unit.status == "error":
             return f"✗ {unit.label} - error: {unit.detail}"

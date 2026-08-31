@@ -3,9 +3,12 @@ orphan-detection half is covered by test_planner_orphans.py; this file exercises
 unmanaged decisions, the union-across-selectors / intersection-within-selector semantics, and
 content_delete_set. All pure -- no Elasticsearch."""
 
+# Standard packages
+from datetime import timedelta
+
 # App packages
 from sourcerer.config import parse_config
-from sourcerer.planner import Decision, _describe, content_delete_set, plan_repo
+from sourcerer.planner import Decision, _describe, content_delete_set, plan_repo, retain_doomed_ids
 
 from conftest import dt, make_marker
 
@@ -330,6 +333,37 @@ class TestDateIndependentOnly:
         # date_independent_only=True: prereleases cap is skipped, so both survive.
         assert decisions["rc1"].action == "keep"
         assert decisions["rc2"].action == "keep"
+
+
+class TestRetainDoomedIds:
+    """retain_doomed_ids is the shared full-cohort scoring used by both the dry-run preview
+    (report.py) and the live index path (command.py) to decide which refs to silently drop
+    from the report rather than list as candidates. Mirrors a real-world pre-release-only
+    config (no final release yet): only the single newest prerelease should survive."""
+
+    def test_only_newest_prerelease_survives_with_no_final_release(self):
+        cfg = _cfg([_sel(
+            type_="tag",
+            match=["v{major}.{minor}.{patch}", "v{major}.{minor}.{patch}-{prerelease}"],
+            retain={"version": {"majors": 1, "minors": 1, "patches": 1, "prereleases": 1},
+                    "prerelease": "superseded"},
+        )])
+        # rc.3 .. rc.70, one per day -- rc.70 is both the highest-numbered and newest-by-date.
+        markers = [
+            make_marker(f"rc{n}", ref=f"v1.0.0-rc.{n}", ref_type="tag",
+                       commit_date=dt(2024, 1, 1) + timedelta(days=n))
+            for n in range(3, 71)
+        ]
+        doomed = retain_doomed_ids(markers, cfg, now=dt(2024, 6, 1))
+        newest_id = "rc70"
+        assert newest_id not in doomed
+        assert doomed == {m.id for m in markers if m.id != newest_id}
+
+    def test_empty_cohort_or_no_config_dooms_nothing(self):
+        cfg = _cfg([_sel(type_="tag", match="v{major}.{minor}.{patch}",
+                         retain={"version": {"majors": 1}})])
+        assert retain_doomed_ids([], cfg) == set()
+        assert retain_doomed_ids([make_marker(ref="v1.0.0", ref_type="tag")], None) == set()
 
 
 class TestContentDeleteSet:
