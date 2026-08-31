@@ -2,6 +2,10 @@
 # All git-facing operations for the index command: the clone/fetch cache and its advisory
 # locking, clone/checkout, local-clone inspection (commit/ref dates), and cheap remote ref
 # resolution via `git ls-remote` (no clone). Nothing here touches Elasticsearch.
+#
+# Every git invocation goes through _run_git, which runs it non-interactively (git can never
+# stop to ask for credentials) under this run's --git-timeout, and raises a classified
+# GitError / GitAccessDenied / GitTimeout on failure.
 
 # Standard packages
 import contextlib
@@ -9,6 +13,7 @@ import datetime
 import fcntl
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +23,151 @@ from dataclasses import dataclass, field
 
 # App packages
 from ...queries import _parse_dt
+from .runtime import git_metadata_timeout, git_timeout
+
+
+class GitError(subprocess.CalledProcessError):
+    """A failed `git` invocation.
+
+    Subclasses CalledProcessError so every existing handler keeps catching git failures
+    unchanged, but str() appends the tail of git's captured stderr -- CalledProcessError's own
+    message stops at the exit status, which is why a batch-path per-unit error (reported as
+    str(e)) used to say nothing about *why* git failed."""
+
+    def __str__(self) -> str:
+        detail = _stderr_tail(self.stderr)
+        return f"{super().__str__()} {detail}" if detail else super().__str__()
+
+
+class GitAccessDenied(GitError):
+    """git was refused access to the remote: 401/403/404, a rejected credential, or a prompt it
+    was not allowed to show. Permanent for this run, so callers skip the repo immediately
+    instead of retrying or falling back to a clone that will fail the same way."""
+
+
+class GitTimeout(GitError):
+    """git exceeded this run's --git-timeout and was killed."""
+
+    def __str__(self) -> str:
+        return _stderr_tail(self.stderr) or f"git command timed out: {self.cmd}"
+
+
+# git's own denial messages, matched case-insensitively against stderr. Matching git's message
+# shapes rather than a bare "403" avoids classifying an unrelated failure that happens to
+# mention the number. "Repository not found" is included because that is what GitHub returns
+# for a private repo the caller can't see (it 404s rather than leak its existence) -- equally
+# permanent, and the reported error quotes git's stderr so a typo'd repo name stays diagnosable.
+_ACCESS_DENIED_RE = re.compile(
+    "|".join((
+        r"requested url returned error:\s*40[134]",
+        r"\b40[13]\s+(?:forbidden|unauthorized)",
+        r"authentication failed",
+        r"support for password authentication was removed",
+        r"invalid username or password",
+        r"permission (?:to\b.*)?denied",
+        r"repository not found",
+        r"could not read (?:username|password)",
+        r"terminal prompts disabled",
+        r"access denied",
+        r"please ask the owner",
+    )),
+    re.IGNORECASE,
+)
+
+# Config injected into commands that talk to a remote: abort a transfer that has delivered less
+# than 1 KB/s for a minute rather than leaving it to sit until the (much longer) full timeout.
+# HTTP transports only; ssh relies on the timeout.
+_STALL_CONFIG = ("-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60")
+_TIMEOUT_RETURNCODE = 124  # the `timeout(1)` convention
+
+
+def _as_text(raw: str | bytes | None) -> str:
+    if raw is None:
+        return ""
+    return raw if isinstance(raw, str) else raw.decode("utf-8", errors="replace")
+
+
+def _stderr_tail(raw: str | bytes | None, lines: int = 3) -> str:
+    """The last few non-empty lines of git's stderr, joined for single-line error reporting.
+    The tail (not the head) because git's `remote:` explanation and its final `fatal:` land
+    there, after any progress noise."""
+    tail = [line.strip() for line in _as_text(raw).splitlines() if line.strip()]
+    return "; ".join(tail[-lines:])
+
+
+def _git_env() -> dict[str, str]:
+    """The environment for every git invocation, hardened so git can never stop and ask a
+    question. This is what keeps a repo the run can't read from hanging indexing forever:
+    stdout/stderr are captured but stdin is inherited, so git's credential prompt used to block
+    on a read nobody would ever answer (and the prompt itself was invisible).
+
+    GIT_ASKPASS is set to the empty string rather than unset: prompt.c takes the first non-NULL
+    of GIT_ASKPASS, core.askpass, SSH_ASKPASS and only runs it when non-empty, so an empty-but-
+    set value both skips askpass and neutralizes a user's core.askpass / SSH_ASKPASS -- a GUI
+    dialog nobody can answer under cron. Non-interactive credential *helpers* (osxkeychain, gh,
+    credential-store) are deliberately untouched: they are what makes legitimate private-repo
+    access work. Only prompting is disabled, so git now fails immediately with e.g.
+    "could not read Username for '<url>': terminal prompts disabled"."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = ""
+    # Only a default: a user who has configured their own ssh invocation keeps it.
+    env.setdefault("GIT_SSH_COMMAND", "ssh -oBatchMode=yes")
+    return env
+
+
+def _subcommand(args: list[str]) -> str:
+    """The subcommand in a git argv, skipping the leading `-C <dir>` / `-c <k=v>` options, so an
+    error message can name what timed out ("git fetch") rather than its first argument."""
+    it = iter(args)
+    for arg in it:
+        if arg in ("-C", "-c"):
+            next(it, None)
+            continue
+        if not arg.startswith("-"):
+            return arg
+    return "command"
+
+
+_USE_DEFAULT_TIMEOUT = object()
+
+
+def _run_git(
+    args: list[str],
+    *,
+    network: bool = False,
+    timeout: float | None | object = _USE_DEFAULT_TIMEOUT,
+    text: bool = True,
+) -> subprocess.CompletedProcess:
+    """Run one git command with the hardened (non-interactive) environment and a timeout, and
+    raise a classified GitError on failure. The single funnel for every git invocation, so no
+    call site can accidentally reintroduce a promptable or unbounded one.
+
+    `network=True` marks commands that talk to the remote, adding the stall-abort config."""
+    cmd = ["git", *(_STALL_CONFIG if network else ()), *args]
+    if timeout is _USE_DEFAULT_TIMEOUT:
+        timeout = git_timeout()
+    try:
+        return subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=text,
+            env=_git_env(),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise GitTimeout(
+            _TIMEOUT_RETURNCODE,
+            cmd,
+            stderr=(
+                f"git {_subcommand(args)} timed out after {timeout:g}s"
+                " (raise --git-timeout / SOURCERER_GIT_TIMEOUT to allow longer)"
+            ),
+        ) from e
+    except subprocess.CalledProcessError as e:
+        cls = GitAccessDenied if _ACCESS_DENIED_RE.search(_as_text(e.stderr)) else GitError
+        raise cls(e.returncode, cmd, output=e.output, stderr=e.stderr) from e
 
 
 def resolve_cache_root(cache_dir: str | None = None) -> pathlib.Path:
@@ -66,13 +216,16 @@ def repo_lock(repo_dir: pathlib.Path) -> Iterator[bool]:
 def _git_clone(url: str, repo_dir: pathlib.Path) -> None:
     """Blobless partial clone: every commit, tree, and ref is present (so any ref/commit stays
     reachable and checkoutable), but blobs are not downloaded up front -- git faults them in
-    on demand the first time a commit touching them is checked out."""
-    subprocess.run(
-        ["git", "clone", "--filter=blob:none", url, str(repo_dir)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    on demand the first time a commit touching them is checked out.
+
+    A timed-out clone was killed mid-write and had no chance to clean up after itself, so the
+    partial directory is removed here -- otherwise the next run would find a dir that is neither
+    absent nor a valid clone."""
+    try:
+        _run_git(["clone", "--filter=blob:none", url, str(repo_dir)], network=True)
+    except GitTimeout:
+        shutil.rmtree(repo_dir, ignore_errors=True)
+        raise
 
 
 def _git_gc(repo_dir: pathlib.Path) -> None:
@@ -82,18 +235,8 @@ def _git_gc(repo_dir: pathlib.Path) -> None:
     a throwaway derived artifact, so this is safe. Best-effort: a gc failure must not fail the
     index run."""
     try:
-        subprocess.run(
-            ["git", "-C", str(repo_dir), "reflog", "expire", "--expire=now", "--all"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(repo_dir), "gc", "--prune=now", "--quiet"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        _run_git(["-C", str(repo_dir), "reflog", "expire", "--expire=now", "--all"])
+        _run_git(["-C", str(repo_dir), "gc", "--prune=now", "--quiet"])
     except (subprocess.CalledProcessError, OSError):
         pass
 
@@ -103,12 +246,7 @@ def _is_clone_of(repo_dir: pathlib.Path, url: str) -> bool:
     if not (repo_dir / ".git").exists():
         return False
     try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_dir), "remote", "get-url", "origin"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        out = _run_git(["-C", str(repo_dir), "remote", "get-url", "origin"])
     except (subprocess.CalledProcessError, OSError):
         return False
     return out.stdout.strip() == url
@@ -146,13 +284,15 @@ def clone_repo(
 
     if _is_clone_of(repo_dir, url):
         try:
-            subprocess.run(
-                ["git", "-C", str(repo_dir), "fetch", "--prune", "--prune-tags", "--tags", "origin"],
-                check=True,
-                capture_output=True,
-                text=True,
+            _run_git(
+                ["-C", str(repo_dir), "fetch", "--prune", "--prune-tags", "--tags", "origin"],
+                network=True,
             )
             _git_gc(repo_dir)
+        except (GitAccessDenied, GitTimeout):
+            # Not a local-state problem: re-cloning would discard a good clone and then fail
+            # (or time out) all over again, doubling the wall clock for no chance of recovery.
+            raise
         except subprocess.CalledProcessError:
             # Fetch failed (e.g. a corrupt object store) -- wipe and re-clone once.
             shutil.rmtree(repo_dir, ignore_errors=True)
@@ -197,13 +337,11 @@ def checkout_ref(repo_dir: pathlib.Path, ref: str) -> None:
     """Check out an immutable `ref` (a tag or commit SHA) into an existing clone. `--force`
     discards any working-tree state left by a previous ref's checkout so it can't bleed into
     the next index pass. Branches go through `checkout_branch` instead, which targets the
-    fetched remote tip rather than a (possibly stale) local branch."""
-    subprocess.run(
-        ["git", "-C", str(repo_dir), "checkout", "--force", ref],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    fetched remote tip rather than a (possibly stale) local branch.
+
+    Counts as a network command: on a blobless clone, checkout faults this ref's blobs in from
+    the promisor remote."""
+    _run_git(["-C", str(repo_dir), "checkout", "--force", ref], network=True)
 
 
 def checkout_branch(repo_dir: pathlib.Path, branch: str) -> None:
@@ -211,12 +349,11 @@ def checkout_branch(repo_dir: pathlib.Path, branch: str) -> None:
     local branch to the freshly-fetched `origin/<branch>` -- on a reused (persistent) clone a
     plain `git checkout <branch>` would land on the *stale* local branch, since `git fetch`
     advances `origin/<branch>` but not the local branch. `--force` discards leftover working-tree
-    state. Works the same on a fresh clone (origin/<branch> already exists)."""
-    subprocess.run(
-        ["git", "-C", str(repo_dir), "checkout", "--force", "-B", branch, f"origin/{branch}"],
-        check=True,
-        capture_output=True,
-        text=True,
+    state. Works the same on a fresh clone (origin/<branch> already exists). Network: blobs
+    fault in from the promisor remote (see checkout_ref)."""
+    _run_git(
+        ["-C", str(repo_dir), "checkout", "--force", "-B", branch, f"origin/{branch}"],
+        network=True,
     )
 
 
@@ -228,16 +365,11 @@ def ref_dates(repo_dir: pathlib.Path) -> dict[tuple[str, str], int]:
 
     Returns {} on any failure so callers degrade gracefully to their existing order."""
     try:
-        result = subprocess.run(
-            [
-                "git", "-C", str(repo_dir), "for-each-ref",
-                "--format=%(refname) %(creatordate:unix)",
-                "refs/heads", "refs/tags",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        result = _run_git([
+            "-C", str(repo_dir), "for-each-ref",
+            "--format=%(refname) %(creatordate:unix)",
+            "refs/heads", "refs/tags",
+        ])
     except (subprocess.CalledProcessError, OSError):
         return {}
     dates: dict[tuple[str, str], int] = {}
@@ -260,23 +392,13 @@ def ref_dates(repo_dir: pathlib.Path) -> dict[tuple[str, str], int]:
 def default_branch(repo_dir: pathlib.Path) -> str:
     """The remote's default branch name (e.g. "main"), read from the `origin/HEAD` symbolic ref
     that both clone and fetch maintain. Used when no explicit ref is requested."""
-    result = subprocess.run(
-        ["git", "-C", str(repo_dir), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    result = _run_git(["-C", str(repo_dir), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
     # e.g. "origin/main" -> "main"
     return result.stdout.strip().split("/", 1)[1]
 
 
 def resolve_commit(repo_dir: pathlib.Path) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    result = _run_git(["-C", str(repo_dir), "rev-parse", "HEAD"])
     return result.stdout.strip()
 
 
@@ -284,10 +406,14 @@ def get_symlink_paths(repo_dir: pathlib.Path) -> frozenset[str]:
     """Return the set of repo-relative paths that git tracks as symlinks (mode 120000).
     Works regardless of core.symlinks -- when git checks out symlinks as plain text files
     (core.symlinks=false), path.is_symlink() returns False, but this identifies them via
-    the git object mode."""
+    the git object mode.
+
+    Streamed rather than run through _run_git, so it carries the hardened environment but no
+    hard timeout: it reads the local index only, with no remote to stall on."""
     proc = subprocess.Popen(
         ["git", "-C", str(repo_dir), "ls-files", "--stage", "-z"],
         stdout=subprocess.PIPE,
+        env=_git_env(),
     )
     symlinks: set[str] = set()
     try:
@@ -317,9 +443,11 @@ def get_symlink_paths(repo_dir: pathlib.Path) -> frozenset[str]:
 
 
 def iter_tracked_files(repo_dir: pathlib.Path) -> Iterator[str]:
+    """Local-index read, streamed like get_symlink_paths (hardened env, no hard timeout)."""
     proc = subprocess.Popen(
         ["git", "-C", str(repo_dir), "ls-files", "-z"],
         stdout=subprocess.PIPE,
+        env=_git_env(),
     )
     try:
         buf = b""
@@ -368,11 +496,7 @@ def base_commit_available(repo_dir: pathlib.Path, old_sha: str) -> bool:
     here means the diff base is gone (e.g. force-push, shallow clone) and the caller must
     rebuild rather than treat the missing base as an empty diff."""
     try:
-        subprocess.run(
-            ["git", "-C", str(repo_dir), "cat-file", "-e", f"{old_sha}^{{commit}}"],
-            check=True,
-            capture_output=True,
-        )
+        _run_git(["-C", str(repo_dir), "cat-file", "-e", f"{old_sha}^{{commit}}"], text=False)
     except (subprocess.CalledProcessError, OSError):
         return False
     return True
@@ -458,11 +582,9 @@ def plan_changes(repo_dir: pathlib.Path, old_sha: str, new_sha: str) -> ChangePl
     detection stays correct."""
     if not base_commit_available(repo_dir, old_sha):
         return ChangePlan(base_missing=True)
-    result = subprocess.run(
-        ["git", "-C", str(repo_dir), "diff", "--name-status", "-z", "--no-renames",
-         old_sha, new_sha],
-        check=True,
-        capture_output=True,
+    result = _run_git(
+        ["-C", str(repo_dir), "diff", "--name-status", "-z", "--no-renames", old_sha, new_sha],
+        text=False,
     )
     delete_paths, index_paths = _parse_name_status_z(result.stdout)
     return ChangePlan(delete_paths=delete_paths, index_paths=index_paths)
@@ -472,15 +594,20 @@ def _ls_remote(url: str, *patterns: str, flags: tuple[str, ...] = ()) -> str | N
     """
     Run `git ls-remote` against a remote without cloning. The URL must precede the ref
     patterns (HEAD/refs/...), so flags go before the URL and patterns after it. Returns
-    stdout, or None on failure.
+    stdout, or None on a transient failure.
+
+    GitAccessDenied is *not* swallowed: a remote that refuses us will refuse us again, so it
+    propagates instead of masquerading as a transient failure that callers retry and then
+    silently skip. Metadata-only, so it uses the shorter metadata timeout.
     """
     try:
-        result = subprocess.run(
-            ["git", "ls-remote", *flags, url, *patterns],
-            check=True,
-            capture_output=True,
-            text=True,
+        result = _run_git(
+            ["ls-remote", *flags, url, *patterns],
+            network=True,
+            timeout=git_metadata_timeout(),
         )
+    except GitAccessDenied:
+        raise
     except (subprocess.CalledProcessError, OSError):
         return None
     return result.stdout
@@ -493,8 +620,10 @@ def resolve_remote(
     Cheaply resolve a ref to its commit SHA via `git ls-remote` (no clone) against `url`.
 
     Returns (commit_sha, default_branch). default_branch is only set when neither
-    branch nor tag is given (resolving the remote HEAD). Returns (None, None) on any
-    failure so callers fall through to cloning.
+    branch nor tag is given (resolving the remote HEAD). Returns (None, None) on a transient
+    failure so callers fall through to cloning; a GitAccessDenied propagates instead, since
+    falling through would only reach a clone the remote refuses the same way -- the caller's
+    per-unit error handler reports it with git's own message.
     """
     if tag:
         # Prefer the peeled (^{}) line so annotated tags resolve to the underlying
@@ -549,7 +678,8 @@ def list_remote_refs(url: str, kind: str) -> dict[str, str] | None:
     checkout, matching the behaviour of `resolve_remote`.
 
     Returns None on ls-remote failure after retries; returns {} when the remote has no refs of
-    that kind.
+    that kind. A GitAccessDenied propagates out of the retry loop on the first attempt -- there
+    is nothing to back off for when the remote has refused us.
     """
     out = None
     for attempt in range(3):
@@ -600,12 +730,7 @@ def commit_date(repo_dir: pathlib.Path) -> str | None:
     resolve_head. Distinct from indexed_at (rebuild recency, used by keep_recent) -- a tag
     cut three years ago is old regardless of when it was indexed."""
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_dir), "show", "-s", "--format=%cI", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        result = _run_git(["-C", str(repo_dir), "show", "-s", "--format=%cI", "HEAD"])
     except (subprocess.CalledProcessError, OSError):
         return None
     return result.stdout.strip() or None
@@ -617,12 +742,7 @@ def _rev_info(repo_dir: pathlib.Path, rev: str) -> tuple[str, datetime.datetime 
     then origin/<rev> for branches. None if the rev can't be resolved."""
     for candidate in (rev, f"origin/{rev}"):
         try:
-            out = subprocess.run(
-                ["git", "-C", str(repo_dir), "log", "-1", "--format=%H%x09%cI", candidate],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            out = _run_git(["-C", str(repo_dir), "log", "-1", "--format=%H%x09%cI", candidate])
         except (subprocess.CalledProcessError, OSError):
             continue
         parts = out.stdout.strip().split("\t")
@@ -662,17 +782,12 @@ def list_branch_commits(
     Returns [] on any subprocess failure so callers degrade gracefully (the tip-only fallback
     is used instead)."""
     try:
-        out = subprocess.run(
-            [
-                "git", "-C", str(repo_dir), "log",
-                "--first-parent",
-                "--format=%H%x09%cI",
-                f"origin/{branch}",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        out = _run_git([
+            "-C", str(repo_dir), "log",
+            "--first-parent",
+            "--format=%H%x09%cI",
+            f"origin/{branch}",
+        ])
     except (subprocess.CalledProcessError, OSError):
         return []
     results: list[tuple[str, datetime.datetime]] = []

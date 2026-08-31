@@ -17,16 +17,20 @@ from ...hosts import Host
 from ...planner import Marker, plan_repo
 from ...progress import Unit
 from ...version import match_version
-from .git import _commit_date_of, list_remote_ref_names, list_remote_refs
+from .git import GitAccessDenied, _commit_date_of, list_remote_ref_names, list_remote_refs
 
 
-def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
+def _resolve_entry(cfg: RepoConfig, host: Host) -> tuple[list[Unit], list[str]]:
     """Resolve one RepoConfig into the Units it selects: list the remote branches/tags once
     per kind and keep those matching a selector's version-aware pattern (+ min/max_version).
     Pure network + filtering with no reporter calls, so it is safe to run concurrently.
-    ls-remote failures (after retries) are reported to stderr; that ref type contributes
-    no units so the run continues with the repos that did resolve. `host` supplies the clone
-    URL and is carried on every emitted Unit."""
+    `host` supplies the clone URL and is carried on every emitted Unit.
+
+    Returns (units, errors). Transient ls-remote failures (after retries) are reported to
+    stderr and contribute no units, so the run continues with the repos that did resolve. A
+    remote that *refuses* us is different: it is permanent, so it is returned in `errors` for
+    the caller to count as a run failure rather than letting the repo vanish from the plan
+    with a warning and a zero exit code."""
     clone_url = host.clone_url(cfg.org, cfg.repo)
     # Maps ref kind ("branch"/"tag") -> {short_name: commit_sha} or None on ls-remote failure.
     # Using list_remote_refs (vs. list_remote_ref_names) so we capture each ref's commit SHA
@@ -59,7 +63,13 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
                 ))
             continue
         if rt not in fetched:
-            fetched[rt] = list_remote_refs(clone_url, "heads" if rt == "branch" else "tags")
+            try:
+                fetched[rt] = list_remote_refs(clone_url, "heads" if rt == "branch" else "tags")
+            except GitAccessDenied as e:
+                # Permanent: nothing this repo declares can be resolved or cloned, so drop the
+                # whole entry (any units from an earlier ref type included -- indexing half of
+                # an inaccessible repo is not a useful outcome) and report it as a failure.
+                return [], [f"{cfg.host}/{cfg.org}/{cfg.repo}: access denied: {e}"]
         ref_map = fetched[rt]
         if ref_map is None:
             continue  # ls-remote failed for this ref type, skip
@@ -131,7 +141,7 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
             f"modes -- skipping all units for this repo to avoid fan-out: {conflicts_str}",
             err=True,
         )
-        return []
+        return [], []
 
     failed_kinds = sorted(k for k, v in fetched.items() if v is None)
     if failed_kinds:
@@ -163,7 +173,7 @@ def _resolve_entry(cfg: RepoConfig, host: Host) -> list[Unit]:
             if d.action == "delete"
         }
         units = [u for u in units if f"{u.kind}:{u.ref}" not in doomed]
-    return units
+    return units, []
 
 
 def _resolve_since_floor(since, repo_dir: pathlib.Path, now: datetime.datetime) -> datetime.datetime | None:

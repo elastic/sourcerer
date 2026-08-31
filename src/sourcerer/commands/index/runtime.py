@@ -1,12 +1,14 @@
 # sourcerer/commands/index/runtime.py
 # Run-scoped runtime state shared across the index command's other modules: environment-derived
-# tuning knobs, the Ctrl-C abort flag + SIGINT handler, and the bulk-indexing ES settings context
-# manager. Kept separate from documents.py/command.py so both can depend on it without a cycle:
-# documents.py polls `_aborted` and reads `_tuning()`, while command.py installs the SIGINT
-# handler and the bulk settings around a whole run.
+# tuning knobs, the git subprocess timeout, the Ctrl-C abort flag + SIGINT handler, and the
+# bulk-indexing ES settings context manager. Kept separate from documents.py/command.py so both
+# can depend on it without a cycle: documents.py polls `_aborted` and reads `_tuning()`, git.py
+# reads `git_timeout()`, while command.py installs the SIGINT handler and the bulk settings
+# around a whole run.
 
 # Standard packages
 import contextlib
+import datetime
 import functools
 import os
 import signal
@@ -58,6 +60,57 @@ def _tuning():
         index_repo_concurrency=int(os.environ.get("INDEX_REPO_CONCURRENCY", "2")),
         resolve_concurrency=int(os.environ.get("RESOLVE_CONCURRENCY", "4")),
     )
+
+
+# Wall-clock ceiling for a single `git` invocation. Without one, a git that stops to ask for
+# credentials (a private repo the run can't read) blocks forever on an inherited stdin nobody
+# will answer -- and in the persistent-cache path it does so while holding the repo's advisory
+# lock, so later runs skip that repo too. git.py hardens the environment so prompting can't
+# happen at all; this is the backstop for everything else that can wedge (a half-open
+# connection, a hung credential helper, a promisor fetch that never finishes).
+_DEFAULT_GIT_TIMEOUT = 30 * 60.0  # seconds; a full blobless clone of a large repo takes minutes
+_METADATA_GIT_TIMEOUT_CAP = 120.0  # seconds; ls-remote is never legitimately slower than this
+_git_timeout_override: float | None = None
+_git_timeout_is_set = False
+
+
+def set_git_timeout(timeout: datetime.timedelta) -> None:
+    """Set this run's per-git-command timeout (from --git-timeout / SOURCERER_GIT_TIMEOUT).
+
+    A zero or negative duration disables the timeout entirely. Called once per run before any
+    git work starts; every git call in git.py runs on the main thread or a resolve/index worker
+    *thread* of this process, so a plain module global is enough (the ProcessPoolExecutor
+    workers in documents.py only build documents and never invoke git)."""
+    global _git_timeout_override, _git_timeout_is_set
+    seconds = timeout.total_seconds()
+    _git_timeout_override = seconds if seconds > 0 else None
+    _git_timeout_is_set = True
+
+
+def git_timeout() -> float | None:
+    """Seconds a single git command may run, or None for no limit.
+
+    Falls back to SOURCERER_GIT_TIMEOUT and then to the built-in default when a run hasn't
+    called set_git_timeout, so a library or test caller of git.py still gets a bounded command
+    rather than the original indefinite hang."""
+    if _git_timeout_is_set:
+        return _git_timeout_override
+    raw = os.environ.get("SOURCERER_GIT_TIMEOUT")
+    if not raw:
+        return _DEFAULT_GIT_TIMEOUT
+    from ...config import parse_duration
+
+    seconds = parse_duration(raw).total_seconds()
+    return seconds if seconds > 0 else None
+
+
+def git_metadata_timeout() -> float | None:
+    """The timeout for metadata-only remote commands (`git ls-remote`), capped well below the
+    full timeout. These are a couple of round-trips with no transfer, so a slow one is a broken
+    one -- and they run in planning, where waiting out the full timeout would delay every repo's
+    indexing behind one bad remote. An explicitly disabled timeout still disables this one."""
+    full = git_timeout()
+    return None if full is None else min(full, _METADATA_GIT_TIMEOUT_CAP)
 
 
 # Set by the SIGINT handler the index commands install while they run (see handle_interrupts).

@@ -52,6 +52,74 @@ class TestRetryWindowOption:
         assert result.exit_code == 0
 
 
+class TestGitTimeoutOption:
+    """Tests for --git-timeout / SOURCERER_GIT_TIMEOUT, which bounds each git command."""
+
+    def _capture(self, argv, env=None):
+        """Invoke `index` with a stubbed command.run and return the git_timeout it received."""
+        runner = CliRunner()
+        captured = {}
+
+        def fake_run(*args, **kwargs):
+            captured["git_timeout"] = kwargs.get("git_timeout")
+
+        with patch("sourcerer.commands.index.command.run", side_effect=fake_run):
+            result = runner.invoke(
+                index,
+                ["--url", "http://es:9200", "github/org/repo", *argv],
+                env=env or {},
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0, result.output
+        return captured["git_timeout"]
+
+    def test_help_shows_git_timeout(self):
+        runner = CliRunner()
+        result = runner.invoke(index, ["--help"])
+        assert result.exit_code == 0
+        assert "--git-timeout" in result.output
+
+    def test_defaults_to_thirty_minutes(self):
+        assert self._capture([]) == datetime.timedelta(minutes=30)
+
+    def test_flag_is_parsed_as_a_duration(self):
+        assert self._capture(["--git-timeout", "90s"]) == datetime.timedelta(seconds=90)
+
+    def test_env_var_is_honored(self):
+        assert self._capture([], env={"SOURCERER_GIT_TIMEOUT": "5m"}) == datetime.timedelta(minutes=5)
+
+    def test_flag_overrides_env_var(self):
+        got = self._capture(["--git-timeout", "10m"], env={"SOURCERER_GIT_TIMEOUT": "5m"})
+        assert got == datetime.timedelta(minutes=10)
+
+    @pytest.mark.parametrize("value", ["0", "none", "off"])
+    def test_zero_disables_the_timeout(self, value):
+        """A zero duration reaches set_git_timeout, which reads it as 'no limit'."""
+        assert self._capture(["--git-timeout", value]) == datetime.timedelta(0)
+
+    def test_invalid_duration_exits_with_bad_parameter(self):
+        runner = CliRunner()
+        result = runner.invoke(index, ["--git-timeout", "garbage"], catch_exceptions=False)
+        assert result.exit_code == 2
+
+    def test_it_reaches_the_runtime_setting(self):
+        """End-to-end: the flag actually changes what git.py enforces."""
+        from sourcerer.commands.index import runtime
+
+        saved = (runtime._git_timeout_override, runtime._git_timeout_is_set)
+        try:
+            runner = CliRunner()
+            with patch("sourcerer.commands.index.command.resolve_hosts", side_effect=SystemExit(0)):
+                runner.invoke(
+                    index,
+                    ["--url", "http://es:9200", "github/org/repo", "--git-timeout", "45s"],
+                    catch_exceptions=False,
+                )
+            assert runtime.git_timeout() == 45
+        finally:
+            runtime._git_timeout_override, runtime._git_timeout_is_set = saved
+
+
 class TestInsecureOption:
     """Tests for the --insecure / ALLOW_INSECURE_TLS CLI option on the index command."""
 
@@ -68,7 +136,7 @@ class TestInsecureOption:
 
         def fake_run(repo_spec, branch, tag, commit, url, api_key, username, password,
                      force=False, quiet=False, cache_dir=None, ephemeral=False,
-                     retry_window=None, insecure=False):
+                     retry_window=None, git_timeout=None, insecure=False):
             captured["insecure"] = insecure
 
         with patch("sourcerer.commands.index.command.run", side_effect=fake_run):
@@ -86,7 +154,7 @@ class TestInsecureOption:
 
         def fake_run(repo_spec, branch, tag, commit, url, api_key, username, password,
                      force=False, quiet=False, cache_dir=None, ephemeral=False,
-                     retry_window=None, insecure=False):
+                     retry_window=None, git_timeout=None, insecure=False):
             captured["insecure"] = insecure
 
         with patch("sourcerer.commands.index.command.run", side_effect=fake_run):

@@ -21,6 +21,13 @@ Commands:
 
 `sourcerer --version` (a top-level flag, not a subcommand) prints the installed version.
 
+`sourcerer index` accepts `--git-timeout <duration>` (default `30m`, also settable via
+`SOURCERER_GIT_TIMEOUT`): the maximum wall-clock time for a *single* git command (clone, fetch,
+ls-remote, checkout, ...) before it is killed and the repo reported as a failure. `0` disables it.
+`ls-remote` is additionally capped at 2 minutes, since ref listing is never legitimately slower
+than that and it runs during planning, ahead of every repo's indexing. See "Non-interactive git"
+under the clone cache below for the related access-denied behaviour.
+
 All commands that communicate with Elasticsearch or Kibana accept `--insecure` (flag, default
 off). When set, TLS certificate verification is disabled — useful for locally-hosted clusters
 with self-signed certificates that are trusted in your environment. Also configurable via the
@@ -307,6 +314,25 @@ skip (a repo with no moved refs isn't even fetched) and immutable-tag dedup, rep
 - **Garbage collection**: after each fetch, a best-effort `git gc` expires reflogs and prunes
   objects that are no longer reachable - chiefly blobs faulted in for commits that fell out of a
   branch's retained window since the last run. A gc failure never fails the index run.
+
+### Non-interactive git
+
+Every git invocation goes through `_run_git` in `src/sourcerer/commands/index/git.py`, which runs
+git under `GIT_TERMINAL_PROMPT=0`, an empty `GIT_ASKPASS` (which also neutralizes `core.askpass`
+and `SSH_ASKPASS`), and a batch-mode `GIT_SSH_COMMAND` default. Credentials must therefore come
+from a non-interactive source - a credential helper (osxkeychain, `gh`, credential-store), an ssh
+key, or the clone URL - because git is never allowed to prompt. Left promptable, git would block
+forever on an inherited stdin nobody answers (with the prompt itself invisible, since stdout and
+stderr are captured), which is what used to make one inaccessible repo hang an entire index run
+while holding that repo's cache lock.
+
+A remote that *refuses* access (401/403, GitHub's 404-for-private, a rejected credential, or a
+suppressed prompt) raises `GitAccessDenied`. That is treated as permanent: the repo is skipped
+immediately with git's own message, the `ls-remote` retry backoff is bypassed, a denied `fetch`
+does not trigger the wipe-and-reclone recovery (which exists for a corrupt object store), and the
+run exits non-zero rather than silently omitting the repo from the plan. A command killed at
+`--git-timeout` raises `GitTimeout`. Both subclass `subprocess.CalledProcessError`, so existing
+handlers keep catching them, and their `str()` carries git's stderr into the per-ref error report.
 
 ## Local stdio MCP proxy (`sourcerer mcp-proxy`)
 

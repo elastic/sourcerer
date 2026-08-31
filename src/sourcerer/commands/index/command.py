@@ -56,7 +56,7 @@ from .markers import (
 )
 from .report import dry_run_config
 from .schedule import filter_config_by_schedule
-from .runtime import _aborted, _tuning, bulk_indexing_settings, handle_interrupts
+from .runtime import _aborted, _tuning, bulk_indexing_settings, handle_interrupts, set_git_timeout
 from .selection import _effective_since_floor, _load_config, _resolve_entry
 
 
@@ -503,8 +503,11 @@ def run(
     cache_dir: str | None = None,
     ephemeral: bool = False,
     retry_window: datetime.timedelta | None = None,
+    git_timeout: datetime.timedelta | None = None,
     insecure: bool = False,
 ) -> None:
+    if git_timeout is not None:
+        set_git_timeout(git_timeout)
     parts = repo_spec.split("/", 2)
     if len(parts) != 3 or not all(parts):
         click.echo(f"Error: repo_spec must be '<host>/<org>/<repo>', got: {repo_spec!r}", err=True)
@@ -568,6 +571,7 @@ def run_config(
     prune: bool = False,
     dry_run: bool = False,
     retry_window: datetime.timedelta | None = None,
+    git_timeout: datetime.timedelta | None = None,
     insecure: bool = False,
 ) -> None:
     """
@@ -583,7 +587,12 @@ def run_config(
     With `dry_run` set, nothing is written to Elasticsearch: the cached repos are cloned/fetched
     to resolve real commits + dates, and a combined report shows what would be indexed and (with
     `prune`) what the post-index prune step would delete. See `report.dry_run_config`.
+
+    `git_timeout` bounds every individual git command for the rest of the process; None leaves
+    the SOURCERER_GIT_TIMEOUT / built-in default in place (a zero duration disables it).
     """
+    if git_timeout is not None:
+        set_git_timeout(git_timeout)
     try:
         config = _load_config(config_path)
     except (OSError, ValueError, yaml.YAMLError) as e:
@@ -651,7 +660,13 @@ def run_config(
                 done += 1
                 reporter.planning(f"resolving refs - {done}/{len(entries)} repos")
             for fut in futures:
-                units.extend(fut.result())
+                entry_units, entry_errors = fut.result()
+                units.extend(entry_units)
+                # A repo the remote refuses contributes no units to report against, so its
+                # failure is counted here or not at all.
+                for message in entry_errors:
+                    failures += 1
+                    click.echo(f"Error: {message}", err=True)
         # Order the plan lexicographically by (org, repo, ref) regardless of config-file order,
         # so e.g. every elastic/elasticsearch ref precedes elastic/kibana, and a repo's refs go
         # by name. This drives Phase 2's grouping (dict insertion order) and the concurrent

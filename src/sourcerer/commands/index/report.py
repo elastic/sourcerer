@@ -304,20 +304,26 @@ def dry_run_config(
         _print_schedule_report(schedule_decisions)
 
     # Phase 1: resolve the plan, identical to the real run (see command.run_config).
+    failures = 0
     units: list[Unit] = []
     with ThreadPoolExecutor(max_workers=max(1, min(_tuning().resolve_concurrency, len(entries) or 1))) as pool:
         for fut in [pool.submit(_resolve_entry, entry, hosts[entry.host]) for entry in entries]:
-            units.extend(fut.result())
+            entry_units, entry_errors = fut.result()
+            units.extend(entry_units)
+            for message in entry_errors:
+                failures += 1
+                click.echo(f"Error: {message}", err=True)
     units.sort(key=lambda u: (u.host, u.org, u.repo, u.ref or "", u.kind))
     groups: dict[tuple[str, str, str], list[Unit]] = {}
     for unit in units:
         groups.setdefault((unit.host, unit.org, unit.repo), []).append(unit)
 
     if not groups:
+        if failures:
+            click.echo(f"Completed with {failures} failure(s)", err=True)
+            sys.exit(1)
         click.echo("Nothing selected by the config (all sources not due or filtered).")
         return
-
-    failures = 0
 
     def work(item: tuple[tuple[str, str, str], list[Unit]]) -> dict:
         (host, org, repo), group = item

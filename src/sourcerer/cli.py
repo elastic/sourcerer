@@ -22,6 +22,20 @@ def _parse_retry_window(ctx, param, value):
         raise click.BadParameter(str(e), param=param)
 
 
+def _parse_git_timeout(ctx, param, value):
+    """Option callback: parse the per-git-command timeout into a timedelta. '0' (or 'none'/'off')
+    yields a zero duration, which disables the timeout."""
+    import datetime
+
+    from .config import parse_duration
+    if str(value).strip().lower() in ("0", "none", "off"):
+        return datetime.timedelta(0)
+    try:
+        return parse_duration(value)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param=param)
+
+
 def _load_env(ctx, param, value):
     """Eager option callback: load the chosen `.env` before other options resolve envvars.
 
@@ -268,10 +282,20 @@ def setup(url, api_key, username, password, kb_url, config_path, include_experim
     "run (skip re-indexing it); older markers are treated as stuck and re-indexed. Also "
     "drives the schedule gate's stuck-run detection. Duration like 30m, 1h, 6h, 1d. Default 1h.",
 )
+@click.option(
+    "--git-timeout",
+    default="30m",
+    envvar="SOURCERER_GIT_TIMEOUT",
+    callback=_parse_git_timeout,
+    help="Maximum wall-clock time for a single git command (clone, fetch, ls-remote, checkout, "
+    "...) before it is killed and the repo reported as failed. Guards against a remote that "
+    "stops responding mid-transfer. Duration like 5m, 30m, 1h; '0' disables. Default 30m. "
+    "Can also be set via SOURCERER_GIT_TIMEOUT.",
+)
 @env_option
 @insecure_option
 @auth_options
-def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window, url, api_key, username, password, insecure):
+def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window, git_timeout, url, api_key, username, password, insecure):
     """Index a remote GitHub repo's git-tracked files into Elasticsearch.
 
     Provide a REPO_SPEC ('<host>/<org>/<repo>') for a single repo, or --config to index multiple
@@ -284,7 +308,7 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
     if config_path:
         if repo_spec or branch or tag or commit:
             raise click.UsageError("--config cannot be combined with REPO_SPEC or -b/-t/-c")
-        index_cmd.run_config(config_path, url, api_key, username, password, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window=retry_window, insecure=insecure)
+        index_cmd.run_config(config_path, url, api_key, username, password, force, quiet, cache_dir, ephemeral, prune, dry_run, retry_window=retry_window, git_timeout=git_timeout, insecure=insecure)
     else:
         if prune:
             raise click.UsageError("--prune requires --config (there is no retention policy for a single ref)")
@@ -292,7 +316,7 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
             raise click.UsageError("--dry-run requires --config")
         if not repo_spec:
             raise click.UsageError("provide a REPO_SPEC ('<host>/<org>/<repo>') or --config")
-        index_cmd.run(repo_spec, branch, tag, commit, url, api_key, username, password, force, quiet, cache_dir, ephemeral, retry_window=retry_window, insecure=insecure)
+        index_cmd.run(repo_spec, branch, tag, commit, url, api_key, username, password, force, quiet, cache_dir, ephemeral, retry_window=retry_window, git_timeout=git_timeout, insecure=insecure)
 
 
 @cli.command()

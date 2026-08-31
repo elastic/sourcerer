@@ -13,14 +13,18 @@ real GitHub clone during investigation. `GIT_ALLOW_PROTOCOL=ext` is required for
 that transport at all."""
 
 # Standard packages
+import datetime
+import os
 import pathlib
 import subprocess
+import time
 
 # Third-party packages
 import pytest
 
 # App packages
 from sourcerer.commands.index import git as gitmod
+from sourcerer.commands.index import runtime as runtimemod
 
 
 def _run(*args: str, cwd: pathlib.Path | None = None) -> None:
@@ -100,6 +104,244 @@ def _sha(repo: pathlib.Path, rev: str) -> str:
         ["git", "-C", str(repo), "rev-parse", rev],
         check=True, capture_output=True, text=True,
     ).stdout.strip()
+
+
+@pytest.fixture(autouse=True)
+def _restore_git_timeout():
+    """set_git_timeout writes process-wide state, so keep a test's choice from leaking into
+    the next one (which would otherwise inherit a sub-second timeout)."""
+    saved = (runtimemod._git_timeout_override, runtimemod._git_timeout_is_set)
+    yield
+    runtimemod._git_timeout_override, runtimemod._git_timeout_is_set = saved
+
+
+@pytest.fixture
+def git_shim(tmp_path, monkeypatch):
+    """Put a scripted stand-in for `git` first on PATH.
+
+    A shim rather than a mocked subprocess because what is under test lives in the gap between
+    the argv and the process: whether a git that never exits is actually killed, what
+    environment git is handed, and how its stderr is classified. `$REAL_GIT` is available to a
+    shim body that wants to fail one subcommand and pass the rest through to real git."""
+    import shutil as _shutil
+
+    bin_dir = tmp_path / "shim-bin"
+    bin_dir.mkdir()
+    calls = bin_dir / "calls.log"
+    env_dump = bin_dir / "env.txt"
+    real_git = _shutil.which("git")
+
+    class Shim:
+        def install(self, body: str) -> None:
+            script = bin_dir / "git"
+            script.write_text(
+                "#!/bin/sh\n"
+                f'REAL_GIT="{real_git}"\n'
+                f'echo "$@" >> "{calls}"\n'
+                f'env > "{env_dump}"\n'
+                f"{body}\n"
+            )
+            script.chmod(0o755)
+            monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+        @property
+        def call_count(self) -> int:
+            return len(self.arg_lines)
+
+        @property
+        def arg_lines(self) -> list[str]:
+            """One line per invocation: the arguments git was called with."""
+            return calls.read_text().splitlines() if calls.exists() else []
+
+        @property
+        def env(self) -> dict[str, str]:
+            out = {}
+            for line in env_dump.read_text().splitlines():
+                key, sep, value = line.partition("=")
+                if sep:
+                    out[key] = value
+            return out
+
+    return Shim()
+
+
+DENY = 'echo "fatal: Authentication failed for \'https://example.invalid/x.git\'" >&2; exit 128'
+
+
+class TestGitTimeout:
+    """A git command that never returns must be killed, not waited on forever.
+
+    Regression test for indexing hanging indefinitely against a repo the run has no access to:
+    stdout/stderr were captured but stdin was inherited, so git's (invisible) credential prompt
+    blocked on a read nobody would ever answer -- and in the persistent-cache path it did so
+    while holding the repo's advisory lock."""
+
+    def test_hanging_git_is_killed_at_the_timeout(self, git_shim, tmp_path):
+        git_shim.install("sleep 60")
+        runtimemod.set_git_timeout(datetime.timedelta(milliseconds=500))
+
+        started = time.monotonic()
+        with pytest.raises(gitmod.GitTimeout):
+            gitmod._run_git(["-C", str(tmp_path), "rev-parse", "HEAD"])
+        assert time.monotonic() - started < 10
+
+    def test_timeout_error_says_how_to_raise_the_limit(self, git_shim, tmp_path):
+        git_shim.install("sleep 60")
+        runtimemod.set_git_timeout(datetime.timedelta(milliseconds=500))
+
+        with pytest.raises(gitmod.GitTimeout) as exc:
+            gitmod._run_git(["-C", str(tmp_path), "rev-parse", "HEAD"])
+        # Names the subcommand, not `-C`: the message is what lands in the per-ref error report.
+        assert "git rev-parse timed out" in str(exc.value)
+        assert "--git-timeout" in str(exc.value)
+
+    def test_timeout_is_caught_by_existing_calledprocesserror_handlers(self, git_shim, tmp_path):
+        """GitTimeout subclasses CalledProcessError, so the degrade-gracefully helpers (and
+        every per-unit error handler) keep working without knowing the new types exist."""
+        git_shim.install("sleep 60")
+        runtimemod.set_git_timeout(datetime.timedelta(milliseconds=500))
+
+        assert gitmod.commit_date(tmp_path) is None
+        gitmod._git_gc(tmp_path)  # best-effort: must not raise
+
+    def test_zero_duration_disables_the_timeout(self, git_shim, tmp_path):
+        git_shim.install("exit 0")
+        runtimemod.set_git_timeout(datetime.timedelta(0))
+
+        assert runtimemod.git_timeout() is None
+        assert runtimemod.git_metadata_timeout() is None
+        gitmod._run_git(["-C", str(tmp_path), "rev-parse", "HEAD"])  # must not raise
+
+    def test_metadata_timeout_is_capped_below_a_long_full_timeout(self):
+        runtimemod.set_git_timeout(datetime.timedelta(hours=1))
+        assert runtimemod.git_timeout() == 3600
+        assert runtimemod.git_metadata_timeout() == runtimemod._METADATA_GIT_TIMEOUT_CAP
+
+    def test_metadata_timeout_follows_a_shorter_full_timeout(self):
+        runtimemod.set_git_timeout(datetime.timedelta(seconds=5))
+        assert runtimemod.git_metadata_timeout() == 5
+
+    def test_timed_out_clone_leaves_no_partial_directory(self, git_shim, tmp_path):
+        """A killed clone had no chance to clean up after itself, so the dir it was writing must
+        be removed -- otherwise the next run finds something that is neither absent nor a clone."""
+        # The destination is git's last argument, whatever config flags precede it.
+        git_shim.install('for a in "$@"; do last="$a"; done; mkdir -p "$last"; sleep 60')
+        runtimemod.set_git_timeout(datetime.timedelta(milliseconds=500))
+
+        dest = tmp_path / "dest"
+        with pytest.raises(gitmod.GitTimeout):
+            gitmod._git_clone("https://example.invalid/x.git", dest)
+        assert not dest.exists()
+
+
+class TestAccessDenied:
+    """A remote that refuses us is permanent: classified, reported with git's own words, and
+    never retried."""
+
+    @pytest.mark.parametrize("stderr", [
+        "remote: Permission to elastic/private.git denied to someone.",
+        "fatal: Authentication failed for 'https://github.com/elastic/private.git/'",
+        "fatal: unable to access 'https://x/': The requested URL returned error: 403",
+        "fatal: unable to access 'https://x/': The requested URL returned error: 401",
+        "remote: Repository not found.",
+        "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+        "remote: Invalid username or password.",
+        "remote: Support for password authentication was removed.",
+        "ERROR: Permission denied (publickey).",
+    ])
+    def test_denial_messages_are_classified(self, git_shim, tmp_path, stderr):
+        git_shim.install(f'echo "{stderr}" >&2; exit 128')
+        with pytest.raises(gitmod.GitAccessDenied) as exc:
+            gitmod._run_git(["-C", str(tmp_path), "rev-parse", "HEAD"])
+        assert stderr.strip(".") in str(exc.value)
+
+    def test_ordinary_failure_is_not_classified_as_denied(self, git_shim, tmp_path):
+        git_shim.install('echo "fatal: not a git repository" >&2; exit 128')
+        with pytest.raises(gitmod.GitError) as exc:
+            gitmod._run_git(["-C", str(tmp_path), "rev-parse", "HEAD"])
+        assert not isinstance(exc.value, gitmod.GitAccessDenied)
+        # str(CalledProcessError) alone stops at the exit status; the reason must survive to
+        # the per-unit error report, which prints str(e).
+        assert "not a git repository" in str(exc.value)
+
+    def test_ls_remote_denial_is_not_retried(self, git_shim, monkeypatch):
+        """The 3-attempt backoff exists for a flaky network; a refusal will be refused again."""
+        git_shim.install(DENY)
+        monkeypatch.setattr(gitmod.time, "sleep", lambda *_: None)
+
+        with pytest.raises(gitmod.GitAccessDenied):
+            gitmod.list_remote_refs("https://example.invalid/x.git", "heads")
+        assert git_shim.call_count == 1
+
+    def test_ls_remote_transient_failure_still_retries(self, git_shim, monkeypatch):
+        git_shim.install('echo "fatal: unable to access: Could not resolve host: x" >&2; exit 128')
+        monkeypatch.setattr(gitmod.time, "sleep", lambda *_: None)
+
+        assert gitmod.list_remote_refs("https://example.invalid/x.git", "heads") is None
+        assert git_shim.call_count == 3
+
+    def test_denied_fetch_does_not_wipe_and_reclone_the_cache(self, git_shim, tmp_path, local_origin):
+        """The wipe-and-reclone fallback recovers a corrupt object store. On a denial it would
+        throw away a good clone and then fail again, so the cached clone must survive intact."""
+        _origin, url, _work = local_origin
+        repo_dir = tmp_path / "cache" / "repo"
+        repo_dir.parent.mkdir(parents=True)
+        gitmod._git_clone(url, repo_dir)
+        head_before = _sha(repo_dir, "HEAD")
+
+        git_shim.install(
+            'case " $* " in\n'
+            f'  *" fetch "*) {DENY};;\n'
+            '  *) exec "$REAL_GIT" "$@";;\n'
+            "esac"
+        )
+
+        with pytest.raises(gitmod.GitAccessDenied):
+            with gitmod.clone_repo(url, "repo", repo_dir, ephemeral=False):
+                pass
+        assert (repo_dir / ".git").exists()
+        assert _sha(repo_dir, "HEAD") == head_before
+
+
+class TestNonInteractiveEnvironment:
+    """git must never be able to stop and ask a question -- the actual fix for the hang."""
+
+    def test_terminal_prompt_is_disabled(self, git_shim, tmp_path):
+        git_shim.install("exit 0")
+        gitmod._run_git(["-C", str(tmp_path), "rev-parse", "HEAD"])
+        assert git_shim.env["GIT_TERMINAL_PROMPT"] == "0"
+
+    def test_askpass_is_set_but_empty(self, git_shim, tmp_path):
+        """Empty-but-set is the load-bearing detail: prompt.c takes the first non-NULL of
+        GIT_ASKPASS, core.askpass, SSH_ASKPASS and runs it only when non-empty, so this both
+        skips askpass and neutralizes a user's core.askpass / SSH_ASKPASS GUI dialog."""
+        git_shim.install("exit 0")
+        gitmod._run_git(["-C", str(tmp_path), "rev-parse", "HEAD"])
+        assert git_shim.env["GIT_ASKPASS"] == ""
+
+    def test_ssh_is_defaulted_to_batch_mode(self, git_shim, tmp_path):
+        git_shim.install("exit 0")
+        gitmod._run_git(["-C", str(tmp_path), "rev-parse", "HEAD"])
+        assert "BatchMode=yes" in git_shim.env["GIT_SSH_COMMAND"]
+
+    def test_user_ssh_command_is_preserved(self, git_shim, tmp_path, monkeypatch):
+        git_shim.install("exit 0")
+        monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /keys/id_ed25519")
+        gitmod._run_git(["-C", str(tmp_path), "rev-parse", "HEAD"])
+        assert git_shim.env["GIT_SSH_COMMAND"] == "ssh -i /keys/id_ed25519"
+
+    def test_remote_commands_get_stall_detection(self, git_shim):
+        """Stall detection complements the timeout: a transfer that goes quiet dies in a minute
+        instead of sitting out the (much longer) full timeout."""
+        git_shim.install("exit 0")
+        gitmod._run_git(["ls-remote", "https://example.invalid/x.git"], network=True)
+        assert "http.lowSpeedLimit=1000" in git_shim.arg_lines[-1]
+        assert "http.lowSpeedTime=60" in git_shim.arg_lines[-1]
+
+    def test_local_commands_do_not_get_stall_detection(self, git_shim, tmp_path):
+        git_shim.install("exit 0")
+        gitmod._run_git(["-C", str(tmp_path), "rev-parse", "HEAD"])
+        assert "lowSpeed" not in git_shim.arg_lines[-1]
 
 
 class TestListRemoteRefs:

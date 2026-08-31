@@ -1,4 +1,5 @@
-"""Tests for _resolve_entry's delta-mode tag stream collapsing.
+"""Tests for _resolve_entry: delta-mode tag stream collapsing, index-suffix rendering, and the
+error channel for a remote that refuses us.
 
 A delta-mode tag selector whose match pattern covers multiple remote tags must emit exactly ONE
 stream Unit per raw pattern (not one Unit per matching tag name). The Unit's ref is the literal
@@ -9,12 +10,25 @@ from unittest.mock import patch
 
 import yaml
 
+from sourcerer.commands.index.git import GitAccessDenied
 from sourcerer.commands.index.selection import _resolve_entry
 from sourcerer.config import parse_config
 
 
 def _resolve(source_yaml: str, remote_tags: dict[str, str], remote_branches: dict[str, str] | None = None):
-    """Run _resolve_entry with mocked ls-remote returning the given ref maps."""
+    """Run _resolve_entry with mocked ls-remote returning the given ref maps, and return just
+    its units (see _resolve_errors for the error channel)."""
+    return _resolve_full(source_yaml, remote_tags, remote_branches)[0]
+
+
+def _resolve_errors(source_yaml: str, remote_tags: dict[str, str], remote_branches: dict[str, str] | None = None):
+    """The error messages _resolve_entry reports for an entry it could not resolve."""
+    return _resolve_full(source_yaml, remote_tags, remote_branches)[1]
+
+
+def _resolve_full(source_yaml: str, remote_tags, remote_branches=None):
+    """Run _resolve_entry with mocked ls-remote returning the given ref maps. A ref map may be
+    an exception instance instead of a dict, in which case ls-remote raises it."""
     raw = yaml.safe_load(f"""
 hosts:
   - id: github
@@ -28,12 +42,47 @@ sources:
     host = cfg.hosts[repo_cfg.host]
 
     def _fake_list_remote_refs(url, kind):
-        if kind == "tags":
-            return remote_tags
-        return remote_branches or {}
+        result = remote_tags if kind == "tags" else (remote_branches or {})
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
     with patch("sourcerer.commands.index.selection.list_remote_refs", side_effect=_fake_list_remote_refs):
         return _resolve_entry(repo_cfg, host)
+
+
+class TestAccessDeniedEntry:
+    """A repo whose remote refuses us is a run failure, not a silent omission.
+
+    A denied repo contributes no Units, so before this there was nothing to report a failure
+    against: the repo vanished from the plan behind a stderr warning and the run still exited 0
+    (after wasting three ls-remote attempts backing off from a permanent refusal)."""
+
+    SOURCE = """
+  - git: {host: github, org: elastic, repo: private, ref_type: tag}
+    match: "v{major}.{minor}.{patch}"
+"""
+
+    def _denied(self):
+        return GitAccessDenied(
+            128, ["git", "ls-remote"],
+            stderr="remote: Permission to elastic/private.git denied to nobody.",
+        )
+
+    def test_denied_entry_yields_an_error_and_no_units(self):
+        units, errors = _resolve_full(self.SOURCE, remote_tags=self._denied())
+        assert units == []
+        assert len(errors) == 1
+
+    def test_error_names_the_repo_and_quotes_git(self):
+        _units, errors = _resolve_full(self.SOURCE, remote_tags=self._denied())
+        assert "github/elastic/private" in errors[0]
+        assert "Permission to elastic/private.git denied" in errors[0]
+
+    def test_resolvable_entry_reports_no_errors(self):
+        units, errors = _resolve_full(self.SOURCE, remote_tags={"v1.2.3": "sha1"})
+        assert errors == []
+        assert [u.ref for u in units] == ["v1.2.3"]
 
 
 class TestDeltaTagStreamSelection:
