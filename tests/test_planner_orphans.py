@@ -5,6 +5,7 @@ sets. v3 index names carry a leading host segment; repo tuples are keyed (host, 
 # App packages
 from sourcerer.planner import (
     ParsedIndex,
+    index_in_scope,
     orphan_content_commits,
     orphan_indices,
     orphan_markers,
@@ -401,3 +402,62 @@ class TestEmptyIndexSweep:
         )
         assert "sourcerer-v3-files~github~ghostorg~gone" in plan.orphan_index_names
         assert plan.empty_index_names == []
+
+
+class TestIndexInScope:
+    """index_in_scope: feeds a scoped prune (--host/--org/--repo). A coarser index (missing a
+    segment the scope specifies) must be excluded, not included, since a scoped run only has
+    complete refs identity data for the scope itself."""
+
+    def _parsed(self, host="github", org=None, repo=None, commit=None):
+        return ParsedIndex(kind="files", host=host, org=org, repo=repo, commit=commit, name="n")
+
+    def test_no_scope_accepts_everything(self):
+        assert index_in_scope(self._parsed(), None, None, None) is True
+        assert index_in_scope(self._parsed(org="acme", repo="widgets"), None, None, None) is True
+
+    def test_host_scope_matches_any_granularity_under_that_host(self):
+        assert index_in_scope(self._parsed(host="github"), "github", None, None) is True
+        assert index_in_scope(self._parsed(host="github", org="acme"), "github", None, None) is True
+        assert index_in_scope(
+            self._parsed(host="github", org="acme", repo="widgets"), "github", None, None
+        ) is True
+
+    def test_host_scope_rejects_other_hosts(self):
+        assert index_in_scope(self._parsed(host="gitlab"), "github", None, None) is False
+
+    def test_org_scope_rejects_host_only_index(self):
+        # A host-only index has no org segment -- coarser than an org scope, so it is excluded
+        # rather than misjudged on the org-scoped refs data.
+        assert index_in_scope(self._parsed(host="github", org=None), "github", "acme", None) is False
+
+    def test_org_scope_accepts_matching_org_and_finer(self):
+        assert index_in_scope(self._parsed(host="github", org="acme"), "github", "acme", None) is True
+        assert index_in_scope(
+            self._parsed(host="github", org="acme", repo="widgets"), "github", "acme", None
+        ) is True
+
+    def test_org_scope_rejects_other_org(self):
+        assert index_in_scope(self._parsed(host="github", org="other"), "github", "acme", None) is False
+
+    def test_repo_scope_rejects_coarser_host_and_org_indices(self):
+        assert index_in_scope(
+            self._parsed(host="github", org=None, repo=None), "github", "acme", "widgets"
+        ) is False
+        assert index_in_scope(
+            self._parsed(host="github", org="acme", repo=None), "github", "acme", "widgets"
+        ) is False
+
+    def test_repo_scope_accepts_matching_repo_and_finer(self):
+        assert index_in_scope(
+            self._parsed(host="github", org="acme", repo="widgets"), "github", "acme", "widgets"
+        ) is True
+        assert index_in_scope(
+            self._parsed(host="github", org="acme", repo="widgets", commit="deadbeef"),
+            "github", "acme", "widgets",
+        ) is True
+
+    def test_repo_scope_rejects_other_repo(self):
+        assert index_in_scope(
+            self._parsed(host="github", org="acme", repo="other"), "github", "acme", "widgets"
+        ) is False

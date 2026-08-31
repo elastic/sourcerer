@@ -405,3 +405,185 @@ def make_reporter(quiet: bool) -> ProgressReporter:
     if _HAS_RICH and sys.stdout.isatty():
         return RichProgressReporter()
     return PlainProgressReporter()
+
+
+# --- Prune progress reporting -----------------------------------------------------------
+#
+# `prune`'s orphan-sweep planning pass (commands/prune/execute.py's plan_orphans_now) is a
+# handful of coarse, named phases (list indices, scan refs, gather per-index content, ...)
+# rather than the indexer's hundreds of small per-ref units, so it gets its own reporter
+# hierarchy instead of reusing Unit/ProgressReporter above. It mirrors that hierarchy's
+# Rich/Plain/Null split (see make_prune_reporter) so quiet and non-TTY behaviour come free the
+# same way. Phases can run concurrently -- plan_orphans_now parallelizes its mutually
+# independent gathers -- so more than one can be "active" at once; state is guarded by a lock
+# the same way ProgressReporter guards `units`.
+
+
+@dataclasses.dataclass
+class PrunePhase:
+    """One named step of prune's read-only planning pass plus its live/terminal state. `total`
+    is set when the step has a known unit count up front (e.g. one composite aggregation per
+    already-listed index) so its progress is a real fraction rather than a spinner; left None
+    for steps whose cost isn't unit-countable (e.g. a single refs scan)."""
+
+    name: str
+    total: int | None = None
+    current: int = 0
+    detail: str | None = None
+    started_at: float | None = None
+    finished_at: float | None = None
+    error: str | None = None
+
+    def elapsed(self) -> float:
+        if self.started_at is None:
+            return 0.0
+        end = self.finished_at if self.finished_at is not None else time.monotonic()
+        return end - self.started_at
+
+
+class _PrunePhaseHandle:
+    """Context manager returned by PruneReporter.phase(); lets the caller report a step's
+    progress (advance/set_detail) while it runs, then records completion (or the exception
+    that aborted it) on exit. Never suppresses an exception."""
+
+    def __init__(self, reporter: "PruneReporter", phase: PrunePhase) -> None:
+        self._reporter = reporter
+        self.phase = phase
+
+    def advance(self, n: int = 1) -> None:
+        self._reporter._update(self.phase, current_delta=n)
+
+    def set_detail(self, detail: str) -> None:
+        self._reporter._update(self.phase, detail=detail)
+
+    def __enter__(self) -> "_PrunePhaseHandle":
+        self.phase.started_at = time.monotonic()
+        self._reporter._start(self.phase)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.phase.finished_at = time.monotonic()
+        if exc_type is not None:
+            self.phase.error = str(exc)
+        self._reporter._finish(self.phase)
+        return False
+
+
+class PruneReporter:
+    """No-op base reporter for prune's read-only planning pass (also used directly as the
+    quiet/programmatic reporter -- there's nothing to suppress since the base emits nothing).
+    Subclasses render a phase-timing breakdown as plan_orphans_now works through listing
+    indices, scanning refs, and gathering per-index content, so a slow prune stays
+    self-diagnosing instead of going silent for minutes."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def __enter__(self) -> "PruneReporter":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+    def phase(self, name: str, total: int | None = None) -> _PrunePhaseHandle:
+        return _PrunePhaseHandle(self, PrunePhase(name=name, total=total))
+
+    # -- hooks called by _PrunePhaseHandle; no-op by default --
+    def _start(self, phase: PrunePhase) -> None:
+        pass
+
+    def _update(self, phase: PrunePhase, current_delta: int = 0, detail: str | None = None) -> None:
+        with self._lock:
+            phase.current += current_delta
+            if detail is not None:
+                phase.detail = detail
+
+    def _finish(self, phase: PrunePhase) -> None:
+        pass
+
+
+class PlainPruneReporter(PruneReporter):
+    """Non-TTY / piped output: one line per phase, printed once it completes (no live
+    redraw), so logs and CI capture the breakdown cleanly."""
+
+    def __enter__(self) -> "PlainPruneReporter":
+        click.echo("Planning prune...")
+        return self
+
+    def _finish(self, phase: PrunePhase) -> None:
+        glyph = "✗" if phase.error else "✓"
+        detail = f" {phase.detail}" if phase.detail else ""
+        suffix = f": {phase.error}" if phase.error else ""
+        click.echo(f"  {glyph} {phase.name}{detail} ({format_elapsed(phase.elapsed())}){suffix}",
+                  err=bool(phase.error))
+
+
+class _PruneDashboard:
+    """rich renderable rebuilt on every refresh tick; shows one line per currently-active phase
+    (there may be several, since plan_orphans_now runs its gathers concurrently)."""
+
+    def __init__(self, reporter: "RichPruneReporter") -> None:
+        self.r = reporter
+
+    def __rich__(self):
+        with self.r._lock:
+            active = list(self.r._active.values())
+        if not active:
+            return Text("")
+        rows = []
+        for phase in active:
+            elapsed = format_elapsed(phase.elapsed())
+            if phase.total:
+                frac = min(phase.current / phase.total, 1.0)
+                rows.append(Text(f"  ⠹ {phase.name} {_bar(frac, 16)} "
+                                 f"{phase.current}/{phase.total} · {elapsed}"))
+            else:
+                detail = f" {phase.detail}" if phase.detail else ""
+                rows.append(Text(f"  ⠹ {phase.name}{detail} · {elapsed}"))
+        return Group(*rows)
+
+
+class RichPruneReporter(PruneReporter):
+    """TTY reporter: a rich.Live region showing the currently-active phase(s) as an
+    indeterminate/determinate bar, with completed phases printed as permanent lines above
+    (same pattern as RichProgressReporter)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.console = Console()
+        self._active: dict[int, PrunePhase] = {}
+        self.live = Live(_PruneDashboard(self), console=self.console, refresh_per_second=4, auto_refresh=True)
+
+    def __enter__(self) -> "RichPruneReporter":
+        self.console.print(Text("Planning prune...", style="bold"))
+        self.live.start()
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.live.stop()
+        return False
+
+    def _start(self, phase: PrunePhase) -> None:
+        with self._lock:
+            self._active[id(phase)] = phase
+
+    def _finish(self, phase: PrunePhase) -> None:
+        with self._lock:
+            self._active.pop(id(phase), None)
+        detail = f"{phase.detail} " if phase.detail else ""
+        style = "red" if phase.error else "green"
+        glyph = "✗" if phase.error else "✓"
+        suffix = f": {phase.error}" if phase.error else ""
+        self.console.print(
+            Text(f"{glyph} {phase.name:<20} {detail}({format_elapsed(phase.elapsed())}){suffix}", style=style)
+        )
+
+
+def make_prune_reporter(quiet: bool) -> PruneReporter:
+    """Null (the PruneReporter base, which is already a no-op) when quiet, Rich on an
+    interactive TTY, Plain otherwise -- mirrors make_reporter's selection above."""
+    if quiet:
+        return PruneReporter()
+    if _HAS_RICH and sys.stdout.isatty():
+        return RichPruneReporter()
+    return PlainPruneReporter()

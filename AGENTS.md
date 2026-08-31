@@ -13,8 +13,12 @@ Commands:
 - `sourcerer index <org>/<repo> [-b <branch>] [-t <tag>] [-c <commit>]` (single-repo path
   defaults to `git.host` = `github`)
 - `sourcerer index --config <file> [--prune] [--dry-run] [--no-backfill]`
-- `sourcerer prune [--config <file>] [--dry-run]` (config-driven retention prune is skipped
-  without `--config`; the orphan sweep always runs)
+- `sourcerer prune [--config <file>] [--dry-run] [--wait] [--host <h> [--org <o> [--repo <r>]]]`
+  (config-driven retention prune is skipped without `--config`; the orphan sweep always runs.
+  `--host`/`--org`/`--repo` narrow the orphan sweep to one host/org/repo instead of the whole
+  cluster -- `--org` requires `--host`, `--repo` requires `--org`. `--wait` blocks until every
+  submitted async content deletion actually completes instead of just reporting what was
+  submitted; see "Prune completion semantics" below.)
 - `sourcerer mcp-proxy [-e <env>]` (run a stdio MCP proxy that forwards to the Kibana
   Agent Builder MCP endpoint; intended to be launched by Claude Desktop via `mcpServers`)
 - `sourcerer help`
@@ -333,6 +337,26 @@ does not trigger the wipe-and-reclone recovery (which exists for a corrupt objec
 run exits non-zero rather than silently omitting the repo from the plan. A command killed at
 `--git-timeout` raises `GitTimeout`. Both subclass `subprocess.CalledProcessError`, so existing
 handlers keep catching them, and their `str()` carries git's stderr into the per-ref error report.
+
+## Prune completion semantics
+
+Content deletions (the retention pass's per-commit `delete_by_query`, and the orphan sweep's
+Class B/D/D-I content and Class C marker `delete_by_query` calls) are submitted with
+`wait_for_completion=False` -- they return an Elasticsearch task id, not a finished result. The
+whole-index `DELETE`s (Class A orphaned indices, Class E empty indices) and the marker-doc bulk
+`delete`/single `delete` calls (retention pass, stale-marker reclaim) are synchronous and really
+are done by the time the command exits.
+
+The completion summary reflects this: it reports "Deleted N marker(s)/index(es)" for the
+synchronous work and, separately, "Submitted async deletion of N commit(s)/marker commit(s)
+(K task(s))" for everything still in flight, printing the task IDs so an operator can check them
+via `GET _tasks/<id>`. Re-running `prune` immediately afterward may still show the same orphans
+if their deletions haven't finished yet -- this is expected, not a bug.
+
+Pass `--wait` to block until every submitted task reports `completed: true` (polled via
+`es.tasks.get`, progress shown through the same reporter as planning) before printing a summary
+of confirmed outcomes (`deleted` / `version_conflicts` from each task's status) instead of
+submission targets.
 
 ## Local stdio MCP proxy (`sourcerer mcp-proxy`)
 

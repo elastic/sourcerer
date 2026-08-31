@@ -4,8 +4,19 @@ pieces the retain-doomed reporting fix (silently dropping doomed refs instead of
 them "already indexed, skipped") depends on -- plus the plain reporter's stage lines, which
 are what CI logs actually show."""
 
+# Third-party packages
+import pytest
+
 # App packages
-from sourcerer.progress import PlainProgressReporter, ProgressReporter, Unit
+from sourcerer.progress import (
+    PlainProgressReporter,
+    PlainPruneReporter,
+    ProgressReporter,
+    PruneReporter,
+    RichPruneReporter,
+    Unit,
+    make_prune_reporter,
+)
 
 
 def _unit(ref: str = "v1.0.0-rc.1", kind: str = "tag") -> Unit:
@@ -86,3 +97,101 @@ class TestPlainReporterStageLines:
         u = _unit()
         r.set_stage(u, "indexing")
         assert f"Indexing {u.label} ..." in capsys.readouterr().out
+
+
+class TestPruneReporterPhases:
+    """PruneReporter.phase(): the context-manager seam plan_orphans_now uses to report
+    step-by-step progress. The base reporter is a no-op, but phase bookkeeping (timing,
+    advance, set_detail, error capture) must work regardless -- subclasses just render it."""
+
+    def test_phase_records_elapsed_time(self):
+        r = PruneReporter()
+        with r.phase("listing indices") as p:
+            pass
+        assert p.phase.started_at is not None
+        assert p.phase.finished_at is not None
+        assert p.phase.elapsed() >= 0
+
+    def test_advance_increments_current(self):
+        r = PruneReporter()
+        with r.phase("content by index", total=3) as p:
+            p.advance()
+            p.advance(2)
+        assert p.phase.current == 3
+
+    def test_set_detail_records_detail_text(self):
+        r = PruneReporter()
+        with r.phase("refs scan") as p:
+            p.set_detail("42 repo(s)")
+        assert p.phase.detail == "42 repo(s)"
+
+    def test_exception_inside_phase_is_captured_and_reraised(self):
+        r = PruneReporter()
+        with pytest.raises(ValueError):
+            with r.phase("empty-index check") as p:
+                raise ValueError("boom")
+        assert p.phase.error == "boom"
+        assert p.phase.finished_at is not None
+
+
+class TestPlainPruneReporter:
+    def test_enter_announces_planning(self, capsys):
+        r = PlainPruneReporter()
+        with r:
+            pass
+        assert "Planning prune" in capsys.readouterr().out
+
+    def test_completed_phase_prints_a_line_with_detail_and_timing(self, capsys):
+        r = PlainPruneReporter()
+        with r:
+            with r.phase("listing indices") as p:
+                p.set_detail("42 indices")
+        out = capsys.readouterr().out
+        assert "listing indices" in out
+        assert "42 indices" in out
+        assert "✓" in out
+
+    def test_errored_phase_marks_failure_and_goes_to_stderr(self, capsys):
+        r = PlainPruneReporter()
+        with pytest.raises(RuntimeError):
+            with r:
+                with r.phase("refs scan"):
+                    raise RuntimeError("cluster unreachable")
+        captured = capsys.readouterr()
+        assert "✗" in captured.err
+        assert "cluster unreachable" in captured.err
+
+
+class TestMakePruneReporter:
+    def test_quiet_returns_base_null_reporter(self):
+        r = make_prune_reporter(quiet=True)
+        assert type(r) is PruneReporter
+
+    def test_non_tty_returns_plain_reporter(self, monkeypatch):
+        monkeypatch.setattr("sourcerer.progress.sys.stdout.isatty", lambda: False)
+        assert isinstance(make_prune_reporter(quiet=False), PlainPruneReporter)
+
+    def test_tty_returns_rich_reporter(self, monkeypatch):
+        monkeypatch.setattr("sourcerer.progress.sys.stdout.isatty", lambda: True)
+        assert isinstance(make_prune_reporter(quiet=False), RichPruneReporter)
+
+
+class TestRichPruneReporterConcurrentPhases:
+    """plan_orphans_now runs its gathers concurrently, so more than one phase can be active
+    at once -- verify the dashboard state tracks all of them, not just the most recent."""
+
+    def test_multiple_concurrently_active_phases_are_tracked(self):
+        r = RichPruneReporter()
+        r.live.start()
+        try:
+            h1 = r.phase("refs scan")
+            h2 = r.phase("content by index", total=10)
+            h1.__enter__()
+            h2.__enter__()
+            assert len(r._active) == 2
+            h1.__exit__(None, None, None)
+            assert len(r._active) == 1
+            h2.__exit__(None, None, None)
+            assert len(r._active) == 0
+        finally:
+            r.live.stop()

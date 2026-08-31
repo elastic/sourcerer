@@ -346,10 +346,37 @@ def index(repo_spec, branch, tag, commit, config_path, force, quiet, cache_dir, 
     help="Show what would be deleted without deleting anything.",
 )
 @click.option("-q", "--quiet", is_flag=True, default=False, help="Suppress output for repos with nothing to prune.")
+@click.option(
+    "--wait",
+    is_flag=True,
+    default=False,
+    help="Block until every submitted async content deletion (delete_by_query) actually "
+    "completes, polling task status, instead of just reporting what was submitted.",
+)
+@click.option(
+    "--host",
+    "scope_host",
+    default=None,
+    help="Limit the orphan sweep to this git host (with --config or no REPO_SPEC only). "
+    "Combine with --org/--repo to narrow further; omitting all three sweeps the whole cluster.",
+)
+@click.option(
+    "--org",
+    "scope_org",
+    default=None,
+    help="Limit the orphan sweep to this org (with --config or no REPO_SPEC only). Requires --host.",
+)
+@click.option(
+    "--repo",
+    "scope_repo",
+    default=None,
+    help="Limit the orphan sweep to this repo (with --config or no REPO_SPEC only). Requires --host/--org.",
+)
 @env_option
 @insecure_option
 @auth_options
-def prune(repo_spec, branch, tag, commit, config_path, dry_run, quiet, url, api_key, username, password, insecure):
+def prune(repo_spec, branch, tag, commit, config_path, dry_run, quiet, wait, scope_host, scope_org, scope_repo,
+          url, api_key, username, password, insecure):
     """Delete indexed refs that fall outside their sourcerer.yml retention policies, then sweep
     for orphans.
 
@@ -364,22 +391,34 @@ def prune(repo_spec, branch, tag, commit, config_path, dry_run, quiet, url, api_
     orphans: whole files/lines indices with no matching entry in sourcerer-refs (e.g. a repo
     removed from the config), commit content left behind with no marker referencing it, and
     refs markers whose content is entirely gone. Use --dry-run to preview both passes first.
+
+    --host/--org/--repo narrow the orphan sweep (only) to one host/org/repo instead of scanning
+    the whole cluster; --repo requires --org, and --org requires --host.
     """
+    if scope_org and not scope_host:
+        raise click.UsageError("--org requires --host")
+    if scope_repo and not scope_org:
+        raise click.UsageError("--repo requires --org")
     if config_path:
         if repo_spec or branch or tag or commit:
             raise click.UsageError("--config cannot be combined with REPO_SPEC or -b/-t/-c")
-        prune_cmd.run(config_path, url, api_key, username, password, dry_run, quiet, insecure=insecure)
+        prune_cmd.run(config_path, url, api_key, username, password, dry_run, quiet, insecure=insecure,
+                      wait=wait, scope_host=scope_host, scope_org=scope_org, scope_repo=scope_repo)
     elif repo_spec:
         refs = {k: v for k, v in [("branch", branch), ("tag", tag), ("commit", commit)] if v}
         if not refs:
             raise click.UsageError("provide exactly one of -b/--branch, -t/--tag, -c/--commit with REPO_SPEC")
         if len(refs) > 1:
             raise click.UsageError("specify at most one of -b/--branch, -t/--tag, -c/--commit")
-        prune_cmd.run_ref(repo_spec, branch, tag, commit, url, api_key, username, password, dry_run, quiet, insecure=insecure)
+        if scope_host or scope_org or scope_repo:
+            raise click.UsageError("--host/--org/--repo apply to the orphan sweep, not a REPO_SPEC prune")
+        prune_cmd.run_ref(repo_spec, branch, tag, commit, url, api_key, username, password, dry_run, quiet,
+                          insecure=insecure, wait=wait)
     else:
         if branch or tag or commit:
             raise click.UsageError("-b/-t/-c require a REPO_SPEC ('<host>/<org>/<repo>')")
-        prune_cmd.run(None, url, api_key, username, password, dry_run, quiet, insecure=insecure)
+        prune_cmd.run(None, url, api_key, username, password, dry_run, quiet, insecure=insecure,
+                      wait=wait, scope_host=scope_host, scope_org=scope_org, scope_repo=scope_repo)
 
 
 

@@ -51,7 +51,7 @@ class TestRunRefDecisionBuilding:
 
         def fake_execute_deletions(es, host, org, repo, decisions):
             captured["decisions"] = list(decisions)
-            return (1, 0)
+            return (1, 0, [])
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch_markers), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_execute_deletions), \
@@ -102,7 +102,7 @@ class TestRunRefDecisionBuilding:
         def fake_execute_deletions(es, host, org, repo, decisions):
             from sourcerer.planner import content_delete_set
             captured["drop_commits"] = content_delete_set(decisions)
-            return (1, 0)
+            return (1, 0, [])
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch_markers), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_execute_deletions), \
@@ -137,7 +137,7 @@ class TestRunRefDecisionBuilding:
         def fake_execute_deletions(es, host, org, repo, decisions):
             from sourcerer.planner import content_delete_set
             captured["drop_commits"] = content_delete_set(decisions)
-            return (1, 1)
+            return (1, 1, [])
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch_markers), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_execute_deletions), \
@@ -168,7 +168,7 @@ class TestRunRefDecisionBuilding:
 
         def fake_exec(es, host, org, repo, decisions):
             captured["decisions"] = list(decisions)
-            return (1, 1)
+            return (1, 1, [])
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_exec), \
@@ -224,7 +224,7 @@ class TestRunRefDecisionBuilding:
 
         def fake_exec(*a, **kw):
             execute_called.append(True)
-            return (0, 0)
+            return (0, 0, [])
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_exec), \
@@ -252,7 +252,7 @@ class TestRunRefDecisionBuilding:
 
         def fake_exec(*a, **kw):
             execute_called.append(True)
-            return (0, 0)
+            return (0, 0, [])
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_exec), \
@@ -286,7 +286,7 @@ class TestRunRefCommitMatchesAnyRefType:
 
         def fake_exec(es, host, org, repo, decisions):
             captured["decisions"] = list(decisions)
-            return (len([d for d in decisions if d.action == "delete"]), 1)
+            return (len([d for d in decisions if d.action == "delete"]), 1, [])
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_exec), \
@@ -397,7 +397,7 @@ class TestRunRefCommitMatchesAnyRefType:
         def fake_exec(es, host, org, repo, decisions):
             from sourcerer.planner import content_delete_set
             captured["drop_commits"] = content_delete_set(decisions)
-            return (2, 1)
+            return (2, 1, [])
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_exec), \
@@ -432,7 +432,7 @@ class TestRunRefCommitMatchesAnyRefType:
         def fake_exec(es, host, org, repo, decisions):
             from sourcerer.planner import content_delete_set
             captured["drop_commits"] = content_delete_set(decisions)
-            return (1, 1)
+            return (1, 1, [])
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
              patch("sourcerer.commands.prune.command.execute_deletions", fake_exec), \
@@ -475,6 +475,7 @@ class TestRunRefNoMarkerFallback:
 
         def fake_delete_content(es, host, org, repo, sha, index_names=None):
             deleted.append(sha)
+            return []
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
              patch("sourcerer.commands.prune.command.resolve_content_commit", fake_resolve), \
@@ -576,11 +577,11 @@ class TestRunRefNoOrphanSweep:
         sweep_called = []
 
         with patch("sourcerer.commands.prune.command.fetch_markers", fake_fetch), \
-             patch("sourcerer.commands.prune.command.execute_deletions", return_value=(1, 0)), \
+             patch("sourcerer.commands.prune.command.execute_deletions", return_value=(1, 0, [])), \
              patch("sourcerer.commands.prune.command.plan_orphans_now",
                    side_effect=lambda *a, **kw: sweep_called.append("plan") or None), \
              patch("sourcerer.commands.prune.command.execute_orphan_deletions",
-                   side_effect=lambda *a, **kw: sweep_called.append("exec") or (0, 0, 0)), \
+                   side_effect=lambda *a, **kw: sweep_called.append("exec") or (0, 0, 0, 0, 0, [])), \
              patch("sourcerer.commands.prune.command.make_client", return_value=_make_es()):
             run_ref(
                 "github/acme/widgets",

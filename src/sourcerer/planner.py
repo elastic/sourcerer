@@ -416,6 +416,28 @@ def orphan_stale_incremental_content(
     return out
 
 
+def index_in_scope(parsed: ParsedIndex, host: str | None, org: str | None, repo: str | None) -> bool:
+    """True if a physical index at least as fine-grained as the given (host, org, repo) scope
+    belongs to it. Feeds a scoped prune (`--host`/`--org`/`--repo`) narrowing the orphan sweep to
+    one host/org/repo instead of a full-cluster scan.
+
+    A coarser index -- one missing a segment the scope specifies, e.g. a host-only or host~org
+    index when `repo` is given -- is excluded rather than included. This matters because a scoped
+    run's refs queries are themselves filtered to the scope, so it only has COMPLETE identity data
+    for that scope; judging a coarser index that spans repos outside it (via orphan_indices'
+    Class-A subsumption logic) on that partial data would misclassify it as orphaned. Passing
+    `None` for a field means "don't scope by it", so `index_in_scope(p, "github", None, None)`
+    accepts every index under that host regardless of granularity (the refs query is filtered to
+    the whole host, so identity data is complete at every granularity within it)."""
+    if host is not None and parsed.host != host:
+        return False
+    if org is not None and parsed.org != org:
+        return False
+    if repo is not None and parsed.repo != repo:
+        return False
+    return True
+
+
 @dataclass
 class OrphanPlan:
     orphan_index_names: list[str]                              # Class A -> DELETE {index}

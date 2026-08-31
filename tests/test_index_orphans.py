@@ -20,7 +20,6 @@ from sourcerer.queries import (
     enumerate_ref_repo_identities,
     enumerate_ref_tuples,
     enumerate_snapshot_ref_commit_tuples,
-    gather_content_commit_tuples,
     list_sourcerer_indices,
 )
 
@@ -143,6 +142,26 @@ class TestEnumerateSnapshotRefCommitTuples:
         es.search.side_effect = _not_found()
         assert enumerate_snapshot_ref_commit_tuples(es) == set()
 
+    def test_scope_adds_filter_alongside_must_not(self):
+        """--host/--org/--repo scoping adds a 'filter' clause without disturbing must_not."""
+        es = MagicMock()
+        es.search.return_value = _composite_response([], after_key=None)
+        enumerate_snapshot_ref_commit_tuples(es, host="github", org="acme", repo="widgets")
+        query = es.search.call_args.kwargs["query"]
+        assert {"term": {"mode": "delta"}} in query["bool"]["must_not"]
+        assert {"term": {"status": "stale"}} in query["bool"]["must_not"]
+        assert query["bool"]["filter"] == [
+            {"term": {"git.host": "github"}},
+            {"term": {"git.org": "acme"}},
+            {"term": {"git.repo": "widgets"}},
+        ]
+
+    def test_no_scope_omits_filter_clause(self):
+        es = MagicMock()
+        es.search.return_value = _composite_response([], after_key=None)
+        enumerate_snapshot_ref_commit_tuples(es)
+        assert "filter" not in es.search.call_args.kwargs["query"]["bool"]
+
     def test_enumerate_ref_tuples_has_no_query_filter(self):
         """Existing enumerate_ref_tuples must remain query-filter-free (no 'query' kwarg in the
         search call), so callers and tests that depended on its unfiltered behaviour are unchanged."""
@@ -193,33 +212,27 @@ class TestEnumerateRefRepoIdentities:
         es.search.side_effect = _not_found()
         assert enumerate_ref_repo_identities(es) == set()
 
-
-class TestGatherContentCommitTuples:
-    def test_queries_content_aliases(self):
+    def test_scope_adds_query_filter(self):
         es = MagicMock()
-        es.search.side_effect = [
-            _composite_response([("github", "acme", "widgets", "aaa")], after_key=None),
-            _composite_response([("github", "acme", "widgets", "aaa")], after_key=None),
+        es.search.return_value = _identity_response([], after_key=None)
+        enumerate_ref_repo_identities(es, host="github", org="acme")
+        kwargs = es.search.call_args.kwargs
+        assert kwargs["query"]["bool"]["filter"] == [
+            {"term": {"git.host": "github"}},
+            {"term": {"git.org": "acme"}},
         ]
-        result = gather_content_commit_tuples(es)
-        assert result == {("github", "acme", "widgets", "aaa")}
-        assert es.search.call_count == 2
-        assert [call.kwargs["index"] for call in es.search.call_args_list] == [FILES_ALIAS, LINES_ALIAS]
 
 
 class TestEmptyContentIndices:
     """empty_content_indices: sourcerer content indices with zero docs, guarded by
-    parse_index_name so unrelated / refs indices are never returned."""
+    parse_index_name so unrelated / refs indices are never returned. Batched via a single
+    es.indices.stats call, with a per-index es.count fallback only if that batched call 404s."""
 
-    def _es_with_counts(self, counts: dict[str, int]):
+    def _es_with_stats(self, counts: dict[str, int]):
         es = MagicMock()
-
-        def fake_count(index):
-            if index not in counts:
-                raise _not_found()
-            return {"count": counts[index]}
-
-        es.count.side_effect = fake_count
+        es.indices.stats.return_value = {
+            "indices": {name: {"total": {"docs": {"count": count}}} for name, count in counts.items()}
+        }
         return es
 
     def test_returns_only_zero_doc_content_indices(self):
@@ -227,23 +240,42 @@ class TestEmptyContentIndices:
             "sourcerer-v3-files~github~acme~widgets": 0,        # empty -> returned
             "sourcerer-v3-files~github~acme~widgets^deploy": 5, # non-empty -> skipped
         }
-        es = self._es_with_counts(counts)
+        es = self._es_with_stats(counts)
         result = empty_content_indices(es, list(counts))
         assert result == ["sourcerer-v3-files~github~acme~widgets"]
+        es.indices.stats.assert_called_once_with(index=list(counts), metric="docs")
 
     def test_non_sourcerer_index_never_considered(self):
         # An unrelated (even empty) index must not be counted or returned.
-        es = self._es_with_counts({"some-other-index": 0})
+        es = self._es_with_stats({"some-other-index": 0})
         result = empty_content_indices(es, ["some-other-index"])
         assert result == []
-        es.count.assert_not_called()  # guarded by parse_index_name before any count
+        es.indices.stats.assert_not_called()  # guarded by parse_index_name before any stats call
 
     def test_refs_index_not_considered(self):
-        es = self._es_with_counts({"sourcerer-v3-refs": 0})
+        es = self._es_with_stats({"sourcerer-v3-refs": 0})
         assert empty_content_indices(es, ["sourcerer-v3-refs"]) == []
-        es.count.assert_not_called()
+        es.indices.stats.assert_not_called()
 
-    def test_index_that_vanished_is_skipped(self):
-        # count raises NotFound (deleted between listing and counting) -> just skipped.
-        es = self._es_with_counts({})  # every count -> NotFound
+    def test_index_missing_from_stats_response_is_skipped(self):
+        # An index the batched stats call didn't return an entry for is simply skipped.
+        es = self._es_with_stats({})
         assert empty_content_indices(es, ["sourcerer-v3-files~github~acme~widgets"]) == []
+
+    def test_batched_call_404_falls_back_to_per_index_count(self):
+        # A race (an index vanished between listing and this call) 404s the whole batched
+        # request -- fall back to the original per-index es.count loop.
+        es = MagicMock()
+        es.indices.stats.side_effect = _not_found()
+
+        def fake_count(index):
+            counts = {"sourcerer-v3-files~github~acme~widgets": 0}
+            if index not in counts:
+                raise _not_found()
+            return {"count": counts[index]}
+
+        es.count.side_effect = fake_count
+        result = empty_content_indices(
+            es, ["sourcerer-v3-files~github~acme~widgets", "sourcerer-v3-files~github~acme~gone"]
+        )
+        assert result == ["sourcerer-v3-files~github~acme~widgets"]

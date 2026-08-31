@@ -7,6 +7,8 @@
 
 # Standard packages
 import datetime
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 # Third-party packages
 from elasticsearch import Elasticsearch, NotFoundError
@@ -17,6 +19,29 @@ from .indices import FILES_ALIAS, LINES_ALIAS, REFS_ALIAS, files_index, lines_in
 from .planner import Marker, parse_index_name
 
 _COMPOSITE_PAGE_SIZE = 1000
+
+
+def _scan_concurrency() -> int:
+    """Concurrent per-index composite-aggregation requests during orphan-sweep planning
+    (gather_content_and_incremental_by_index). Env-overridable like commands/index/runtime's
+    _tuning() knobs, kept as a standalone function since queries.py has no dependency on the
+    index command's runtime module. The ES client is thread-safe, and every per-index request
+    is independent, so this only bounds how many are in flight at once."""
+    return int(os.environ.get("SOURCERER_PRUNE_SCAN_CONCURRENCY", "8"))
+
+
+def _scope_filters(host: str | None, org: str | None, repo: str | None) -> list[dict]:
+    """Term filters for an optional (host, org, repo) scope, used by a scoped prune
+    (--host/--org/--repo) to narrow a refs-index query. A field left as None contributes no
+    filter, so passing all-None reproduces the previous, unscoped query exactly."""
+    filters = []
+    if host is not None:
+        filters.append({"term": {"git.host": host}})
+    if org is not None:
+        filters.append({"term": {"git.org": org}})
+    if repo is not None:
+        filters.append({"term": {"git.repo": repo}})
+    return filters
 
 
 def _parse_dt(value: str | None) -> datetime.datetime | None:
@@ -134,15 +159,39 @@ def empty_content_indices(es: Elasticsearch, index_names: list[str]) -> list[str
     markers -- so orphan_indices' identity test doesn't flag it) is safe to DELETE outright,
     since there is nothing to lose. Guarded by parse_index_name so only real sourcerer
     files/lines indices are ever considered -- an unrelated empty index in the cluster (or the
-    refs index) is never touched. es.count over refs-settled state is reliable here because prune
-    reads after its own async deletes are a separate concern from the write path.
+    refs index) is never touched.
 
-    Returns the names in the given order; an index that vanished between listing and counting
-    (NotFound) is simply skipped."""
+    Doc counts for every candidate are fetched in ONE es.indices.stats call rather than one
+    es.count per index -- the N->1 batching this function exists to do. Falls back to the
+    original per-index es.count loop if the batched call 404s (a race where an index vanished
+    between `index_names` being listed and this call -- e.g. a concurrent prune run's own
+    orphan sweep -- since indices.stats, unlike count/search, has no per-request
+    ignore_unavailable to skip just the missing name)."""
+    candidates = [name for name in index_names if parse_index_name(name) is not None]
+    if not candidates:
+        return []
+    try:
+        stats = es.indices.stats(index=candidates, metric="docs")
+    except NotFoundError:
+        return _empty_content_indices_fallback(es, candidates)
+    indices_stats = stats.get("indices") or {}
     out: list[str] = []
-    for name in index_names:
-        if parse_index_name(name) is None:
+    for name in candidates:
+        entry = indices_stats.get(name)
+        if entry is None:
             continue
+        count = entry.get("total", {}).get("docs", {}).get("count", 0)
+        if int(count) == 0:
+            out.append(name)
+    return out
+
+
+def _empty_content_indices_fallback(es: Elasticsearch, candidates: list[str]) -> list[str]:
+    """Per-index es.count fallback for empty_content_indices, used only when the batched
+    es.indices.stats call 404s. Reproduces the pre-batching behaviour exactly: an index that
+    vanished between listing and counting is simply skipped."""
+    out: list[str] = []
+    for name in candidates:
         try:
             if int(es.count(index=name)["count"]) == 0:
                 out.append(name)
@@ -158,7 +207,9 @@ def enumerate_ref_tuples(es: Elasticsearch) -> set[tuple[str, str, str, str]]:
     return _composite_host_org_repo_commit_tuples(es, REFS_ALIAS)
 
 
-def enumerate_snapshot_ref_commit_tuples(es: Elasticsearch) -> set[tuple[str, str, str, str]]:
+def enumerate_snapshot_ref_commit_tuples(
+    es: Elasticsearch, host: str | None = None, org: str | None = None, repo: str | None = None,
+) -> set[tuple[str, str, str, str]]:
     """Snapshot-only (mode != "delta") (git.host, git.org, git.repo, git.commit) tuples from the
     refs alias, also excluding stale markers (status == "stale").
 
@@ -170,12 +221,20 @@ def enumerate_snapshot_ref_commit_tuples(es: Elasticsearch) -> set[tuple[str, st
     dropped, causing their content to become false Class-B orphans. Stale markers are owned by
     execute_stale_marker_deletions and must not also be processed by the orphan sweep.
 
+    `host`/`org`/`repo` narrow a scoped prune (--host/--org/--repo) to that identity; left at the
+    default None, every repo is scanned exactly as before.
+
     Returns an empty set if the refs index doesn't exist yet."""
-    query = {"bool": {"must_not": [{"term": {"mode": "delta"}}, {"term": {"status": "stale"}}]}}
-    return _composite_host_org_repo_commit_tuples(es, REFS_ALIAS, query=query)
+    bool_query: dict = {"must_not": [{"term": {"mode": "delta"}}, {"term": {"status": "stale"}}]}
+    scope = _scope_filters(host, org, repo)
+    if scope:
+        bool_query["filter"] = scope
+    return _composite_host_org_repo_commit_tuples(es, REFS_ALIAS, query={"bool": bool_query})
 
 
-def enumerate_ref_repo_identities(es: Elasticsearch) -> set[tuple[str, str, str]]:
+def enumerate_ref_repo_identities(
+    es: Elasticsearch, host: str | None = None, org: str | None = None, repo: str | None = None,
+) -> set[tuple[str, str, str]]:
     """Every distinct (git.host, git.org, git.repo) with any ref doc -- snapshot OR delta --
     via a paginated composite aggregation over git.host/git.org/git.repo only (no commit source).
 
@@ -186,8 +245,14 @@ def enumerate_ref_repo_identities(es: Elasticsearch) -> set[tuple[str, str, str]
     but still has host/org/repo and must contribute identity. No mode filter is applied so legacy,
     snapshot, and delta docs all contribute equally.
 
+    `host`/`org`/`repo` narrow a scoped prune (--host/--org/--repo) to that identity; left at the
+    default None, every repo is scanned exactly as before (and no `query` clause is added at all,
+    matching the historical unfiltered request shape).
+
     Returns an empty set if the refs index doesn't exist yet."""
     out: set[tuple[str, str, str]] = set()
+    scope = _scope_filters(host, org, repo)
+    query = {"bool": {"filter": scope}} if scope else None
     after: dict | None = None
     while True:
         composite: dict = {
@@ -200,8 +265,11 @@ def enumerate_ref_repo_identities(es: Elasticsearch) -> set[tuple[str, str, str]
         }
         if after is not None:
             composite["after"] = after
+        search_kwargs: dict = {"index": REFS_ALIAS, "size": 0, "aggs": {"ids": {"composite": composite}}}
+        if query is not None:
+            search_kwargs["query"] = query
         try:
-            resp = es.search(index=REFS_ALIAS, size=0, aggs={"ids": {"composite": composite}})
+            resp = es.search(**search_kwargs)
         except NotFoundError:
             return out
         agg = resp["aggregations"]["ids"]
@@ -257,128 +325,61 @@ def _composite_host_org_repo_commit_tuples(
             return out
 
 
-def gather_content_commit_tuples(es: Elasticsearch) -> set[tuple[str, str, str, str]]:
-    """Union of (host, org, repo, commit) tuples with content docs across the content read
-    aliases."""
-    return (
-        enumerate_content_commits(es, FILES_ALIAS)
-        | enumerate_content_commits(es, LINES_ALIAS)
-    )
+def gather_content_and_incremental_by_index(
+    es: Elasticsearch, index_names: list[str], progress_cb=None,
+) -> tuple[dict[str, set[tuple[str, str, str, str]]], dict[str, set[tuple[str, str, str, str, str]]]]:
+    """Per physical index, both the snapshot (host, org, repo, commit) tuples AND the incremental
+    (host, org, repo, ref_type, ref_pattern) tuples with content docs in it -- gathered with ONE
+    composite aggregation per index (via `_composite_content_and_incremental_tuples`) instead of
+    two, using `missing_bucket: true` on the fields only one of the two disjoint content-doc
+    shapes carries (a snapshot doc has git.commit and no git.ref_pattern/ref_type; an incremental
+    doc has the reverse -- see commands/index/documents.py's build_file_doc vs.
+    build_incremental_file_doc).
+
+    Feeds Class-D and Class-D-I stale-location detection (planner.orphan_stale_content /
+    orphan_stale_incremental_content). The per-index requests run concurrently -- the ES client is
+    thread-safe and each index's aggregation is independent of every other's -- bounded by
+    `_scan_concurrency()` (env `SOURCERER_PRUNE_SCAN_CONCURRENCY`, default 8), mirroring
+    commands/index/runtime._tuning()'s env-overridable worker counts.
+
+    `progress_cb`, if given, is called with no arguments once per index as its result arrives
+    (regardless of completion order), so a caller can drive a determinate progress display
+    without waiting for the whole gather to finish.
+
+    Returns (content_by_index, incremental_content_by_index); an index contributing only one
+    content-doc shape appears in only the corresponding dict. Empty/missing indices contribute
+    nothing to either."""
+    content_by_index: dict[str, set[tuple[str, str, str, str]]] = {}
+    incremental_by_index: dict[str, set[tuple[str, str, str, str, str]]] = {}
+    if not index_names:
+        return content_by_index, incremental_by_index
+
+    def _gather_one(name: str):
+        return name, _composite_content_and_incremental_tuples(es, name)
+
+    workers = max(1, min(_scan_concurrency(), len(index_names)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for name, (snapshot_tuples, incremental_tuples) in pool.map(_gather_one, index_names):
+            if snapshot_tuples:
+                content_by_index[name] = snapshot_tuples
+            if incremental_tuples:
+                incremental_by_index[name] = incremental_tuples
+            if progress_cb is not None:
+                progress_cb()
+    return content_by_index, incremental_by_index
 
 
-def gather_content_by_index(
-    es: Elasticsearch, index_names: list[str],
-) -> dict[str, set[tuple[str, str, str, str]]]:
-    """Per physical index, the distinct (host, org, repo, commit) tuples with content docs in it.
-
-    Feeds Class-D stale-location detection (planner.orphan_stale_content): to decide a doc is
-    stale we must know WHICH physical index holds it, so this enumerates each backing index by name
-    rather than through the union alias. Empty/missing indices contribute nothing."""
-    out: dict[str, set[tuple[str, str, str, str]]] = {}
-    for name in index_names:
-        tuples = enumerate_content_commits(es, name)
-        if tuples:
-            out[name] = tuples
-    return out
-
-
-def gather_intended_index_by_commit(
-    es: Elasticsearch,
-) -> dict[tuple[str, str, str, str], set[str]]:
-    """For every (host, org, repo, commit) with a ref marker, the set of physical content index
-    names its markers intend -- reconstructed from each marker's index_level/index_suffix via
-    files_index/lines_index (both prefixes, since a commit's content spans a files and a lines
-    index). Multiple markers for one commit (e.g. two refs) union their intended locations, which
-    is exactly right: content at any of them is legitimate, content anywhere else is stale.
-
-    Reconstruction (not stored names) keeps this correct across an index-prefix version bump and
-    matches wherever indexing actually wrote. Returns {} if the refs index doesn't exist."""
-    out: dict[tuple[str, str, str, str], set[str]] = {}
-    body = {"query": {"match_all": {}}}
-    src_fields = ["git.host", "git.org", "git.repo", "git.commit", "index_level", "index_suffix"]
-    try:
-        for hit in scan(es, index=REFS_ALIAS, query=body, _source=src_fields, preserve_order=False):
-            src = hit["_source"]
-            g = src.get("git", {})
-            host, org, repo, commit = g.get("host"), g.get("org"), g.get("repo"), g.get("commit")
-            if not (host and org and repo and commit):
-                continue
-            level = src.get("index_level") or "repo"
-            suffix = src.get("index_suffix") or None
-            key = (host, org, repo, commit)
-            intended = out.setdefault(key, set())
-            intended.add(files_index(host, org, repo, commit, level, suffix))
-            intended.add(lines_index(host, org, repo, commit, level, suffix))
-    except NotFoundError:
-        return {}
-    return out
-
-
-def gather_intended_incremental_index_by_ref(
-    es: Elasticsearch,
-) -> dict[tuple[str, str, str, str, str], set[str]]:
-    """For every (host, org, repo, ref_type, ref) with an incremental join doc, the set of
-    physical content index names that join doc intends -- reconstructed from its
-    index_level/index_suffix via files_index/lines_index with commit=None (incremental content
-    is ref-addressed, not commit-addressed).
-
-    Feeds the incremental stale-location sweep (Class D-I): content for a ref sitting in an
-    index NOT in this set is stale from a crashed migration and should be reclaimed.  Filters to
-    mode=="delta" docs only, so snapshot markers (which always have git.commit) are not
-    double-counted.  Returns {} if the refs index doesn't exist."""
-    out: dict[tuple[str, str, str, str, str], set[str]] = {}
-    body = {"query": {"term": {"mode": "delta"}}}
-    # `git.ref_pattern` is the stream identity that aligns with content docs' git.ref_pattern (the
-    # pattern for delta-tag streams, the branch name for delta branches). `git.ref` is the
-    # concrete resolved ref (e.g. newest tag) and is NOT the content key. Read `git.ref_pattern`.
-    src_fields = ["git.host", "git.org", "git.repo", "git.ref_type", "git.ref_pattern",
-                  "index_level", "index_suffix"]
-    try:
-        for hit in scan(es, index=REFS_ALIAS, query=body, _source=src_fields, preserve_order=False):
-            src = hit["_source"]
-            g = src.get("git", {})
-            host, org, repo = g.get("host"), g.get("org"), g.get("repo")
-            ref_type = g.get("ref_type")
-            # `git.ref_pattern` is the content-side identity (aligns with content docs' git.ref_pattern).
-            ref = g.get("ref_pattern")  # nested under git
-            if not (host and org and repo and ref_type and ref):
-                continue
-            level = src.get("index_level") or "repo"
-            suffix = src.get("index_suffix") or None
-            key = (host, org, repo, ref_type, ref)
-            intended = out.setdefault(key, set())
-            intended.add(files_index(host, org, repo, None, level, suffix))
-            intended.add(lines_index(host, org, repo, None, level, suffix))
-    except NotFoundError:
-        return {}
-    return out
-
-
-def gather_incremental_content_by_index(
-    es: Elasticsearch, index_names: list[str],
-) -> dict[str, set[tuple[str, str, str, str, str]]]:
-    """Per physical index, the distinct (host, org, repo, ref_type, ref) tuples with incremental
-    content docs in it (docs that have git.ref and a null/absent git.commit).
-
-    Feeds the incremental stale-location sweep (Class D-I) in planner.orphan_stale_incremental_content:
-    to decide a doc is stale we must know WHICH physical index holds it AND which ref it belongs to,
-    so this enumerates each backing index by name via a composite aggregation over git.ref_type +
-    git.ref. Empty/missing indices contribute nothing."""
-    out: dict[str, set[tuple[str, str, str, str, str]]] = {}
-    for name in index_names:
-        tuples = _composite_incremental_ref_tuples(es, name)
-        if tuples:
-            out[name] = tuples
-    return out
-
-
-def _composite_incremental_ref_tuples(
+def _composite_content_and_incremental_tuples(
     es: Elasticsearch, index: str,
-) -> set[tuple[str, str, str, str, str]]:
-    """Distinct (host, org, repo, ref_type, ref_pattern) tuples from incremental content docs
-    (git.ref_pattern present, git.commit absent) in `index`. Returns empty set if the index
-    doesn't exist."""
-    out: set[tuple[str, str, str, str, str]] = set()
+) -> tuple[set[tuple[str, str, str, str]], set[tuple[str, str, str, str, str]]]:
+    """One composite aggregation over `index` covering both content-doc shapes at once, via
+    `missing_bucket: true` on commit/ref_type/ref_pattern: a snapshot doc (commit set, ref_pattern
+    absent) and an incremental doc (ref_pattern/ref_type set, commit absent) each land in their
+    own bucket without a query filter to pick one shape or the other -- ES composite buckets on
+    the *combination* of source values including the missing ones. Returns (snapshot tuples,
+    incremental tuples); both empty if `index` doesn't exist."""
+    snapshot: set[tuple[str, str, str, str]] = set()
+    incremental: set[tuple[str, str, str, str, str]] = set()
     after: dict | None = None
     while True:
         composite: dict = {
@@ -387,30 +388,89 @@ def _composite_incremental_ref_tuples(
                 {"host": {"terms": {"field": "git.host"}}},
                 {"org": {"terms": {"field": "git.org"}}},
                 {"repo": {"terms": {"field": "git.repo"}}},
-                {"ref_type": {"terms": {"field": "git.ref_type"}}},
-                {"ref_pattern": {"terms": {"field": "git.ref_pattern"}}},
+                {"commit": {"terms": {"field": "git.commit", "missing_bucket": True}}},
+                {"ref_type": {"terms": {"field": "git.ref_type", "missing_bucket": True}}},
+                {"ref_pattern": {"terms": {"field": "git.ref_pattern", "missing_bucket": True}}},
             ],
         }
         if after is not None:
             composite["after"] = after
-        # Filter to docs that have git.ref_pattern but no git.commit (incremental content).
-        query = {"bool": {"filter": [{"exists": {"field": "git.ref_pattern"}}],
-                          "must_not": [{"exists": {"field": "git.commit"}}]}}
         try:
-            resp = es.search(index=index, size=0, query=query,
-                             aggs={"tuples": {"composite": composite}})
+            resp = es.search(index=index, size=0, aggs={"tuples": {"composite": composite}})
         except NotFoundError:
-            return out
+            return snapshot, incremental
         agg = resp["aggregations"]["tuples"]
         buckets = agg["buckets"]
         if not buckets:
-            return out
+            return snapshot, incremental
         for b in buckets:
-            out.add((b["key"]["host"], b["key"]["org"], b["key"]["repo"],
-                     b["key"]["ref_type"], b["key"]["ref_pattern"]))
+            key = b["key"]
+            host, org, repo = key["host"], key["org"], key["repo"]
+            commit, ref_type, ref_pattern = key.get("commit"), key.get("ref_type"), key.get("ref_pattern")
+            if commit is not None:
+                snapshot.add((host, org, repo, commit))
+            elif ref_type is not None and ref_pattern is not None:
+                incremental.add((host, org, repo, ref_type, ref_pattern))
         after = agg.get("after_key")
         if after is None:
-            return out
+            return snapshot, incremental
+
+
+def gather_intended_locations(
+    es: Elasticsearch, host: str | None = None, org: str | None = None, repo: str | None = None,
+) -> tuple[dict[tuple[str, str, str, str], set[str]], dict[tuple[str, str, str, str, str], set[str]]]:
+    """One scan of the refs alias that gathers BOTH intended-location maps the stale-location
+    sweep needs, replacing two full scans (gather_intended_index_by_commit and
+    gather_intended_incremental_index_by_ref) with one:
+
+    - For every (host, org, repo, commit) with a ref marker (snapshot OR delta -- a delta join
+      doc carries git.commit = live HEAD too), the set of physical content index names its
+      markers intend -- reconstructed via files_index/lines_index from index_level/index_suffix.
+    - For every (host, org, repo, ref_type, ref_pattern) with a `mode == "delta"` join doc, the
+      set of physical content index names it intends with commit=None (incremental content is
+      ref-addressed). The mode=="delta" check matters because snapshot markers ALSO carry
+      git.ref_pattern (defaulted to their ref) -- without it every snapshot marker would spuriously
+      contribute an incremental entry.
+
+    Multiple markers for one key union their intended locations: content at any of them is
+    legitimate, content anywhere else is stale.
+
+    `host`/`org`/`repo` narrow a scoped prune (--host/--org/--repo) to that identity.
+
+    Returns (intended_index_by_commit, intended_incremental_index_by_ref); both empty if the refs
+    index doesn't exist."""
+    intended_by_commit: dict[tuple[str, str, str, str], set[str]] = {}
+    intended_incremental_by_ref: dict[tuple[str, str, str, str, str], set[str]] = {}
+    scope = _scope_filters(host, org, repo)
+    query = {"query": {"bool": {"filter": scope}}} if scope else {"query": {"match_all": {}}}
+    src_fields = ["git.host", "git.org", "git.repo", "git.commit", "git.ref_type", "git.ref_pattern",
+                  "mode", "index_level", "index_suffix"]
+    try:
+        for hit in scan(es, index=REFS_ALIAS, query=query, _source=src_fields, preserve_order=False):
+            src = hit["_source"]
+            g = src.get("git", {})
+            h, o, r = g.get("host"), g.get("org"), g.get("repo")
+            if not (h and o and r):
+                continue
+            level = src.get("index_level") or "repo"
+            suffix = src.get("index_suffix") or None
+            commit = g.get("commit")
+            if commit:
+                key = (h, o, r, commit)
+                intended = intended_by_commit.setdefault(key, set())
+                intended.add(files_index(h, o, r, commit, level, suffix))
+                intended.add(lines_index(h, o, r, commit, level, suffix))
+            if src.get("mode") == "delta":
+                ref_type = g.get("ref_type")
+                ref_pattern = g.get("ref_pattern")
+                if ref_type and ref_pattern:
+                    key2 = (h, o, r, ref_type, ref_pattern)
+                    intended2 = intended_incremental_by_ref.setdefault(key2, set())
+                    intended2.add(files_index(h, o, r, None, level, suffix))
+                    intended2.add(lines_index(h, o, r, None, level, suffix))
+    except NotFoundError:
+        return intended_by_commit, intended_incremental_by_ref
+    return intended_by_commit, intended_incremental_by_ref
 
 
 _FULL_SHA_LEN = 40
