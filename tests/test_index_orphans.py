@@ -243,7 +243,9 @@ class TestEmptyContentIndices:
         es = self._es_with_stats(counts)
         result = empty_content_indices(es, list(counts))
         assert result == ["sourcerer-v3-files~github~acme~widgets"]
-        es.indices.stats.assert_called_once_with(index=list(counts), metric="docs")
+        es.indices.stats.assert_called_once_with(
+            index="sourcerer-v3-files*,sourcerer-v3-lines*", metric="docs"
+        )
 
     def test_non_sourcerer_index_never_considered(self):
         # An unrelated (even empty) index must not be counted or returned.

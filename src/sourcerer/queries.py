@@ -15,7 +15,7 @@ from elasticsearch import Elasticsearch, NotFoundError
 from elasticsearch.helpers import scan
 
 # App packages
-from .indices import FILES_ALIAS, LINES_ALIAS, REFS_ALIAS, files_index, lines_index
+from .indices import FILES_ALIAS, FILES_INDEX_PREFIX, LINES_ALIAS, LINES_INDEX_PREFIX, REFS_ALIAS, files_index, lines_index
 from .planner import Marker, parse_index_name
 
 _COMPOSITE_PAGE_SIZE = 1000
@@ -170,11 +170,15 @@ def empty_content_indices(es: Elasticsearch, index_names: list[str]) -> list[str
     candidates = [name for name in index_names if parse_index_name(name) is not None]
     if not candidates:
         return []
+    candidate_set = set(candidates)
+    # Use wildcard patterns instead of a comma-joined list of all candidates to avoid
+    # exceeding Elasticsearch's 4096-byte HTTP line limit when there are many indices.
+    wildcard = f"{FILES_INDEX_PREFIX}*,{LINES_INDEX_PREFIX}*"
     try:
-        stats = es.indices.stats(index=candidates, metric="docs")
+        stats = es.indices.stats(index=wildcard, metric="docs")
     except NotFoundError:
         return _empty_content_indices_fallback(es, candidates)
-    indices_stats = stats.get("indices") or {}
+    indices_stats = {k: v for k, v in (stats.get("indices") or {}).items() if k in candidate_set}
     out: list[str] = []
     for name in candidates:
         entry = indices_stats.get(name)
