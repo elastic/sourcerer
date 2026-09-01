@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -230,11 +231,16 @@ def _git_clone(url: str, repo_dir: pathlib.Path) -> None:
 
 def _git_gc(repo_dir: pathlib.Path) -> None:
     """Reclaim disk from blobs faulted in for commits that are no longer reachable (e.g. a
-    branch moved on `fetch --prune`). Reflogs are expired first because checkouts leave HEAD
+    branch moved on `fetch --prune`), and from worktree slot registrations orphaned by a
+    crash. `worktree prune` runs first since it only touches administrative bookkeeping for
+    slot directories that no longer exist -- it never removes a live slot -- and clears the way
+    for gc to see accurate reachability. Reflogs are expired next because checkouts leave HEAD
     reflog entries that would otherwise keep old commits (and their blobs) alive; the cache is
     a throwaway derived artifact, so this is safe. Best-effort: a gc failure must not fail the
-    index run."""
+    index run. Runs once per group, before any ref work starts (see `prepared_repo`), so it
+    never races an in-flight checkout in a live worktree slot."""
     try:
+        _run_git(["-C", str(repo_dir), "worktree", "prune"])
         _run_git(["-C", str(repo_dir), "reflog", "expire", "--expire=now", "--all"])
         _run_git(["-C", str(repo_dir), "gc", "--prune=now", "--quiet"])
     except (subprocess.CalledProcessError, OSError):
@@ -333,11 +339,54 @@ def prepared_repo(
             yield ready
 
 
+def worktree_slot_dir(repo_dir: pathlib.Path, slot: int) -> pathlib.Path:
+    """The working-tree directory for a concurrency slot. Slot 0 IS the clone's own working
+    tree (`repo_dir` itself), so a concurrency cap of 1 checks out and indexes into exactly the
+    same directory as before -- identical behavior and disk footprint. Slots >= 1 are linked
+    worktrees living beside the clone (`<repo>.wt<N>`), sharing its object database, so a
+    blobless clone's dedup and single-fetch-per-run properties are unaffected: only the checked-
+    out files, not the git objects, are duplicated per slot."""
+    return repo_dir if slot == 0 else repo_dir.parent / f"{repo_dir.name}.wt{slot}"
+
+
+# git's `.git/worktrees/<name>` administrative files are not documented as safe under
+# concurrent `worktree add`/`remove`/`prune` calls issued by sibling threads of this same
+# process (as opposed to separate processes, which the advisory repo_lock already serializes).
+# The checkout that follows registration is unaffected -- each worktree has its own working
+# tree and index file -- only the add/prune bookkeeping itself is serialized here.
+_WT_ADMIN_LOCK = threading.Lock()
+
+
+def ensure_worktree(repo_dir: pathlib.Path, slot: int) -> pathlib.Path:
+    """Materialize (or reuse) the working tree for `slot`, returning its directory. Slot 0
+    needs nothing -- it's the primary clone, already present.
+
+    Slots >= 1 get a `git worktree add` the first time they're used. `repo_dir` (and therefore
+    its slot directories) persists across runs like the clone itself, so on every later run the
+    slot directory already exists and is reused as-is -- the per-ref cost stays a single
+    `checkout --force`, never a repeated add/remove, and successive runs get incremental
+    (fetch-then-checkout) rather than from-scratch checkouts even in a linked worktree.
+
+    `--detach ... HEAD` just registers the worktree at *some* valid commit; the caller's own
+    `checkout_ref`/`checkout_branch` immediately afterward moves it to whatever ref it actually
+    needs, so the starting point here is arbitrary."""
+    path = worktree_slot_dir(repo_dir, slot)
+    if slot == 0:
+        return path
+    with _WT_ADMIN_LOCK:
+        # A linked worktree's gitdir is a `.git` FILE (not a directory) pointing back at the
+        # main clone's `.git/worktrees/<name>`; its presence means the slot is already
+        # registered and checkout-ready.
+        if not (path / ".git").exists():
+            _run_git(["-C", str(repo_dir), "worktree", "add", "--detach", str(path), "HEAD"])
+    return path
+
+
 def checkout_ref(repo_dir: pathlib.Path, ref: str) -> None:
-    """Check out an immutable `ref` (a tag or commit SHA) into an existing clone. `--force`
-    discards any working-tree state left by a previous ref's checkout so it can't bleed into
-    the next index pass. Branches go through `checkout_branch` instead, which targets the
-    fetched remote tip rather than a (possibly stale) local branch.
+    """Check out an immutable `ref` (a tag or commit SHA) into an existing clone or linked
+    worktree. `--force` discards any working-tree state left by a previous ref's checkout so it
+    can't bleed into the next index pass. Branches go through `checkout_branch` instead, which
+    targets the fetched remote tip rather than a (possibly stale) local branch.
 
     Counts as a network command: on a blobless clone, checkout faults this ref's blobs in from
     the promisor remote."""
@@ -345,14 +394,17 @@ def checkout_ref(repo_dir: pathlib.Path, ref: str) -> None:
 
 
 def checkout_branch(repo_dir: pathlib.Path, branch: str) -> None:
-    """Check out a branch at its fetched remote tip. `-B <branch> origin/<branch>` resets the
-    local branch to the freshly-fetched `origin/<branch>` -- on a reused (persistent) clone a
-    plain `git checkout <branch>` would land on the *stale* local branch, since `git fetch`
-    advances `origin/<branch>` but not the local branch. `--force` discards leftover working-tree
-    state. Works the same on a fresh clone (origin/<branch> already exists). Network: blobs
-    fault in from the promisor remote (see checkout_ref)."""
+    """Check out a branch at its fetched remote tip, into an existing clone or linked worktree.
+    Detached (not onto a local branch pointer): `git worktree` refuses to check out the same
+    local branch name in two worktrees at once, and nothing downstream needs a local branch ref
+    -- `list_branch_commits` and `_rev_info` both read `origin/<branch>` directly for exactly
+    this reason. Detaching also sidesteps the staleness a plain `git checkout <branch>` would
+    have on a reused (persistent) clone, since `git fetch` advances `origin/<branch>` but not a
+    local branch pointer. `--force` discards leftover working-tree state. Works the same
+    whether `repo_dir` is the primary clone or a linked worktree slot. Network: blobs fault in
+    from the promisor remote (see checkout_ref)."""
     _run_git(
-        ["-C", str(repo_dir), "checkout", "--force", "-B", branch, f"origin/{branch}"],
+        ["-C", str(repo_dir), "checkout", "--force", "--detach", f"origin/{branch}"],
         network=True,
     )
 

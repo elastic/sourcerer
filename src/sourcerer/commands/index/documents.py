@@ -20,7 +20,7 @@ from elasticsearch.helpers import parallel_bulk as es_parallel_bulk
 from ...indices import files_index, lines_index
 from ...utils import make_doc_id
 from .git import get_symlink_paths, iter_tracked_files
-from .runtime import _aborted, _tuning
+from .runtime import _aborted, _tuning, effective_bulk_threads, effective_index_workers
 
 
 def file_attributes(
@@ -429,10 +429,17 @@ def index_repo(
     # so fan it out across worker processes; each returns one batch's actions, which we flatten
     # into the lazy stream parallel_bulk consumes. Doc ids are deterministic and independent
     # (make_doc_id), so file/line docs need not stay adjacent or ordered.
+    #
+    # Sized via effective_index_workers()/effective_bulk_threads(), not the raw t.index_workers/
+    # t.bulk_threads: this call may be one of several ref jobs running concurrently (see
+    # command.py's ref executor), so each job gets a fair share of the total CPU/connection
+    # budget instead of the whole budget multiplied by the concurrency.
     t = _tuning()
+    index_workers = effective_index_workers()
+    bulk_threads = effective_bulk_threads()
     symlink_paths = get_symlink_paths(repo_dir)
     with ProcessPoolExecutor(
-        max_workers=max(1, t.index_workers),
+        max_workers=index_workers,
         initializer=_init_worker,
         initargs=(host, org, repo, commit_sha, str(repo_dir), symlink_paths,
                   index_level, index_suffix),
@@ -450,7 +457,7 @@ def index_repo(
             # Peak generation backlog is ~ max_inflight * index_worker_chunksize files of docs,
             # independent of repo size. The window derives from existing tuning (no new knob).
             batches = _batched(iter_tracked_files(repo_dir), t.index_worker_chunksize)
-            max_inflight = max(1, t.index_workers) * 2
+            max_inflight = index_workers * 2
             inflight: deque = deque()
             for batch in islice(batches, max_inflight):
                 inflight.append(executor.submit(build_file_actions, batch))
@@ -469,7 +476,7 @@ def index_repo(
             for _ok, info in es_parallel_bulk(
                 es,
                 generate_actions(),
-                thread_count=t.bulk_threads,
+                thread_count=bulk_threads,
                 chunk_size=t.bulk_chunk_size,
                 max_chunk_bytes=t.bulk_max_bytes,
                 queue_size=t.bulk_queue_size,
@@ -529,11 +536,15 @@ def index_incremental_paths(
     lines_count = 0
     f_index = files_index(host, org, repo, None, index_level, index_suffix)
 
+    # See index_repo's comment: sized per concurrently-running ref job, not the raw tuning
+    # values, so the total CPU/connection budget is reallocated rather than multiplied.
     t = _tuning()
+    index_workers = effective_index_workers()
+    bulk_threads = effective_bulk_threads()
     symlink_paths = get_symlink_paths(repo_dir)
     paths = list(iter_tracked_files(repo_dir)) if rel_paths is None else list(rel_paths)
     with ProcessPoolExecutor(
-        max_workers=max(1, t.index_workers),
+        max_workers=index_workers,
         initializer=_init_worker_incremental,
         initargs=(host, org, repo, ref_type, ref_pattern, str(repo_dir), symlink_paths, index_level, index_suffix),
     ) as executor:
@@ -544,7 +555,7 @@ def index_incremental_paths(
 
         def generate_actions():
             batches = _batched(iter(paths), t.index_worker_chunksize)
-            max_inflight = max(1, t.index_workers) * 2
+            max_inflight = index_workers * 2
             inflight: deque = deque()
             for batch in islice(batches, max_inflight):
                 inflight.append(executor.submit(build_file_actions, batch))
@@ -559,7 +570,7 @@ def index_incremental_paths(
             for _ok, info in es_parallel_bulk(
                 es,
                 generate_actions(),
-                thread_count=t.bulk_threads,
+                thread_count=bulk_threads,
                 chunk_size=t.bulk_chunk_size,
                 max_chunk_bytes=t.bulk_max_bytes,
                 queue_size=t.bulk_queue_size,

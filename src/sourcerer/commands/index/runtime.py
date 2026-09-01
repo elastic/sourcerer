@@ -44,10 +44,18 @@ def _tuning():
       (bulk_threads + bulk_queue_size) * bulk_chunk_size * avg_doc_bytes (~54 MB at defaults).
     - index_*: document generation (read/decode/hash one doc per line) is CPU/IO work under the
       GIL, farmed out to `index_workers` processes, `index_worker_chunksize` paths per IPC hop.
-    - index_repo_concurrency: (org, repo) clones processed concurrently in the batch path, so one
-      repo's clone overlaps another's indexing. Low by default to avoid oversubscribing the cluster.
+    - index_ref_concurrency: max concurrent ref-index jobs in the batch path -- both how many
+      repos are in flight at once AND, within one repo, how many of its refs check out into
+      their own `git worktree` and index concurrently (see `git.ensure_worktree`). One number
+      because a ref job either waits on another repo's clone or waits on a worktree slot within
+      its own repo; either way it is a unit of the same budget. `effective_index_workers()` /
+      `effective_bulk_threads()` divide `index_workers`/`bulk_threads` by this so raising it
+      reallocates the existing CPU/connection budget across more concurrent jobs instead of
+      multiplying it. Low by default to avoid oversubscribing the cluster.
     - resolve_concurrency: concurrent `git ls-remote` calls during planning; kept below GitHub's
-      effective limit to avoid rate-limiting that silently returns empty ref lists.
+      effective limit to avoid rate-limiting that silently returns empty ref lists. Also used
+      for the `--dry-run` clone/resolve preview pool (report.py), which does no checkout or
+      ingest and so is scoped like planning, not like indexing.
     """
     bulk_threads = int(os.environ.get("ELASTICSEARCH_BULK_THREADS", "8"))
     return SimpleNamespace(
@@ -57,9 +65,27 @@ def _tuning():
         bulk_queue_size=int(os.environ.get("ELASTICSEARCH_BULK_QUEUE_SIZE", str(bulk_threads * 2))),
         index_workers=int(os.environ.get("ELASTICSEARCH_INDEX_WORKERS", str(os.cpu_count() or 4))),
         index_worker_chunksize=int(os.environ.get("ELASTICSEARCH_INDEX_WORKER_CHUNKSIZE", "8")),
-        index_repo_concurrency=int(os.environ.get("INDEX_REPO_CONCURRENCY", "2")),
+        index_ref_concurrency=int(os.environ.get("INDEX_REF_CONCURRENCY", "2")),
         resolve_concurrency=int(os.environ.get("RESOLVE_CONCURRENCY", "4")),
     )
+
+
+def effective_index_workers() -> int:
+    """Per-ref-job worker-process budget: `index_workers` divided across up to
+    `index_ref_concurrency` concurrently-running ref jobs, so raising the concurrency knob
+    reallocates the existing CPU budget instead of multiplying the total worker-process count.
+    At the default concurrency of 2 this reproduces exactly today's per-job sizing."""
+    t = _tuning()
+    return max(1, t.index_workers // max(1, t.index_ref_concurrency))
+
+
+def effective_bulk_threads() -> int:
+    """Per-ref-job bulk-sender budget: `bulk_threads` divided across up to
+    `index_ref_concurrency` concurrently-running ref jobs, so raising the concurrency knob
+    reallocates the existing connection budget instead of multiplying the total sender count.
+    At the default concurrency of 2 this reproduces exactly today's per-job sizing."""
+    t = _tuning()
+    return max(1, t.bulk_threads // max(1, t.index_ref_concurrency))
 
 
 # Wall-clock ceiling for a single `git` invocation. Without one, a git that stops to ask for

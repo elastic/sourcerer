@@ -314,10 +314,11 @@ skip (a repo with no moved refs isn't even fetched) and immutable-tag dedup, rep
 - **Location** (precedence): `--cache-dir` flag → `SOURCERER_CACHE_DIR` env → `$XDG_CACHE_HOME/sourcerer` → `~/.cache/sourcerer`. Clones live at `<cache>/repos/<host>/<org>/<repo>`.
 - **Safe to delete**: the cache is a pure derived artifact (all index state lives in Elasticsearch). Removing it just forces a fresh (blobless) clone on the next run - this is also how a cache directory populated by an older, full-clone version of sourcerer gets converted to blobless: delete it once and let the next run re-create it.
 - **`--ephemeral`**: skip the cache and clone into a throwaway temp dir (good for one-off or CI runs).
-- **Concurrency**: a per-repo advisory lock prevents two overlapping runs from corrupting the same clone; if a repo is already locked by another run, it is skipped for that run.
-- **Garbage collection**: after each fetch, a best-effort `git gc` expires reflogs and prunes
-  objects that are no longer reachable - chiefly blobs faulted in for commits that fell out of a
-  branch's retained window since the last run. A gc failure never fails the index run.
+- **Concurrency**: a per-repo advisory lock prevents two overlapping runs from corrupting the same clone; if a repo is already locked by another run, it is skipped for that run. Within one run, `INDEX_REF_CONCURRENCY` (see `.env-reference`) caps how many refs check out and index at once -- both across different repos' clones and, for one repo with many refs (e.g. dozens of version tags), among that repo's own refs. Each concurrently-active ref gets its own `git worktree` living beside the clone (`<repo>.wt<N>`, sharing its object database, so blobless-clone dedup and single-fetch-per-run are unaffected); slot 0 is the clone's own working tree, so a concurrency of 1 behaves and consumes disk exactly as before. Slot directories persist across runs like the clone itself, so peak disk scales with the configured concurrency (only checked-out files, not git objects, are duplicated per slot), but the per-ref checkout cost stays a single `checkout --force`, never a repeated `worktree add`/`remove`.
+- **Garbage collection**: after each fetch, a best-effort `git worktree prune` reclaims slot
+  registrations orphaned by a crash, then `git gc` expires reflogs and prunes objects that are
+  no longer reachable - chiefly blobs faulted in for commits that fell out of a branch's
+  retained window since the last run. A gc failure never fails the index run.
 
 ### Non-interactive git
 

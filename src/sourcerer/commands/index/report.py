@@ -339,7 +339,9 @@ def dry_run_config(
 
     # Clone/fetch + resolve repos concurrently (fetches release the GIL); collect all results and
     # print in sorted plan order so the combined report is deterministic and never interleaved.
-    with ThreadPoolExecutor(max_workers=max(1, _tuning().index_repo_concurrency)) as pool:
+    # Sized like planning (RESOLVE_CONCURRENCY), not like indexing (INDEX_REF_CONCURRENCY): this
+    # preview does clone/fetch + ref resolution only, with no checkout or ingest.
+    with ThreadPoolExecutor(max_workers=max(1, _tuning().resolve_concurrency)) as pool:
         results = list(pool.map(work, groups.items()))
 
     tot_index = tot_markers = tot_commits = 0

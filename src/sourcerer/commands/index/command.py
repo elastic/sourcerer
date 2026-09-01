@@ -11,10 +11,12 @@
 
 # Standard packages
 import datetime
+import functools
+import queue
 import subprocess
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 
 # Third-party packages
 import click
@@ -38,6 +40,7 @@ from .git import (
     commit_date,
     count_tracked_files,
     default_branch,
+    ensure_worktree,
     list_branch_commits,
     plan_changes,
     prepared_repo,
@@ -112,6 +115,50 @@ def _settle_already_markers(
     for unit, m in already_markers:
         if m.id not in doomed:
             reporter.finish(unit, "skipped")
+
+
+def _new_slot_queue(cap: int) -> "queue.Queue[int]":
+    """A FIFO of worktree slot numbers 0..cap-1 for one repo group, so concurrently-dispatched
+    ref jobs against the same repo each get an exclusive working tree (see git.ensure_worktree).
+    A job returns its slot when done -- success or failure -- so a later job is never starved
+    by an earlier one's error."""
+    q: "queue.Queue[int]" = queue.Queue()
+    for slot in range(cap):
+        q.put(slot)
+    return q
+
+
+def _run_in_slot(slot_queue: "queue.Queue[int]", repo_dir, task) -> None:
+    """Claim a worktree slot from `slot_queue`, materialize it (a no-op for slot 0, which IS
+    `repo_dir`), run `task(worktree_dir)`, then return the slot for reuse regardless of outcome.
+    Runs in a `ref_executor` worker thread; `task` is expected to handle its own errors (see the
+    per-unit try/except in each caller) so this wrapper has nothing to catch itself."""
+    slot = slot_queue.get()
+    try:
+        worktree_dir = ensure_worktree(repo_dir, slot)
+        task(worktree_dir)
+    finally:
+        slot_queue.put(slot)
+
+
+def _drain_futures(futures: list) -> None:
+    """Wait for every ref-job future submitted for one repo group, in submission order. Before
+    waiting on each one, if the run has been aborted (possibly while we were blocked waiting on
+    an earlier future in this same list), cancel every future from here on that hasn't started
+    running yet -- prompt teardown instead of waiting out a whole backlog of already-queued
+    refs. A future already running is unaffected by `cancel()` (it polls `_aborted` itself and
+    stops at its next ref/chunk boundary, per `index_repo`/`index_incremental_branch_in_dir`/the
+    per-entry loop in a coalesced snapshot task); a successfully cancelled one raises
+    CancelledError, which is swallowed since there is nothing to report for a ref that never
+    started."""
+    for i, fut in enumerate(futures):
+        if _aborted.is_set():
+            for later in futures[i:]:
+                later.cancel()
+        try:
+            fut.result()
+        except CancelledError:
+            pass
 
 
 def index_ref_in_dir(
@@ -669,30 +716,39 @@ def run_config(
                     click.echo(f"Error: {message}", err=True)
         # Order the plan lexicographically by (org, repo, ref) regardless of config-file order,
         # so e.g. every elastic/elasticsearch ref precedes elastic/kibana, and a repo's refs go
-        # by name. This drives Phase 2's grouping (dict insertion order) and the concurrent
-        # dispatch order below -- repos are still indexed up to INDEX_REPO_CONCURRENCY at a time,
-        # but they are started in lexicographical order. kind breaks ties between a same-named
-        # branch and tag.
+        # by name. This drives Phase 2's grouping (dict insertion order) and the dispatch order
+        # below -- groups are still started in lexicographical order, though refs within and
+        # across groups now run concurrently up to INDEX_REF_CONCURRENCY (see `ref_executor`).
+        # kind breaks ties between a same-named branch and tag.
         units.sort(key=lambda u: (u.host, u.org, u.repo, u.ref or "", u.kind))
         reporter.set_plan(units)
 
         # Phase 2: index each selected ref, cloning each repo at most once. Group units by
         # (org, repo) -- preserving plan order, and collapsing a repo that appears across
-        # multiple config entries. Each group is independent (its own clone + checkouts), so up
-        # to INDEX_REPO_CONCURRENCY groups run concurrently, overlapping one repo's clone
-        # (network/disk, GIL-releasing) with another's indexing. refresh is disabled across the
-        # whole indexing phase (best-effort) for index-side bulk throughput.
+        # multiple config entries. Each group is independent (its own clone), and each ref
+        # within a group checks out into its own `git worktree` slot (see git.ensure_worktree),
+        # so concurrency now applies at both levels: up to INDEX_REF_CONCURRENCY groups run at
+        # once (overlapping one repo's clone -- network/disk, GIL-releasing -- with another's
+        # indexing), AND up to INDEX_REF_CONCURRENCY refs run at once against any one repo,
+        # via the single run-wide `ref_executor` shared by every group below. One number caps
+        # the total, since a ref job either waits on another repo's clone slot in the outer
+        # pool or a worktree slot in `ref_executor` -- either way it's the same budget. refresh
+        # is disabled across the whole indexing phase (best-effort) for index-side throughput.
         groups: dict[tuple[str, str, str], list[Unit]] = {}
         for unit in units:
             groups.setdefault((unit.host, unit.org, unit.repo), []).append(unit)
 
         failures_lock = threading.Lock()
+        ref_cap = max(1, _tuning().index_ref_concurrency)
 
         # Precompute once: the cutoff datetime before which an "indexing" marker is considered
         # stuck/abandoned and eligible for retry (used by the batch skip check below).
         indexing_cutoff = (now - retry_window) if retry_window is not None else None
 
-        def process_group(item: tuple[tuple[str, str, str], list[Unit]]) -> None:
+        def process_group(
+            item: tuple[tuple[str, str, str], list[Unit]],
+            ref_executor: ThreadPoolExecutor,
+        ) -> None:
             nonlocal failures
             # These run in pool worker threads, which never receive Ctrl-C themselves -- so they
             # bail by polling the abort flag. A group not yet started just returns; one in flight
@@ -721,20 +777,37 @@ def run_config(
                                     detail="another sourcerer run holds this repo's cache lock",
                                 )
                         else:
-                            for unit in incremental_units:
+                            # Each delta unit is a standalone two-phase update against its own
+                            # prior state (unlike the snapshot cohort below, there is no
+                            # cross-unit content reuse to preserve), so dispatch is simple: one
+                            # task per unit, up to `ref_cap` of them running concurrently
+                            # against this repo, each claiming its own worktree slot.
+                            def incremental_task(unit: Unit, worktree_dir) -> None:
+                                nonlocal failures
                                 if _aborted.is_set():
-                                    break
+                                    return
                                 try:
                                     index_incremental_branch_in_dir(
-                                        es, host, org, repo, repo_dir, unit.ref, force, reporter, unit,
+                                        es, host, org, repo, worktree_dir, unit.ref, force,
+                                        reporter, unit,
                                     )
                                 except KeyboardInterrupt:
-                                    break
+                                    pass
                                 except (FileNotFoundError, subprocess.CalledProcessError,
                                         ValueError, *ES_ERRORS) as e:
                                     with failures_lock:
                                         failures += 1
                                     reporter.finish(unit, "error", detail=str(e))
+
+                            slot_queue = _new_slot_queue(ref_cap)
+                            futures = [
+                                ref_executor.submit(
+                                    _run_in_slot, slot_queue, repo_dir,
+                                    functools.partial(incremental_task, unit),
+                                )
+                                for unit in incremental_units
+                            ]
+                            _drain_futures(futures)
                 except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
                     for unit in incremental_units:
                         if unit.status is None:
@@ -1029,23 +1102,50 @@ def run_config(
                     if prospective_to_drop:
                         reporter.drop_units(prospective_to_drop)
 
-                    for unit, branch, tag, commit, at_commit, marker in prospective:
-                        if _aborted.is_set():
-                            break
-                        if marker.id in doomed:
+                    # Group survivors by (commit, index routing): index_ref_in_dir's sibling-
+                    # reuse path (fully_indexed_counts + content_present) lets a branch and a
+                    # same-SHA tag share one ingest, but that optimization only fires when the
+                    # two run one after another against the same working tree. Coalescing them
+                    # into one task -- run sequentially within it, in prospective's original
+                    # (newest-first) order -- preserves that reuse and the single-ingest-per-
+                    # commit invariant the uniqueness gate expects. Different commits still
+                    # dispatch to different tasks/worktree slots and run concurrently.
+                    commit_groups: dict[tuple, list] = {}
+                    for entry in prospective:
+                        _u, _b, _t, _c, _ac, _marker = entry
+                        if _marker.id in doomed:
                             continue
-                        try:
-                            index_ref_in_dir(
-                                es, host, org, repo, repo_dir, branch, tag, commit,
-                                force, reporter, unit, retry_window=retry_window,
-                                at_commit=at_commit,
-                            )
-                        except KeyboardInterrupt:
-                            break  # aborted mid-ref -- stop this group, leave the rest unmarked
-                        except (FileNotFoundError, subprocess.CalledProcessError, ValueError, *ES_ERRORS) as e:
-                            with failures_lock:
-                                failures += 1
-                            reporter.finish(unit, "error", detail=str(e))
+                        key = (_marker.commit, _u.index_level, _u.index_suffix)
+                        commit_groups.setdefault(key, []).append(entry)
+
+                    def snapshot_task(entries: list, worktree_dir) -> None:
+                        nonlocal failures
+                        for unit, branch, tag, commit, at_commit, marker in entries:
+                            if _aborted.is_set():
+                                break  # aborted mid-ref -- stop this task, leave the rest unmarked
+                            try:
+                                index_ref_in_dir(
+                                    es, host, org, repo, worktree_dir, branch, tag, commit,
+                                    force, reporter, unit, retry_window=retry_window,
+                                    at_commit=at_commit,
+                                )
+                            except KeyboardInterrupt:
+                                break
+                            except (FileNotFoundError, subprocess.CalledProcessError,
+                                    ValueError, *ES_ERRORS) as e:
+                                with failures_lock:
+                                    failures += 1
+                                reporter.finish(unit, "error", detail=str(e))
+
+                    slot_queue = _new_slot_queue(ref_cap)
+                    futures = [
+                        ref_executor.submit(
+                            _run_in_slot, slot_queue, repo_dir,
+                            functools.partial(snapshot_task, entries),
+                        )
+                        for entries in commit_groups.values()
+                    ]
+                    _drain_futures(futures)
             except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
                 # Clone failed: fail every still-pending ref of this repo, continue others.
                 # Also finish any already-indexed refs that hadn't been classified yet (they were
@@ -1064,12 +1164,21 @@ def run_config(
                             failures += 1
                         reporter.finish(unit, "error", detail=str(e))
 
-        with bulk_indexing_settings(es), ThreadPoolExecutor(
-            max_workers=max(1, _tuning().index_repo_concurrency)
-        ) as pool:
+        # `ref_executor` is the single pool every group's ref-level dispatch submits into (see
+        # process_group), so INDEX_REF_CONCURRENCY caps the total number of refs indexing at
+        # once across the WHOLE run, not per repo. `pool` is the outer group-level pool: its
+        # workers mostly do clone/fetch + cohort-planning work and then block submitting to
+        # and awaiting `ref_executor`, so sizing it the same is what lets one repo's refs
+        # occupy the whole ref budget when it's the only group active, while still allowing
+        # several repos' clones to proceed in parallel when there are more groups than slots.
+        with bulk_indexing_settings(es), \
+             ThreadPoolExecutor(max_workers=ref_cap) as ref_executor, \
+             ThreadPoolExecutor(max_workers=ref_cap) as pool:
             # Drain the iterator so any unexpected error surfaces; expected per-ref/clone
             # errors are handled inside process_group and counted in `failures`.
-            list(pool.map(process_group, groups.items()))
+            list(pool.map(
+                functools.partial(process_group, ref_executor=ref_executor), groups.items()
+            ))
 
     # Post-index uniqueness gate, one distinct repo at a time, skipped on abort (the
     # plan is incomplete). Every offending repo's ref_key(s) are reported before exiting.

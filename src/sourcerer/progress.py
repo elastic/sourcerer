@@ -305,26 +305,34 @@ class _Dashboard:
         head.append(f"files {files:,} · lines {lines:,} · {elapsed}")
         rows.append(head)
 
-        # Show one active line per concurrently-indexing repo group, in stable
-        # first-seen order (so lines don't jump between refresh ticks). Within
-        # each repo group, pick the most informative unit: prefer one that is
-        # actually checking out or indexing over one that is only cloning or
-        # resolving. This matters because start() marks every ref in a repo as
-        # "resolving" up front (before the clone), and set_stage marks just one
-        # unit as "cloning" while the rest are still "resolving" -- without this
-        # preference the bar would pin on an older ref for the whole clone and
-        # any newer-first indexing that follows.
         working = [u for u in units if u.status is None and u.started_at is not None]
-        by_repo: dict[tuple[str, str, str], list[Unit]] = {}
+
+        # One line per ref actually occupying a worktree slot (checkout/diffing/indexing).
+        # Several refs of the SAME repo can be in these stages at once now (each in its own
+        # `git worktree` slot -- see git.ensure_worktree / command.py's ref_executor), so
+        # unlike the old one-line-per-repo rendering this can show them side by side; the
+        # count is naturally bounded by INDEX_REF_CONCURRENCY, since that's how many refs can
+        # reach these stages at the same time. Sorted by start time for a stable row order
+        # across refresh ticks (rows would otherwise jump around as units list order shifts).
+        active = sorted(
+            (u for u in working if u.stage in ("checkout", "diffing", "indexing")),
+            key=lambda u: u.started_at,
+        )
+        for u in active:
+            rows.append(self._unit_line(u))
+
+        # One line per repo that has nothing of its own actively checking out/indexing yet --
+        # still cloning (the clone is shared across a repo's refs, so name the repo once
+        # rather than an arbitrary ref of it), or every ref of it is still queued as
+        # "resolving" ahead of that clone. Picks the first such unit per repo in plan order.
+        active_repos = {(u.host, u.org, u.repo) for u in active}
+        seen_repos: set[tuple[str, str, str]] = set()
         for u in working:
-            by_repo.setdefault((u.host, u.org, u.repo), []).append(u)
-        for group in by_repo.values():
-            active = (
-                next((u for u in group if u.stage in ("checkout", "diffing", "indexing")), None)
-                or next((u for u in group if u.stage == "cloning"), None)
-                or group[0]
-            )
-            rows.append(self._unit_line(active))
+            key = (u.host, u.org, u.repo)
+            if key in active_repos or key in seen_repos:
+                continue
+            seen_repos.add(key)
+            rows.append(self._unit_line(u))
         return Group(*rows)
 
     def _unit_line(self, u: Unit) -> "Text":

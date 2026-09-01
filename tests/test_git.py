@@ -16,6 +16,7 @@ that transport at all."""
 import datetime
 import os
 import pathlib
+import shutil
 import subprocess
 import time
 
@@ -496,6 +497,138 @@ class TestGitGc:
         not_a_repo = tmp_path / "not_a_repo"
         not_a_repo.mkdir()
         gitmod._git_gc(not_a_repo)  # must not raise
+
+
+def _ls_files(repo_dir: pathlib.Path) -> set[str]:
+    return set(gitmod.iter_tracked_files(repo_dir))
+
+
+def _is_detached(repo_dir: pathlib.Path) -> bool:
+    """True if HEAD is not a symbolic ref (i.e. checked out at a raw commit, not a branch)."""
+    return subprocess.run(
+        ["git", "-C", str(repo_dir), "symbolic-ref", "-q", "HEAD"],
+        capture_output=True,
+    ).returncode != 0
+
+
+def _worktree_count(repo_dir: pathlib.Path) -> int:
+    """Number of *linked* worktrees registered against `repo_dir` (excludes the primary
+    working tree itself, which `git worktree list` always lists first)."""
+    out = subprocess.run(
+        ["git", "-C", str(repo_dir), "worktree", "list", "--porcelain"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    return out.count("\nworktree ")  # first entry has no leading blank line before it
+
+
+class TestWorktrees:
+    """`ensure_worktree` gives each concurrency slot its own working tree over one shared
+    object store, which is what lets multiple refs of the same repo check out and index at
+    once (see command.py's ref-level dispatch)."""
+
+    def test_slot_zero_is_the_repo_dir_itself_and_needs_no_registration(self, tmp_path, local_origin):
+        _origin, url, _work = local_origin
+        dest = tmp_path / "dest"
+        gitmod._git_clone(url, dest)
+
+        assert gitmod.ensure_worktree(dest, 0) == dest
+        assert _worktree_count(dest) == 0  # no linked worktree was registered
+
+    def test_higher_slot_registers_a_linked_worktree(self, tmp_path, local_origin):
+        _origin, url, _work = local_origin
+        dest = tmp_path / "dest"
+        gitmod._git_clone(url, dest)
+
+        slot_dir = gitmod.ensure_worktree(dest, 1)
+
+        assert slot_dir == gitmod.worktree_slot_dir(dest, 1)
+        assert slot_dir != dest
+        assert slot_dir.exists()
+        assert (slot_dir / ".git").is_file()  # a worktree's gitdir is a FILE, not a directory
+        assert _worktree_count(dest) == 1
+
+    def test_reusing_a_slot_does_not_re_register_it(self, tmp_path, local_origin):
+        """Slots persist across runs like the clone itself, so the per-ref cost on a later run
+        is a single `checkout --force`, never a repeated `worktree add`."""
+        _origin, url, _work = local_origin
+        dest = tmp_path / "dest"
+        gitmod._git_clone(url, dest)
+
+        first = gitmod.ensure_worktree(dest, 1)
+        second = gitmod.ensure_worktree(dest, 1)
+
+        assert first == second
+        assert _worktree_count(dest) == 1  # still just one registration, not two
+
+    def test_checkout_branch_in_a_worktree_is_detached_at_the_remote_tip(self, tmp_path, local_origin):
+        _origin, url, work = local_origin
+        dest = tmp_path / "dest"
+        gitmod._git_clone(url, dest)
+        slot_dir = gitmod.ensure_worktree(dest, 1)
+
+        # "main" (not the fixture's default/checked-out branch -- that's "feature", the last
+        # branch checked out in `work` before the bare clone) has no local branch ref anywhere
+        # in `dest` yet, only `origin/main`, so a local ref appearing after this checkout could
+        # only have been created by it.
+        gitmod.checkout_branch(slot_dir, "main")
+
+        assert _is_detached(slot_dir)
+        assert _sha(slot_dir, "HEAD") == _sha(work, "main")
+        # No local "main" branch ref was created in the worktree (git refuses to check out the
+        # same local branch in two worktrees, which is exactly why this must be detached).
+        assert subprocess.run(
+            ["git", "-C", str(slot_dir), "show-ref", "--verify", "-q", "refs/heads/main"],
+            capture_output=True,
+        ).returncode != 0
+
+    def test_two_slots_hold_independent_checkouts_at_the_same_time(self, tmp_path, local_origin):
+        """The whole point: two slots of the SAME clone can sit at two different refs
+        simultaneously, each with its own working tree and index file."""
+        _origin, url, _work = local_origin
+        dest = tmp_path / "dest"
+        gitmod._git_clone(url, dest)
+
+        slot_a = gitmod.ensure_worktree(dest, 1)
+        slot_b = gitmod.ensure_worktree(dest, 2)
+        gitmod.checkout_branch(slot_a, "main")
+        gitmod.checkout_branch(slot_b, "feature")
+
+        # main has only a.txt; feature has a.txt AND b.txt (committed on top of main).
+        assert _ls_files(slot_a) == {"a.txt"}
+        assert _ls_files(slot_b) == {"a.txt", "b.txt"}
+        # Re-checking slot_a afterward proves the two working trees never interfered with
+        # each other -- slot_a is still exactly where it was left.
+        assert _ls_files(slot_a) == {"a.txt"}
+
+    def test_gc_prunes_an_orphaned_worktree_registration(self, tmp_path, local_origin):
+        """A crash between creating a slot directory and using it (or a manual `rm -rf` of a
+        slot, since slots are documented as part of the safe-to-delete cache) leaves git's
+        `.git/worktrees/<name>` registration pointing at a directory that no longer exists.
+        `_git_gc`'s `worktree prune` call reclaims that registration; it must never touch a
+        slot that is still actually present on disk."""
+        _origin, url, _work = local_origin
+        dest = tmp_path / "dest"
+        gitmod._git_clone(url, dest)
+        slot_dir = gitmod.ensure_worktree(dest, 1)
+        assert _worktree_count(dest) == 1
+
+        shutil.rmtree(slot_dir)  # simulate the orphaning crash/manual delete
+        gitmod._git_gc(dest)
+
+        assert _worktree_count(dest) == 0
+
+    def test_gc_does_not_prune_a_live_worktree(self, tmp_path, local_origin):
+        _origin, url, _work = local_origin
+        dest = tmp_path / "dest"
+        gitmod._git_clone(url, dest)
+        slot_dir = gitmod.ensure_worktree(dest, 1)
+        gitmod.checkout_branch(slot_dir, "feature")
+
+        gitmod._git_gc(dest)
+
+        assert _worktree_count(dest) == 1
+        assert slot_dir.exists()
+        assert _ls_files(slot_dir) == {"a.txt", "b.txt"}
 
 
 def _commit_dated(work_dir: pathlib.Path, name: str, content: bytes, message: str, date_iso: str) -> str:
