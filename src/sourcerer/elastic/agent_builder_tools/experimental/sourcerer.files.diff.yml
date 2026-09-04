@@ -1,0 +1,388 @@
+id: sourcerer.files.diff
+type: esql
+description: >-
+  diff the file trees of two git scopes (a = old, b = new) and report which paths were
+  added, deleted or modified, in the style of git diff --name-status (one status letter,
+  a tab, then the path). Set dirs_only=true to roll the result up to directories instead
+  of files. Each side must resolve to exactly one commit; a side whose scoping params
+  match more than one commit contributes NO rows at all rather than merging them, so an
+  over-broad ref shows up as an empty a_ref or b_ref and a diff that reads as a wholly
+  added or wholly deleted tree. Read that as "check your ref scoping", not as a real
+  rewrite.
+tags: []
+configuration:
+  query: |-
+    // Pre-filter over the union of the two sides. This exists only to shrink what
+    // FORK has to fan out - each branch below re-applies its own side's predicate
+    // exactly, so this clause is never load-bearing for correctness.
+    FROM sourcerer-files
+    | WHERE (
+            (git.host LIKE ?git_host_a AND git.org LIKE ?git_org_a AND git.repo LIKE ?git_repo_a)
+            OR
+            (git.host LIKE ?git_host_b AND git.org LIKE ?git_org_b AND git.repo LIKE ?git_repo_b)
+        )
+        AND file.path LIKE ?file_path
+
+    // Two dimensions collapse into four flat branches, because FORK does not nest:
+    //   side   a (old, the "-" side) vs b (new, the "+" side)
+    //   shape  commit snapshots (git.commit, no git.ref) vs
+    //          incremental refs (git.ref, no git.commit)
+    //
+    // Each branch resolves its own side against the small sourcerer-refs index
+    // rather than evaluating wildcards per file against this index, the same way
+    // the rest of the toolset does. The incremental branches additionally
+    // LOOKUP JOIN to recover a citable git.commit, which the snapshot branches
+    // already carry on the content doc.
+    //
+    // side is tagged inside each branch because it cannot be recovered afterwards:
+    // membership in a side is defined by an IN subquery, and a subquery is not
+    // expressible in EVAL.
+    //
+    // ── Cardinality gate ────────────────────────────────────────────────────
+    // Every subquery below ends with a STATS/WHERE/MV_EXPAND that returns its
+    // match ONLY if that side resolved to exactly one distinct commit, and
+    // returns the empty set otherwise. IN (empty set) is false for every row, so
+    // an ambiguous side contributes nothing instead of merging several commits'
+    // file trees under the shared file.path grouping key further down. Without
+    // this gate a wildcard ref (or a wildcard repo) silently diffs one repo's
+    // README.md against another's and reports a status letter for an edit that
+    // never happened.
+    //
+    // The gate counts COMMITS, not refs or patterns, deliberately: a branch and
+    // a tag both sitting on the same commit are not ambiguous and must pass,
+    // while two different repos that each have a "main" are ambiguous and must
+    // fail. Only the commit count distinguishes those two cases correctly - and
+    // because distinct repos do not collide on commit hashes, "exactly one
+    // commit" already implies "exactly one repo", so no separate repo-cardinality
+    // check is needed.
+    | FORK
+        // ── a, commit snapshot ───────────────────────────────────────────────
+        ( WHERE git.commit IS NOT NULL AND git.commit IN (
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host_a
+                  AND git.org LIKE ?git_org_a
+                  AND git.repo LIKE ?git_repo_a
+                  AND git.commit LIKE ?git_commit_a
+                  AND git.ref LIKE ?git_ref_a
+                  AND git.ref_type LIKE ?git_ref_type_a
+              | STATS commits = VALUES(git.commit)
+              | WHERE MV_COUNT(commits) == 1
+              | MV_EXPAND commits
+              | RENAME commits AS git.commit
+              | KEEP git.commit
+              )
+          | EVAL side = "a" )
+
+        // ── a, incremental ref ───────────────────────────────────────────────
+        ( WHERE git.ref_pattern IS NOT NULL AND git.commit IS NULL AND git.ref_pattern IN (
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host_a
+                  AND git.org LIKE ?git_org_a
+                  AND git.repo LIKE ?git_repo_a
+                  AND git.commit LIKE ?git_commit_a
+                  AND (git.ref_pattern LIKE ?git_ref_a OR git.ref LIKE ?git_ref_a)
+                  AND git.ref_type LIKE ?git_ref_type_a
+              | STATS commits = VALUES(git.commit), patterns = VALUES(git.ref_pattern)
+              | WHERE MV_COUNT(commits) == 1
+              | MV_EXPAND patterns
+              | RENAME patterns AS git.ref_pattern
+              | KEEP git.ref_pattern
+              )
+          | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref_pattern, git.ref_type
+          | EVAL side = "a" )
+
+        // ── b, commit snapshot ───────────────────────────────────────────────
+        ( WHERE git.commit IS NOT NULL AND git.commit IN (
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host_b
+                  AND git.org LIKE ?git_org_b
+                  AND git.repo LIKE ?git_repo_b
+                  AND git.commit LIKE ?git_commit_b
+                  AND git.ref LIKE ?git_ref_b
+                  AND git.ref_type LIKE ?git_ref_type_b
+              | STATS commits = VALUES(git.commit)
+              | WHERE MV_COUNT(commits) == 1
+              | MV_EXPAND commits
+              | RENAME commits AS git.commit
+              | KEEP git.commit
+              )
+          | EVAL side = "b" )
+
+        // ── b, incremental ref ───────────────────────────────────────────────
+        ( WHERE git.ref_pattern IS NOT NULL AND git.commit IS NULL AND git.ref_pattern IN (
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host_b
+                  AND git.org LIKE ?git_org_b
+                  AND git.repo LIKE ?git_repo_b
+                  AND git.commit LIKE ?git_commit_b
+                  AND (git.ref_pattern LIKE ?git_ref_b OR git.ref LIKE ?git_ref_b)
+                  AND git.ref_type LIKE ?git_ref_type_b
+              | STATS commits = VALUES(git.commit), patterns = VALUES(git.ref_pattern)
+              | WHERE MV_COUNT(commits) == 1
+              | MV_EXPAND patterns
+              | RENAME patterns AS git.ref_pattern
+              | KEEP git.ref_pattern
+              )
+          | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref_pattern, git.ref_type
+          | EVAL side = "b" )
+
+    // Pivot side from a row value into per-side columns before the first STATS,
+    // rather than concatenating a fingerprint string per row. CASE with no
+    // default branch yields null for the other side, and COUNT/MAX both ignore
+    // nulls, so every aggregate below is a plain scalar reduction - no VALUES,
+    // no per-row string building, over what is potentially the full file list
+    // of both repos.
+    | EVAL _is_a = CASE(side == "a", 1)
+    | EVAL _is_b = CASE(side == "b", 1)
+    | EVAL _a_size = CASE(side == "a", file.size)
+    | EVAL _b_size = CASE(side == "b", file.size)
+    | EVAL _a_target = CASE(side == "a", file.target_path)
+    | EVAL _b_target = CASE(side == "b", file.target_path)
+    | EVAL _a_host = CASE(side == "a", git.host)
+    | EVAL _b_host = CASE(side == "b", git.host)
+    | EVAL _a_org = CASE(side == "a", git.org)
+    | EVAL _b_org = CASE(side == "b", git.org)
+    | EVAL _a_repo = CASE(side == "a", git.repo)
+    | EVAL _b_repo = CASE(side == "b", git.repo)
+    | EVAL _a_commit = CASE(side == "a", git.commit)
+    | EVAL _b_commit = CASE(side == "b", git.commit)
+
+    // Reducing the four ref components with independent MAXes and concatenating
+    // them afterwards is only safe because of the cardinality gate above: each
+    // side that contributes any row at all is now guaranteed to be a single
+    // commit, so there is only ever one combination for MAX to pick.
+    | STATS has_a    = COUNT(_is_a),
+            has_b    = COUNT(_is_b),
+            a_size   = MAX(_a_size),
+            b_size   = MAX(_b_size),
+            a_target = MAX(_a_target),
+            b_target = MAX(_b_target),
+            a_host   = MAX(_a_host),
+            b_host   = MAX(_b_host),
+            a_org    = MAX(_a_org),
+            b_org    = MAX(_b_org),
+            a_repo   = MAX(_a_repo),
+            b_repo   = MAX(_b_repo),
+            a_commit = MAX(_a_commit),
+            b_commit = MAX(_b_commit)
+        BY file.path
+
+    // The change fingerprint, built from already-aggregated per-side metadata.
+    // This is EXACT for added and deleted paths, and for any edit that changes
+    // the file's byte length or its symlink target. It FALSE NEGATIVES on a
+    // same-length edit - renaming a variable to another of equal length, or
+    // flipping a boolean default - and it does not look at file.attributes at
+    // all, so a chmod with no content change is invisible here.
+    //
+    // >>> TODO(fidelity): fold file.attributes into the fingerprint (sorted:
+    // >>> MV_CONCAT(MV_SORT(file.attributes), ",")) if mode-only changes need to
+    // >>> surface as M.
+    // >>> When file.hash (the git blob SHA) is added to sourcerer-files, both gaps
+    // >>> disappear at once - swap this whole fingerprint for file.hash directly.
+    | EVAL _a_fp = CASE(has_a > 0, CONCAT(TO_STRING(a_size), "|", COALESCE(a_target, "")))
+    | EVAL _b_fp = CASE(has_b > 0, CONCAT(TO_STRING(b_size), "|", COALESCE(b_target, "")))
+    | EVAL _status = CASE(
+        has_a == 0, "A",
+        has_b == 0, "D",
+        _a_fp != _b_fp, "M",
+        "=")
+
+    // Drop unchanged files here, before any of the string/path work below runs
+    // on them, unless the caller asked to see them.
+    | WHERE ?show_unchanged == true OR _status != "="
+
+    | EVAL a_ref = CASE(has_a > 0, CONCAT(a_host, "/", a_org, "/", a_repo, "@", a_commit))
+    | EVAL b_ref = CASE(has_b > 0, CONCAT(b_host, "/", b_org, "/", b_repo, "@", b_commit))
+
+    // Glob match (* and **) on file.path, same as grep/cat/read_lines.
+    | EVAL _fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")
+    | EVAL _segs = SPLIT(file.path, "/")
+    | EVAL _file_segs = MV_COUNT(_segs)
+    | EVAL _fp_segs = LENGTH(?file_path) - LENGTH(REPLACE(?file_path, "/", "")) + 1
+    | WHERE _fp_is_recursive OR _file_segs == _fp_segs
+
+    // max_depth prunes the flat (dirs_only=false) listing to files at or above
+    // a given depth, the way `find -maxdepth` does - there is no equivalent flag
+    // on diff or git diff itself. Skipped entirely when dirs_only is true: the
+    // rollup below needs every file underneath a directory to produce a correct
+    // count, and depth there is a rollup boundary, not a prune.
+    | WHERE ?dirs_only == true OR ?max_depth == -1 OR _file_segs <= ?max_depth
+
+    // Directory rollup: same truncate-and-regroup as ls/tree. max_depth doubles
+    // as the rollup depth here (1 = top-level directories), since a dirs_only
+    // diff has no separate use for a prune depth once every file is included.
+    | EVAL _target_depth = CASE(?max_depth == -1, 1, ?max_depth)
+    | EVAL name = CASE(
+        ?dirs_only == false, file.path,
+        _file_segs <= _target_depth, file.path,
+        CONCAT(MV_CONCAT(MV_SLICE(_segs, 0, _target_depth - 1), "/"), "/"))
+
+    | EVAL _a = CASE(_status == "A", 1)
+    | EVAL _d = CASE(_status == "D", 1)
+    | EVAL _m = CASE(_status == "M", 1)
+    | EVAL _u = CASE(_status == "=", 1)
+
+    | STATS added     = COUNT(_a),
+            deleted   = COUNT(_d),
+            modified  = COUNT(_m),
+            unchanged = COUNT(_u),
+            a_size    = SUM(a_size),
+            b_size    = SUM(b_size),
+            _a_refs   = VALUES(a_ref),
+            _b_refs   = VALUES(b_ref)
+        BY name
+
+    // A directory is A only if everything under it is new, D only if everything
+    // under it is gone, and M for any mix. For a single file (dirs_only=false)
+    // this reproduces the per-file _status exactly.
+    | EVAL status = CASE(
+        added > 0 AND deleted == 0 AND modified == 0 AND unchanged == 0, "A",
+        deleted > 0 AND added == 0 AND modified == 0 AND unchanged == 0, "D",
+        added == 0 AND deleted == 0 AND modified == 0, "=",
+        "M")
+    | EVAL a_ref = MV_CONCAT(MV_SORT(_a_refs), ",")
+    | EVAL b_ref = MV_CONCAT(MV_SORT(_b_refs), ",")
+
+    // diff_filter governs the A/D/M rows; show_unchanged governs "=" rows
+    // separately, so the two params never fight over the same row.
+    | WHERE (status == "=" AND ?show_unchanged == true)
+         OR (status != "=" AND LOCATE(?diff_filter, status) > 0)
+
+    // git diff --name-status separates the status letter from the path with a
+    // single tab. Keep that exact byte rather than fixed-width padding, so a
+    // caller that parses this the way it would parse real git output - split on
+    // \t - gets the right answer.
+    | EVAL _line = CONCAT(status, "\t", name)
+
+    // _sortkey (lowercased name) + tab + visible line, same pattern cat/tree use
+    // to keep an internal sort key attached to a row through STATS/MV_CONCAT and
+    // strip it back off afterwards. The strip regex below only removes up to the
+    // FIRST tab on each line, so the tab inside _line (between status and name)
+    // survives untouched.
+    | EVAL pair = CONCAT(TO_LOWER(name), "\t", _line)
+
+    // Collapse every entry into one listing. Deliberately no BY: a_ref is null for
+    // every added path and b_ref is null for every deleted one, so grouping by the
+    // refs would split a single repo's diff into up to three results (all the As,
+    // all the Ds, all the Ms) and would drop the one ref each of those groups
+    // actually had into a null key. VALUES skips nulls, so aggregating the refs
+    // instead reconstructs them correctly from whichever paths carried them.
+    //
+    // One row out is the right shape given the cardinality gate above: each side
+    // is guaranteed to be a single commit, so there is only ever one diff here.
+    | STATS pairs = MV_SORT(VALUES(pair)),
+            a_ref = MV_CONCAT(MV_SORT(VALUES(a_ref)), ","),
+            b_ref = MV_CONCAT(MV_SORT(VALUES(b_ref)), ",")
+
+    // ES|QL refuses to build a single string over 1 MB ("concatenating more than
+    // [1048576] bytes is not supported"), and the MV_CONCAT below builds the whole
+    // listing as one string. Entries here are short (a letter, a tab, a path), so
+    // unlike code.diff only the entry count can realistically reach the ceiling -
+    // a repo-wide diff of a large refactor is the case that does it. No per-entry
+    // cap is needed because a path has a bounded length.
+    //
+    // MV_SLICE on the sorted list keeps the alphabetically earliest entries, so a
+    // truncated listing still reads in order. entries reports the true total, so
+    // compare it against truncated to know whether the listing is complete.
+    | EVAL entries = MV_COUNT(pairs)
+    | EVAL truncated = entries > ?max_entries
+    | EVAL _kept = MV_SLICE(pairs, 0, ?max_entries - 1)
+
+    | EVAL output = SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(_kept, "\n")), "\n[^\n\t]*\t", "\n"), 2)
+
+    // Format the response. The STATS above has no BY, so this is a single row -
+    // there is nothing left to sort, and limit is vestigial (kept only so the
+    // param surface stays stable across the toolset).
+    | KEEP a_ref, b_ref, entries, truncated, output
+    | LIMIT 1
+  params:
+    git_host_a:
+      type: string
+      description: Old side - filter by git host(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_org_a:
+      type: string
+      description: Old side - filter by git org(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_repo_a:
+      type: string
+      description: Old side - filter by git repo(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_commit_a:
+      type: string
+      description: Old side - filter by git commit(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_ref_a:
+      type: string
+      description: Old side - ref name, e.g. "main" or "v8.17.0". Together with the other a-side params this must resolve to exactly one commit; if it matches more than one, the old side contributes no rows at all and every file will report as added.
+      optional: true
+      defaultValue: "*"
+    git_ref_type_a:
+      type: string
+      description: Old side - filter by ref type (can be "branch", "tag", "commit", or any with "*")
+      optional: true
+      defaultValue: "*"
+    git_host_b:
+      type: string
+      description: New side - filter by git host(s) (supports * wildcards). Set only when diffing across hosts; otherwise repeat the a-side value.
+      optional: true
+      defaultValue: "*"
+    git_org_b:
+      type: string
+      description: New side - filter by git org(s) (supports * wildcards). Set only when diffing across orgs, e.g. a fork against its upstream; otherwise repeat the a-side value.
+      optional: true
+      defaultValue: "*"
+    git_repo_b:
+      type: string
+      description: New side - filter by git repo(s) (supports * wildcards). Set only when diffing across repos; otherwise repeat the a-side value.
+      optional: true
+      defaultValue: "*"
+    git_commit_b:
+      type: string
+      description: New side - filter by git commit(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_ref_b:
+      type: string
+      description: New side - ref name, e.g. "main" or "v9.0.0". Together with the other b-side params this must resolve to exactly one commit; if it matches more than one, the new side contributes no rows at all and every file will report as deleted.
+      optional: true
+      defaultValue: "*"
+    git_ref_type_b:
+      type: string
+      description: New side - filter by ref type (can be "branch", "tag", "commit", or any with "*")
+      optional: true
+      defaultValue: "*"
+    file_path:
+      type: string
+      description: Restrict the diff to these path(s) (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml). Filters only; see max_depth for depth-based pruning or rollup.
+      optional: true
+      defaultValue: "**"
+    dirs_only:
+      type: boolean
+      description: Roll the result up from files to directories, reporting per-directory counts of added, deleted and modified files instead of one row per path
+      optional: true
+      defaultValue: false
+    max_depth:
+      type: integer
+      description: When dirs_only is false, prune the listing to files at or above this directory depth (like find -maxdepth; diff and git diff have no equivalent). When dirs_only is true, this is instead the rollup depth (1 = top-level directories). Set to -1 for unlimited depth / default rollup at depth 1.
+      optional: true
+      defaultValue: -1
+    diff_filter:
+      type: string
+      description: Which statuses to return, as an uppercase string of letters - A (added), D (deleted), M (modified). e.g. "AD" for added and deleted only. Does not control unchanged rows; use show_unchanged for those.
+      optional: true
+      defaultValue: "ADM"
+    max_entries:
+      type: integer
+      description: Maximum entries included in each listing, taken in sort order. ES|QL cannot build a string over 1MB and the listing is built as one string, so this caps it; at roughly 100 bytes per entry the default leaves ample headroom. The truncated column reports whether a listing hit this cap and entries reports the true total.
+      optional: true
+      defaultValue: 5000
+    show_unchanged:
+      type: boolean
+      description: Also return paths that did not differ, with status "="
+      optional: true
+      defaultValue: false

@@ -1,0 +1,384 @@
+id: sourcerer.code.diff
+type: esql
+description: >-
+  diff the lines of files between two git scopes (a = old, b = new) and return unified-diff
+  style output, one "-" or "+" line per change. IMPORTANT: this is a MULTISET difference over
+  line content, not a sequence diff - it has no LCS/Myers alignment, so moved code reports as
+  unchanged and there are no context lines (equivalent to git diff -U0). It answers "which
+  lines exist on one side and not the other", which is not the same question as "what edit
+  was made". Output is not a valid patch and cannot be applied. Each side must resolve to
+  exactly one commit; a side whose scoping params match more than one commit contributes NO
+  rows at all rather than merging them, so an over-broad ref shows up as an empty a_ref or
+  b_ref and a diff that reads as a wholly added or wholly deleted file. This is the heaviest
+  tool in the toolset; run sourcerer.files.diff first to find the changed paths, then scope
+  file_path to those.
+tags: []
+configuration:
+  query: |-
+    // Pre-filter over the union of the two sides. This exists only to shrink what
+    // FORK has to fan out - each branch below re-applies its own side's predicate
+    // exactly, so this clause is never load-bearing for correctness.
+    FROM sourcerer-lines
+    | WHERE (
+            (git.host LIKE ?git_host_a AND git.org LIKE ?git_org_a AND git.repo LIKE ?git_repo_a)
+            OR
+            (git.host LIKE ?git_host_b AND git.org LIKE ?git_org_b AND git.repo LIKE ?git_repo_b)
+        )
+        AND file.path LIKE ?file_path
+
+    // Two dimensions collapse into four flat branches, because FORK does not nest:
+    //   side   a (old, the "-" side) vs b (new, the "+" side)
+    //   shape  commit snapshots (git.commit, no git.ref) vs
+    //          incremental refs (git.ref, no git.commit)
+    //
+    // Each branch resolves its own side against the small sourcerer-refs index
+    // rather than evaluating wildcards per line against this index, the same way
+    // the rest of the toolset does. The incremental branches additionally
+    // LOOKUP JOIN to recover a citable git.commit, which the snapshot branches
+    // already carry on the content doc.
+    //
+    // side is tagged inside each branch because it cannot be recovered afterwards:
+    // membership in a side is defined by an IN subquery, and a subquery is not
+    // expressible in EVAL.
+    //
+    // ── Cardinality gate ────────────────────────────────────────────────────
+    // Every subquery below ends with a STATS/WHERE/MV_EXPAND that returns its
+    // match ONLY if that side resolved to exactly one distinct commit, and
+    // returns the empty set otherwise. IN (empty set) is false for every row, so
+    // an ambiguous side contributes nothing instead of merging several commits'
+    // lines under the shared (file.path, line.content) grouping key further down.
+    // This gate is load-bearing here: the VALUES dedupe below is only a correct
+    // occurrence count because line numbers are unique within one file at one
+    // commit, and two commits sharing a path would collide their line numbers and
+    // silently corrupt every multiplicity in that file.
+    //
+    // The gate counts COMMITS, not refs or patterns, deliberately: a branch and
+    // a tag both sitting on the same commit are not ambiguous and must pass,
+    // while two different repos that each have a "main" are ambiguous and must
+    // fail. Only the commit count distinguishes those two cases correctly - and
+    // because distinct repos do not collide on commit hashes, "exactly one
+    // commit" already implies "exactly one repo", so no separate repo-cardinality
+    // check is needed.
+    | FORK
+        // ── a, commit snapshot ───────────────────────────────────────────────
+        ( WHERE git.commit IS NOT NULL AND git.commit IN (
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host_a
+                  AND git.org LIKE ?git_org_a
+                  AND git.repo LIKE ?git_repo_a
+                  AND git.commit LIKE ?git_commit_a
+                  AND git.ref LIKE ?git_ref_a
+                  AND git.ref_type LIKE ?git_ref_type_a
+              | STATS commits = VALUES(git.commit)
+              | WHERE MV_COUNT(commits) == 1
+              | MV_EXPAND commits
+              | RENAME commits AS git.commit
+              | KEEP git.commit
+              )
+          | EVAL side = "a" )
+
+        // ── a, incremental ref ───────────────────────────────────────────────
+        ( WHERE git.ref_pattern IS NOT NULL AND git.commit IS NULL AND git.ref_pattern IN (
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host_a
+                  AND git.org LIKE ?git_org_a
+                  AND git.repo LIKE ?git_repo_a
+                  AND git.commit LIKE ?git_commit_a
+                  AND (git.ref_pattern LIKE ?git_ref_a OR git.ref LIKE ?git_ref_a)
+                  AND git.ref_type LIKE ?git_ref_type_a
+              | STATS commits = VALUES(git.commit), patterns = VALUES(git.ref_pattern)
+              | WHERE MV_COUNT(commits) == 1
+              | MV_EXPAND patterns
+              | RENAME patterns AS git.ref_pattern
+              | KEEP git.ref_pattern
+              )
+          | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref_pattern, git.ref_type
+          | EVAL side = "a" )
+
+        // ── b, commit snapshot ───────────────────────────────────────────────
+        ( WHERE git.commit IS NOT NULL AND git.commit IN (
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host_b
+                  AND git.org LIKE ?git_org_b
+                  AND git.repo LIKE ?git_repo_b
+                  AND git.commit LIKE ?git_commit_b
+                  AND git.ref LIKE ?git_ref_b
+                  AND git.ref_type LIKE ?git_ref_type_b
+              | STATS commits = VALUES(git.commit)
+              | WHERE MV_COUNT(commits) == 1
+              | MV_EXPAND commits
+              | RENAME commits AS git.commit
+              | KEEP git.commit
+              )
+          | EVAL side = "b" )
+
+        // ── b, incremental ref ───────────────────────────────────────────────
+        ( WHERE git.ref_pattern IS NOT NULL AND git.commit IS NULL AND git.ref_pattern IN (
+              FROM sourcerer-refs
+              | WHERE git.host LIKE ?git_host_b
+                  AND git.org LIKE ?git_org_b
+                  AND git.repo LIKE ?git_repo_b
+                  AND git.commit LIKE ?git_commit_b
+                  AND (git.ref_pattern LIKE ?git_ref_b OR git.ref LIKE ?git_ref_b)
+                  AND git.ref_type LIKE ?git_ref_type_b
+              | STATS commits = VALUES(git.commit), patterns = VALUES(git.ref_pattern)
+              | WHERE MV_COUNT(commits) == 1
+              | MV_EXPAND patterns
+              | RENAME patterns AS git.ref_pattern
+              | KEEP git.ref_pattern
+              )
+          | LOOKUP JOIN sourcerer-refs ON git.host, git.org, git.repo, git.ref_pattern, git.ref_type
+          | EVAL side = "b" )
+
+    // Glob match (* and **) on file.path, same as grep/cat/read_lines. Done here,
+    // before the grouping below, because every row it drops is a row the STATS
+    // never has to hash.
+    | EVAL _fp_is_recursive = ?file_path != REPLACE(?file_path, "[*][*]", "")
+    | EVAL _fp_segs = LENGTH(?file_path) - LENGTH(REPLACE(?file_path, "/", "")) + 1
+    | EVAL _file_segs = MV_COUNT(SPLIT(file.path, "/"))
+    | WHERE _fp_is_recursive OR _file_segs == _fp_segs
+
+    // Pivot side from a row value into per-side columns. CASE with no default
+    // branch yields null for the other side, and VALUES skips nulls, so the STATS
+    // below needs no per-aggregate filter.
+    | EVAL _a_line = CASE(side == "a", line.number)
+    | EVAL _b_line = CASE(side == "b", line.number)
+    | EVAL _a_host = CASE(side == "a", git.host)
+    | EVAL _b_host = CASE(side == "b", git.host)
+    | EVAL _a_org = CASE(side == "a", git.org)
+    | EVAL _b_org = CASE(side == "b", git.org)
+    | EVAL _a_repo = CASE(side == "a", git.repo)
+    | EVAL _b_repo = CASE(side == "b", git.repo)
+    | EVAL _a_commit = CASE(side == "a", git.commit)
+    | EVAL _b_commit = CASE(side == "b", git.commit)
+
+    // The core of the diff, and the expensive step: group every line of both
+    // sides by (path, content). a_lines/b_lines are that content's line numbers
+    // on each side, so MV_COUNT gives its multiplicity - which is what keeps a
+    // file with 400 identical "}" lines from cancelling itself out when one of
+    // them is removed.
+    //
+    // VALUES dedupes, which is safe because line numbers are unique within a file
+    // at a single commit - guaranteed by the cardinality gate above. The MAXes on
+    // the ref components are safe for the same reason: a side that contributes
+    // any row at all is one commit, so there is only ever one combination to pick.
+    //
+    // >>> COST: this hashes line.content (a wildcard field) for every line doc on
+    // >>> both sides. It is the reason file_path is required. Benchmark this
+    // >>> grouping before pointing the tool at a whole large repo.
+    | STATS a_lines  = MV_SORT(VALUES(_a_line)),
+            b_lines  = MV_SORT(VALUES(_b_line)),
+            a_host   = MAX(_a_host),
+            b_host   = MAX(_b_host),
+            a_org    = MAX(_a_org),
+            b_org    = MAX(_b_org),
+            a_repo   = MAX(_a_repo),
+            b_repo   = MAX(_b_repo),
+            a_commit = MAX(_a_commit),
+            b_commit = MAX(_b_commit)
+        BY file.path, line.content
+
+    // Multiset difference. A content string present the same number of times on
+    // both sides contributes nothing, however its occurrences moved around the
+    // file - that is exactly the alignment this approach gives up.
+    | EVAL a_n = COALESCE(MV_COUNT(a_lines), 0)
+    | EVAL b_n = COALESCE(MV_COUNT(b_lines), 0)
+    | WHERE a_n != b_n
+
+    // Emit |a_n - b_n| rows for the surplus side, one per physical line, rather
+    // than one row per distinct changed line. Without this a wholly-added file
+    // would report each of its distinct lines once and read nothing like a diff.
+    //
+    // ES|QL has no number range generator, so we cross join against a fixed list
+    // of ordinals and keep only the surplus band [min(a_n,b_n), max(a_n,b_n)) -
+    // the same trick tree.yml uses for path depths. Only groups that already
+    // survived the WHERE above are expanded, so this multiplies changed lines,
+    // not all lines.
+    //
+    // 64 is therefore the largest per-file surplus of one identical line this
+    // tool can render - extend the list if that is ever hit. Which occurrences
+    // land in the surplus band is arbitrary, but the content is identical by
+    // construction, so only the reported line numbers differ.
+    | EVAL _ords = SPLIT("0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63", ",")
+    | MV_EXPAND _ords
+    | EVAL _k = TO_INTEGER(_ords)
+    | WHERE _k >= LEAST(a_n, b_n) AND _k < GREATEST(a_n, b_n)
+
+    // A surplus on the a side is a deletion, a surplus on the b side an addition.
+    // The two sides carry line numbers in different coordinate systems (pre- and
+    // post-edit), so a "-" line is numbered against a and a "+" line against b,
+    // exactly as a real unified diff numbers them.
+    | EVAL _marker = CASE(a_n > b_n, "-", "+")
+    | EVAL _line_no = CASE(
+        a_n > b_n, MV_MIN(MV_SLICE(a_lines, _k, _k)),
+        MV_MIN(MV_SLICE(b_lines, _k, _k)))
+
+    | EVAL a_ref = CASE(a_n > 0, CONCAT(a_host, "/", a_org, "/", a_repo, "@", a_commit))
+    | EVAL b_ref = CASE(b_n > 0, CONCAT(b_host, "/", b_org, "/", b_repo, "@", b_commit))
+
+    // _sortkey: 10-digit zero-padded line number, then one more digit ordering
+    // "-" above "+" at the same position, the way a unified diff does. 11 digits
+    // total, and the marker that follows is never a digit, so the strip regex
+    // below can take exactly [0-9]{11} without reaching into the content.
+    | EVAL _sortkey = CONCAT(
+        RIGHT(CONCAT("0000000000", TO_STRING(_line_no)), 10),
+        CASE(_marker == "-", "0", "1"))
+    // ES|QL refuses to build a single string over 1 MB ("concatenating more than
+    // [1048576] bytes is not supported"), and the MV_CONCAT further down builds
+    // one whole file's diff as one string. Two independent things can blow that
+    // ceiling, so there are two caps:
+    //
+    //   max_line_chars   one pathological line. A minified bundle, a generated
+    //                    parser table or an embedded base64 blob can put a single
+    //                    line over 1 MB by itself, so no line count would save it.
+    //   max_lines        too many ordinary lines. A wholly added or deleted file
+    //                    contributes every one of its lines, so a large new file
+    //                    reaches the ceiling on volume alone.
+    //
+    // Together they bound the blob at roughly max_lines * (max_line_chars + 1)
+    // bytes, so the defaults are chosen to sit under 1 MB with headroom. Raising
+    // either one past that product is what puts the error back.
+    //
+    // Truncating here rather than after the fact matters: the limit is enforced
+    // during concatenation, so a blob that would be too large fails outright
+    // instead of coming back clipped.
+    | EVAL _content = LEFT(line.content, ?max_line_chars)
+    // _display: the visible diff line, optionally grep -n style ("-<line>:<content>")
+    | EVAL _display = CASE(
+        ?show_line_numbers == true, CONCAT(_marker, TO_STRING(_line_no), ":", _content),
+        CONCAT(_marker, _content))
+    // The sort key is still the full 11 digits and is still unique per line, so
+    // two lines that become identical once truncated do not collide and neither
+    // is dropped by the VALUES dedupe below.
+    | EVAL pair = CONCAT(_sortkey, _display)
+
+    | EVAL _plus = CASE(_marker == "+", 1)
+    | EVAL _minus = CASE(_marker == "-", 1)
+
+    // Collapse each file's changed lines into one ordered block. Grouped BY
+    // file.path alone, NOT by a_ref/b_ref: a wholly-added file has a null a_ref
+    // and a wholly-deleted file a null b_ref, so grouping by the refs would split
+    // one repo's diff into up to three separate results. Aggregating the refs
+    // instead keeps one row per file and lets an added file honestly report an
+    // empty a_ref.
+    | STATS pairs     = MV_SORT(VALUES(pair)),
+            additions = COUNT(_plus),
+            deletions = COUNT(_minus),
+            a_ref     = MV_CONCAT(MV_SORT(VALUES(a_ref)), ","),
+            b_ref     = MV_CONCAT(MV_SORT(VALUES(b_ref)), ",")
+        BY file.path
+
+    // Take at most max_lines of the already-sorted list before concatenating.
+    // MV_SLICE on the sorted MV keeps the earliest lines in the file rather than
+    // an arbitrary subset, so a truncated diff still reads top-down.
+    //
+    // additions/deletions are counted before this slice, so they always report
+    // the true totals - compare them against truncated to know whether output
+    // is the whole story.
+    | EVAL truncated = MV_COUNT(pairs) > ?max_lines
+    | EVAL _kept = MV_SLICE(pairs, 0, ?max_lines - 1)
+
+    // Join the lines with newlines, then strip the 11-digit sort key off each
+    // (the visible marker and any show_line_numbers prefix are the 12th+ chars
+    // and are preserved)
+    | EVAL output = CASE(
+        ?stat_only == true, "",
+        SUBSTRING(REPLACE(CONCAT("\n", MV_CONCAT(_kept, "\n")), "\n[0-9]{11}", "\n"), 2))
+
+    // Format the response. Each row is one file's whole diff, so limit is low for
+    // the same reason cat's is - scope file_path narrowly rather than raising it.
+    // additions/deletions are always populated, so stat_only=true turns this into
+    // a git diff --numstat without transferring any content.
+    | SORT file.path
+    | KEEP a_ref, b_ref, file.path, additions, deletions, truncated, output
+    | LIMIT ?limit
+  params:
+    git_host_a:
+      type: string
+      description: Old side - filter by git host(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_org_a:
+      type: string
+      description: Old side - filter by git org(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_repo_a:
+      type: string
+      description: Old side - filter by git repo(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_commit_a:
+      type: string
+      description: Old side - filter by git commit(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_ref_a:
+      type: string
+      description: Old side - ref name, e.g. "main" or "v8.17.0". Together with the other a-side params this must resolve to exactly one commit; if it matches more than one, the old side contributes no rows at all and every line will report as added.
+      optional: true
+      defaultValue: "*"
+    git_ref_type_a:
+      type: string
+      description: Old side - filter by ref type (can be "branch", "tag", "commit", or any with "*")
+      optional: true
+      defaultValue: "*"
+    git_host_b:
+      type: string
+      description: New side - filter by git host(s) (supports * wildcards). Set only when diffing across hosts; otherwise repeat the a-side value.
+      optional: true
+      defaultValue: "*"
+    git_org_b:
+      type: string
+      description: New side - filter by git org(s) (supports * wildcards). Set only when diffing across orgs, e.g. a fork against its upstream; otherwise repeat the a-side value.
+      optional: true
+      defaultValue: "*"
+    git_repo_b:
+      type: string
+      description: New side - filter by git repo(s) (supports * wildcards). Set only when diffing across repos; otherwise repeat the a-side value.
+      optional: true
+      defaultValue: "*"
+    git_commit_b:
+      type: string
+      description: New side - filter by git commit(s) (supports * wildcards)
+      optional: true
+      defaultValue: "*"
+    git_ref_b:
+      type: string
+      description: New side - ref name, e.g. "main" or "v9.0.0". Together with the other b-side params this must resolve to exactly one commit; if it matches more than one, the new side contributes no rows at all and every line will report as deleted.
+      optional: true
+      defaultValue: "*"
+    git_ref_type_b:
+      type: string
+      description: New side - filter by ref type (can be "branch", "tag", "commit", or any with "*")
+      optional: true
+      defaultValue: "*"
+    file_path:
+      type: string
+      description: File path(s) to diff (supports * and ** glob syntax, e.g. src/test, src/*/resources, src/**, src/**/*.xml). Required, because this tool groups every line of both sides by content - pass "**" only when you actually intend to diff the whole repo. Run sourcerer.files.diff first and scope to the paths it reports as changed.
+      optional: false
+    max_lines:
+      type: integer
+      description: Maximum diff lines included in each file's output, taken from the top of the file. ES|QL cannot build a string over 1MB, and a file's whole diff is built as one string, so this and max_line_chars together keep it under that ceiling - their product must stay below ~1000000. The truncated column reports whether a file hit this cap; additions and deletions always report the true totals regardless.
+      optional: true
+      defaultValue: 1000
+    max_line_chars:
+      type: integer
+      description: Maximum characters kept from each diff line's content before it is added to the output; longer lines are cut off at this length. Guards against a single minified, generated or base64 line exceeding the 1MB string ceiling on its own. Real source lines are almost never this long, so this rarely alters anything.
+      optional: true
+      defaultValue: 900
+    show_line_numbers:
+      type: boolean
+      description: Prefix each returned line's content with its 1-indexed line number ("-<line>:<content>" / "+<line>:<content>"). "-" lines are numbered against the old side, "+" lines against the new side.
+      optional: true
+      defaultValue: true
+    stat_only:
+      type: boolean
+      description: Return the additions and deletions counts per file but leave output empty, like git diff --numstat. Useful for sizing a change before pulling its content.
+      optional: true
+      defaultValue: false
+    limit:
+      type: integer
+      description: Maximum number of files to return. Each result is one file's whole diff. Scope file_path narrowly rather than raising this to pull back many files at once.
+      optional: true
+      defaultValue: 50

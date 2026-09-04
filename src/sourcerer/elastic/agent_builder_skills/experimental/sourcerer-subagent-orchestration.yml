@@ -5,7 +5,7 @@
 # Only the Agent-Builder-specific fields below need to be authored here.
 
 # The canonical skill directory (unprefixed); load_skills() uses this to find the SKILL.md.
-skill_dir: subagent-orchestration
+skill_dir: subagent-orchestration/experimental
 
 # auto-generated from SKILL.md frontmatter (prefixed for Agent Builder's global namespace):
 # id: subagent-orchestration
