@@ -4,6 +4,7 @@ sourcerer.commands.index.documents. Uses tmp_path for the small filesystem stat/
 multiprocessing pool."""
 
 # Standard packages
+import json
 import os
 import pathlib
 import stat
@@ -15,6 +16,7 @@ from sourcerer.commands.index.documents import (
     build_file_actions,
     build_file_doc,
     build_incremental_file_doc,
+    decode_source_bytes,
     file_attributes,
     iter_incremental_line_docs,
     iter_line_docs,
@@ -42,6 +44,21 @@ def _set_worker_ctx_incremental(host: str, org: str, repo: str, repo_dir,
         repo_dir=pathlib.Path(repo_dir),
         symlink_paths=symlink_paths, mode="delta",
     )
+
+
+class TestDecodeSourceBytes:
+    def test_valid_utf8_is_preserved_exactly(self):
+        raw = "café\n東京\n🙂".encode("utf-8")
+        assert decode_source_bytes(raw) == "café\n東京\n🙂"
+
+    def test_invalid_legacy_bytes_and_lone_bytes_are_replaced(self):
+        # Latin-1/Windows-1252 byte values and a lone byte are not valid UTF-8. Replace each
+        # invalid byte rather than introducing surrogate code points that JSON cannot encode.
+        raw = b"caf\xe9\nprice \x80\nlone \xff"
+        content = decode_source_bytes(raw)
+        assert content == "caf�\nprice �\nlone �"
+        assert not any(0xD800 <= ord(char) <= 0xDFFF for char in content)
+        content.encode("utf-8")
 
 
 class TestBuildFileDoc:
@@ -329,6 +346,31 @@ class TestBuildFileActions:
         actions = _build_one_file_actions("b.bin")
         assert len(actions) == 1
         assert actions[0]["_index"] == files_index("github", "acme", "widgets")
+
+    def test_invalid_utf8_text_is_not_binary_and_lines_are_normalized(self, tmp_path):
+        (tmp_path / "legacy.txt").write_bytes(b"caf\xe9\nprice \x80\nlone \xff\n")
+        _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path)
+        actions = _build_one_file_actions("legacy.txt")
+
+        assert "binary" not in actions[0]["_source"]["file"].get("attributes", [])
+        line_actions = actions[1:]
+        assert [action["_source"]["line"] for action in line_actions] == [
+            {"number": 1, "content": "caf�"},
+            {"number": 2, "content": "price �"},
+            {"number": 3, "content": "lone �"},
+        ]
+
+    def test_invalid_utf8_actions_are_deterministic_and_json_encodable(self, tmp_path):
+        (tmp_path / "legacy.txt").write_bytes(b"caf\xe9\nlone \xff\n")
+        _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path)
+
+        first = _build_one_file_actions("legacy.txt")
+        second = _build_one_file_actions("legacy.txt")
+
+        assert first == second
+        serialized = json.dumps(first, ensure_ascii=False)
+        serialized.encode("utf-8")
+        assert json.loads(serialized) == first
 
     def test_nul_beyond_8kb_window_is_treated_as_text(self, tmp_path):
         # Binary detection only sniffs the first 8 KB -- a NUL byte after that point should

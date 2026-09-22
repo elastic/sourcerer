@@ -23,6 +23,15 @@ from .git import get_symlink_paths, iter_tracked_files
 from .runtime import _aborted, _tuning
 
 
+def decode_source_bytes(raw: bytes) -> str:
+    """Decode source bytes into Elasticsearch-safe Unicode.
+
+    Valid UTF-8 is preserved exactly. Undecodable input is deterministically replaced with
+    U+FFFD instead of surrogateescape code points, which Elasticsearch rejects as invalid UTF-8.
+    """
+    return raw.decode("utf-8", errors="replace")
+
+
 def file_attributes(
     path: pathlib.Path, *, binary: bool = False, is_symlink: bool | None = None
 ) -> list[str]:
@@ -344,7 +353,7 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
         if abs_path.is_symlink():
             # core.symlinks=true: actual filesystem symlink
             try:
-                git_target_path: str | None = os.readlink(abs_path)
+                git_target_path: str | None = decode_source_bytes(os.readlink(os.fsencode(abs_path)))
             except OSError:
                 git_target_path = None
             try:
@@ -353,9 +362,10 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
                 git_target_size = None
         else:
             # core.symlinks=false: file content IS the target path (no trailing newline)
-            git_target_path = raw.decode("utf-8", errors="surrogateescape") if raw is not None else None
-            if git_target_path is not None:
-                resolved = abs_path.parent / git_target_path
+            raw_target_path = os.fsdecode(raw) if raw is not None else None
+            git_target_path = decode_source_bytes(raw) if raw is not None else None
+            if raw_target_path is not None:
+                resolved = abs_path.parent / raw_target_path
                 try:
                     raw = resolved.read_bytes()
                     git_target_size = resolved.stat().st_size
@@ -384,7 +394,7 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
     actions = [{"_index": f_index, "_id": file_id, "_source": file_doc}]
     if raw is None or binary:
         return actions
-    content = raw.decode("utf-8", errors="surrogateescape")
+    content = decode_source_bytes(raw)
     ff = file_doc["file"]
     if incremental:
         line_docs = iter_incremental_line_docs(
