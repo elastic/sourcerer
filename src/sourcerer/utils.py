@@ -58,6 +58,45 @@ CLIENT_OPTS = {"request_timeout": 120, "max_retries": 3, "retry_on_timeout": Tru
 # by the index and prune commands.
 ES_ERRORS = (ApiError, TransportError, BulkIndexError)
 
+# Cap how many distinct (type, reason) pairs format_es_error renders -- a bulk failure is
+# typically one root cause repeated across every doc in the batch (e.g. a mapping conflict or
+# a Serverless-specific field-count/size limit), so a handful of distinct messages is enough to
+# diagnose it without flooding a single progress line.
+_MAX_DISTINCT_BULK_ERRORS = 3
+
+
+def format_es_error(e: Exception) -> str:
+    """Render an ES_ERRORS exception for display, including per-document detail for
+    BulkIndexError.
+
+    elasticsearch-py raises BulkIndexError with the full per-item bulk response (status code,
+    error type/reason) attached as `.errors`, but the exception's own `str()` is just an item
+    count ("N document(s) failed to index."). Without unpacking `.errors`, that count is all an
+    operator ever sees -- no way to tell a one-off mapping conflict from a systemic
+    Serverless-only limit (e.g. a field-count or mapping-depth cap that stateful ES doesn't
+    enforce by default).
+    """
+    if isinstance(e, BulkIndexError):
+        distinct: dict[tuple[str, str], int] = {}
+        for err in e.errors:
+            item = next(iter(err.values()))
+            info = item.get("error") or {}
+            if isinstance(info, dict):
+                key = (str(info.get("type", "unknown")), str(info.get("reason", "")))
+            else:
+                key = ("unknown", str(info))
+            distinct[key] = distinct.get(key, 0) + 1
+        shown = sorted(distinct.items(), key=lambda kv: -kv[1])[:_MAX_DISTINCT_BULK_ERRORS]
+        details = "; ".join(
+            f"{etype}: {reason} (x{count})" if count > 1 else f"{etype}: {reason}"
+            for (etype, reason), count in shown
+        )
+        omitted = len(distinct) - len(shown)
+        if omitted > 0:
+            details += f"; ...and {omitted} more distinct error(s)"
+        return f"{e.args[0]} {details}" if details else str(e)
+    return str(e)
+
 
 def make_client(
     url: str,

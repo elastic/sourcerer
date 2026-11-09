@@ -27,7 +27,7 @@ from ...planner import Marker, retain_doomed_ids
 from ...progress import ProgressReporter, Unit, make_reporter
 from ...indices import files_index, lines_index
 from ...queries import check_join_uniqueness, fetch_markers
-from ...utils import ES_ERRORS, make_client
+from ...utils import ES_ERRORS, format_es_error, make_client
 from ...version import compile_pattern, match_version
 from ..prune import command as prune_cmd
 from ..prune.execute import delete_commit_from_indices
@@ -551,7 +551,7 @@ def run(
             reporter.finish(unit, "error", detail=str(e))
             sys.exit(1)
         except ES_ERRORS as e:
-            reporter.finish(unit, "error", detail=f"Elasticsearch request failed: {e}")
+            reporter.finish(unit, "error", detail=f"Elasticsearch request failed: {format_es_error(e)}")
             sys.exit(1)
 
     if not _run_uniqueness_gate(es, host, org, repo):
@@ -734,7 +734,8 @@ def run_config(
                                         ValueError, *ES_ERRORS) as e:
                                     with failures_lock:
                                         failures += 1
-                                    reporter.finish(unit, "error", detail=str(e))
+                                    detail = format_es_error(e) if isinstance(e, ES_ERRORS) else str(e)
+                                    reporter.finish(unit, "error", detail=detail)
                 except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
                     for unit in incremental_units:
                         if unit.status is None:
@@ -855,7 +856,7 @@ def run_config(
                     except ES_ERRORS as e:
                         with failures_lock:
                             failures += 1
-                        reporter.finish(unit, "error", detail=str(e))
+                        reporter.finish(unit, "error", detail=format_es_error(e))
                         continue
                     if skip:
                         unit.ref = ref_for_id
@@ -1045,7 +1046,8 @@ def run_config(
                         except (FileNotFoundError, subprocess.CalledProcessError, ValueError, *ES_ERRORS) as e:
                             with failures_lock:
                                 failures += 1
-                            reporter.finish(unit, "error", detail=str(e))
+                            detail = format_es_error(e) if isinstance(e, ES_ERRORS) else str(e)
+                            reporter.finish(unit, "error", detail=detail)
             except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as e:
                 # Clone failed: fail every still-pending ref of this repo, continue others.
                 # Also finish any already-indexed refs that hadn't been classified yet (they were

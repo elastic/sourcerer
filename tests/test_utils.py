@@ -3,8 +3,11 @@
 # Standard packages
 from unittest.mock import MagicMock, patch
 
+# Third-party packages
+from elasticsearch.helpers import BulkIndexError
+
 # App packages
-from sourcerer.utils import make_doc_id, make_client, build_ref_key
+from sourcerer.utils import format_es_error, make_doc_id, make_client, build_ref_key
 
 
 class TestMakeDocId:
@@ -87,3 +90,57 @@ class TestMakeClient:
         mock_es = self._make(insecure=False)
         _, call_kwargs = mock_es.call_args
         assert "verify_certs" not in call_kwargs
+
+
+class TestFormatEsError:
+    def _bulk_error(self, items):
+        """Build a BulkIndexError the way elasticsearch-py's parallel_bulk does: one
+        {op_type: item} dict per failed document, item carrying status + error.type/reason."""
+        errors = [
+            {"index": {"_index": "sourcerer-v3-lines~github~apache~hadoop", "_id": doc_id,
+                       "status": status, "error": {"type": etype, "reason": reason}}}
+            for doc_id, status, etype, reason in items
+        ]
+        return BulkIndexError(f"{len(errors)} document(s) failed to index.", errors)
+
+    def test_non_bulk_error_falls_back_to_str(self):
+        assert format_es_error(ValueError("boom")) == "boom"
+
+    def test_single_distinct_error_included_in_detail(self):
+        e = self._bulk_error([
+            ("a", 400, "mapper_parsing_exception", "failed to parse field [file.content]"),
+        ])
+        detail = format_es_error(e)
+        assert "1 document(s) failed to index." in detail
+        assert "mapper_parsing_exception: failed to parse field [file.content]" in detail
+
+    def test_repeated_identical_error_is_deduped_with_count(self):
+        e = self._bulk_error([
+            ("a", 400, "mapper_parsing_exception", "field too large"),
+            ("b", 400, "mapper_parsing_exception", "field too large"),
+            ("c", 400, "mapper_parsing_exception", "field too large"),
+        ])
+        detail = format_es_error(e)
+        assert "mapper_parsing_exception: field too large (x3)" in detail
+        # Only one distinct message, so no "...and N more" suffix.
+        assert "more distinct error" not in detail
+
+    def test_multiple_distinct_errors_are_each_shown(self):
+        e = self._bulk_error([
+            ("a", 400, "mapper_parsing_exception", "field too large"),
+            ("b", 409, "version_conflict_engine_exception", "current version is higher"),
+        ])
+        detail = format_es_error(e)
+        assert "mapper_parsing_exception: field too large" in detail
+        assert "version_conflict_engine_exception: current version is higher" in detail
+
+    def test_many_distinct_errors_are_capped_with_omitted_count(self):
+        items = [
+            (str(i), 400, f"error_type_{i}", f"reason {i}")
+            for i in range(5)
+        ]
+        e = self._bulk_error(items)
+        detail = format_es_error(e)
+        assert "...and 2 more distinct error(s)" in detail
+        # Most frequent are stable here since each occurs once; just assert the cap held.
+        assert detail.count("error_type_") == 3
