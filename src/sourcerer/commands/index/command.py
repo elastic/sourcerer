@@ -27,7 +27,7 @@ from ...planner import Marker, retain_doomed_ids
 from ...progress import ProgressReporter, Unit, make_reporter
 from ...indices import files_index, lines_index
 from ...queries import check_join_uniqueness, fetch_markers
-from ...utils import ES_ERRORS, format_es_error, make_client
+from ...utils import ES_ERRORS, format_es_error, is_retryable_es_error, make_client, retry_transient
 from ...version import compile_pattern, match_version
 from ..prune import command as prune_cmd
 from ..prune.execute import delete_commit_from_indices
@@ -38,6 +38,7 @@ from .git import (
     commit_date,
     count_tracked_files,
     default_branch,
+    is_retryable_git_error,
     list_branch_commits,
     plan_changes,
     prepared_repo,
@@ -112,6 +113,30 @@ def _settle_already_markers(
     for unit, m in already_markers:
         if m.id not in doomed:
             reporter.finish(unit, "skipped")
+
+
+def _is_retryable_unit_error(e: Exception) -> bool:
+    """True for a transient failure worth retrying a whole unit (ref) over, combining both
+    layers a unit's work can fail at: an Elasticsearch call (is_retryable_es_error -- a TLS/
+    connection blip, or 429/502/503/504 backpressure) or a git network operation
+    (is_retryable_git_error -- checkout faulting in blobs over a dropped connection). Anything
+    else (a bad request, a per-doc BulkIndexError, GitAccessDenied, a local ValueError) is
+    permanent for this run and should fail the unit immediately, not pay a retry's backoff."""
+    return is_retryable_es_error(e) or is_retryable_git_error(e)
+
+
+def _retry_unit(fn, reporter: ProgressReporter, unit: Unit):
+    """Run a per-unit indexing callable with retry-with-backoff on a transient ES/git failure
+    (see _is_retryable_unit_error), surfacing each retry via the reporter so a silently-retried
+    blip is still visible in progress output. The whole callable is the retry unit (checkout,
+    marker writes, bulk ingest) because re-running it is idempotent -- doc ids are deterministic
+    and a half-written bulk is simply re-sent and overwrites by id (see CLAUDE.md's indexing
+    idempotency note). A caller's existing except-ES_ERRORS handler remains the terminal path:
+    once retries are exhausted or a non-retryable error is hit, this re-raises unchanged."""
+    def _on_retry(e: Exception, attempt: int) -> None:
+        reason = format_es_error(e) if isinstance(e, ES_ERRORS) else str(e)
+        reporter.set_stage(unit, f"retrying after transient error (attempt {attempt + 2}): {reason}")
+    return retry_transient(fn, is_retryable=_is_retryable_unit_error, on_retry=_on_retry)
 
 
 def index_ref_in_dir(
@@ -483,9 +508,12 @@ def index_one(
         if repo_dir is None:
             reporter.finish(unit, "locked", detail="another sourcerer run holds this repo's cache lock")
             return
-        index_ref_in_dir(
-            es, host, org, repo, repo_dir, branch, tag, commit, force, reporter, unit,
-            retry_window=retry_window,
+        _retry_unit(
+            lambda: index_ref_in_dir(
+                es, host, org, repo, repo_dir, branch, tag, commit, force, reporter, unit,
+                retry_window=retry_window,
+            ),
+            reporter, unit,
         )
 
 
@@ -725,8 +753,11 @@ def run_config(
                                 if _aborted.is_set():
                                     break
                                 try:
-                                    index_incremental_branch_in_dir(
-                                        es, host, org, repo, repo_dir, unit.ref, force, reporter, unit,
+                                    _retry_unit(
+                                        lambda: index_incremental_branch_in_dir(
+                                            es, host, org, repo, repo_dir, unit.ref, force, reporter, unit,
+                                        ),
+                                        reporter, unit,
                                     )
                                 except KeyboardInterrupt:
                                     break
@@ -1036,10 +1067,13 @@ def run_config(
                         if marker.id in doomed:
                             continue
                         try:
-                            index_ref_in_dir(
-                                es, host, org, repo, repo_dir, branch, tag, commit,
-                                force, reporter, unit, retry_window=retry_window,
-                                at_commit=at_commit,
+                            _retry_unit(
+                                lambda: index_ref_in_dir(
+                                    es, host, org, repo, repo_dir, branch, tag, commit,
+                                    force, reporter, unit, retry_window=retry_window,
+                                    at_commit=at_commit,
+                                ),
+                                reporter, unit,
                             )
                         except KeyboardInterrupt:
                             break  # aborted mid-ref -- stop this group, leave the rest unmarked

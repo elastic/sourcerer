@@ -1,6 +1,9 @@
 # Standard packages
 import hashlib
+import time
 import warnings
+from collections.abc import Callable
+from typing import TypeVar
 
 # Elastic packages
 from elasticsearch import Elasticsearch, ApiError, TransportError
@@ -37,6 +40,39 @@ def build_ref_key(host: str, org: str, repo: str, ref_type: str, ref: str) -> st
     return "~".join((host.lower(), org.lower(), repo.lower(), ref_type, ref))
 
 
+_T = TypeVar("_T")
+
+
+def retry_transient(
+    fn: Callable[[], _T],
+    *,
+    is_retryable: Callable[[Exception], bool],
+    attempts: int = 4,
+    base_delay: float = 1.0,
+    on_retry: Callable[[Exception, int], None] | None = None,
+) -> _T:
+    """Call `fn()`; on an exception for which `is_retryable(e)` is true, sleep
+    `base_delay * 2**attempt` (1s, 2s, 4s, ... by default) and retry, up to `attempts` total
+    calls. Re-raises immediately on a non-retryable exception, or once `attempts` is exhausted.
+
+    Exists because the Elasticsearch client's own retry budget (CLIENT_OPTS below) has no
+    inter-attempt backoff -- with a single-node Cloud/Serverless endpoint its retries fire back
+    to back against the same node, so they exhaust in a fraction of a second and a blip lasting
+    longer than that still surfaces. This helper is the thing that actually rides it out. Mirrors
+    the ad hoc backoff loop that used to live only in commands/index/git.py's list_remote_refs,
+    generalized so both git and Elasticsearch callers share one implementation."""
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt + 1 >= attempts or not is_retryable(e):
+                raise
+            if on_retry is not None:
+                on_retry(e, attempt)
+            time.sleep(base_delay * (2 ** attempt))
+    raise AssertionError("unreachable")  # attempts >= 1 guarantees return or raise above
+
+
 def make_doc_id(*parts: str) -> str:
     """Deterministic, URL-safe document id: BLAKE2b hex of the NUL-joined fields.
 
@@ -57,6 +93,46 @@ CLIENT_OPTS = {"request_timeout": 120, "max_retries": 3, "retry_on_timeout": Tru
 # going and reports that one ref/repo as an error -- rather than crashing the whole run. Shared
 # by the index and prune commands.
 ES_ERRORS = (ApiError, TransportError, BulkIndexError)
+
+# HTTP statuses worth retrying: 429 is backpressure (bulk/search thread pool rejected the
+# request -- a Serverless coordinating node over its indexing-buffer limit is the common case),
+# 502/503/504 are gateway/availability errors from a proxy or an unready node. Not 4xx statuses
+# like 400/401/403/404 -- those are permanent for this request (bad input, auth, missing
+# resource) and retrying would just fail the same way after wasting the backoff delay.
+_RETRYABLE_STATUSES = frozenset({429, 502, 503, 504})
+
+# ES error "type" strings worth retrying even on a status outside _RETRYABLE_STATUSES (defense in
+# depth -- a top-level bulk rejection is already a 429, but a per-request circuit-breaker trip can
+# in principle surface differently). elasticsearch-py sets ApiError.message/.error to
+# resp_body["error"]["type"] when the response body is the standard ES error shape (see
+# elasticsearch._sync.client._base's error handling), so this matches on exactly the string the
+# real "es_rejected_execution_exception" failure (Serverless coordinating-node backpressure) uses.
+_RETRYABLE_ES_ERROR_TYPES = frozenset({"es_rejected_execution_exception", "circuit_breaking_exception"})
+
+
+def is_retryable_es_error(e: Exception) -> bool:
+    """True if `e` (one of ES_ERRORS) is a transient failure worth retrying with backoff rather
+    than failing the current ref/repo immediately.
+
+    elastic_transport.ApiError and TransportError are siblings (both subclass Exception
+    directly), not parent/child, so they're checked as two separate cases:
+
+    Retried: ApiError whose status or ES error type marks it as backpressure/availability
+    (_RETRYABLE_STATUSES / _RETRYABLE_ES_ERROR_TYPES). Also retried: any other TransportError --
+    connection-level failures (ConnectionError, TlsError, ConnectionTimeout) where no HTTP
+    response was ever received, e.g. a dropped TLS handshake mid-transfer.
+
+    Not retried: any other ApiError (a 4xx request error -- bad mapping, illegal argument --
+    will fail the same way every time), and BulkIndexError (a per-document rejection, e.g. a
+    document_parsing_exception from invalid content, which no amount of retrying fixes)."""
+    if isinstance(e, ApiError):
+        if e.status_code in _RETRYABLE_STATUSES:
+            return True
+        return e.error in _RETRYABLE_ES_ERROR_TYPES
+    if isinstance(e, TransportError):
+        return True
+    return False
+
 
 # Cap how many distinct (type, reason) pairs format_es_error renders -- a bulk failure is
 # typically one root cause repeated across every doc in the batch (e.g. a mapping conflict or
