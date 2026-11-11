@@ -122,15 +122,25 @@ def is_retryable_es_error(e: Exception) -> bool:
     connection-level failures (ConnectionError, TlsError, ConnectionTimeout) where no HTTP
     response was ever received, e.g. a dropped TLS handshake mid-transfer.
 
-    Not retried: any other ApiError (a 4xx request error -- bad mapping, illegal argument --
-    will fail the same way every time), and BulkIndexError (a per-document rejection, e.g. a
-    document_parsing_exception from invalid content, which no amount of retrying fixes)."""
+    Not retried: other ApiError values and BulkIndexError containing permanent per-document
+    failures (for example document_parsing_exception). A bulk failure is retryable only when
+    every failed item has a retryable status or ES error type."""
     if isinstance(e, ApiError):
         if e.status_code in _RETRYABLE_STATUSES:
             return True
         return e.error in _RETRYABLE_ES_ERROR_TYPES
     if isinstance(e, TransportError):
         return True
+    if isinstance(e, BulkIndexError):
+        return bool(e.errors) and all(
+            item.get("status") in _RETRYABLE_STATUSES
+            or (
+                isinstance(item.get("error"), dict)
+                and item["error"].get("type") in _RETRYABLE_ES_ERROR_TYPES
+            )
+            for error in e.errors
+            for item in error.values()
+        )
     return False
 
 
