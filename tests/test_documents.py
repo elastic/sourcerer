@@ -382,6 +382,20 @@ class TestBuildFileActions:
         line_actions = [a for a in actions if a["_index"] == lines_index("github", "acme", "widgets")]
         assert len(line_actions) >= 1
 
+    def test_valid_utf8_multibyte_char_straddling_8kb_boundary_is_not_binary(self, tmp_path):
+        # A legitimate UTF-8 file can have a multibyte character's bytes split across the
+        # 8192-byte sniff window; binary detection is NUL-sniff only, so this is never
+        # misclassified regardless of where the multibyte sequence falls.
+        prefix = "a" * 8191
+        multibyte_char = "é"  # 2-byte UTF-8 sequence (0xC3 0xA9), straddles the boundary
+        content = prefix + multibyte_char + "\nsecond line\n"
+        (tmp_path / "d.txt").write_text(content, encoding="utf-8")
+        _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path)
+        actions = _build_one_file_actions("d.txt")
+        assert actions[0]["_source"]["file"].get("attributes") is None
+        line_actions = [a for a in actions if a["_index"] == lines_index("github", "acme", "widgets")]
+        assert len(line_actions) == 2
+
     def test_binary_file_has_binary_attribute(self, tmp_path):
         (tmp_path / "b.bin").write_bytes(b"\x00\x01\x02binarydata")
         _set_worker_ctx("github", "acme", "widgets", "deadbeef", tmp_path)

@@ -324,7 +324,9 @@ def build_file_actions(rel_paths: list[str]) -> list[dict]:
 def _build_one_file_actions(rel_path: str) -> list[dict]:
     """Build the bulk actions for one file: its file-metadata doc plus a line doc per line of
     text. Runs in a worker process (see _init_worker for the shared context). Mirrors the old
-    inline generator -- a binary file or one that can't be read yields only its file doc."""
+    inline generator -- a binary file or one that can't be read yields only its file doc. Text
+    files with invalid UTF-8 are not reclassified as binary; decode_source_bytes normalizes
+    undecodable bytes to U+FFFD so content is always valid, JSON-safe Unicode."""
     ctx = _WORKER_CTX
     incremental = ctx.get("mode", "snapshot") == "delta"
     host, org, repo = ctx["host"], ctx["org"], ctx["repo"]
@@ -337,9 +339,8 @@ def _build_one_file_actions(rel_path: str) -> list[dict]:
     # never includes the commit for this path since ref-keyed docs don't carry git.commit.
     f_index = files_index(host, org, repo, None if incremental else commit_sha, level, suffix)
     l_index = lines_index(host, org, repo, None if incremental else commit_sha, level, suffix)
-    # Read the file's bytes once: detect binary from the first 8 KB, and (if text) decode the
-    # same buffer for line splitting -- no second read of the file. Binary flag must be computed
-    # before build_file_doc so it reaches file.attributes.
+    # Read the file's bytes once: a cheap NUL-byte sniff of the first 8 KB detects binary files
+    # (good enough since text files with embedded NULs are vanishingly rare in practice).
     try:
         raw = abs_path.read_bytes()
     except OSError:

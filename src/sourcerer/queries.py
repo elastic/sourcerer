@@ -17,6 +17,7 @@ from elasticsearch.helpers import scan
 # App packages
 from .indices import FILES_ALIAS, FILES_INDEX_PREFIX, LINES_ALIAS, LINES_INDEX_PREFIX, REFS_ALIAS, files_index, lines_index
 from .planner import Marker, parse_index_name
+from .utils import is_serverless
 
 _COMPOSITE_PAGE_SIZE = 1000
 
@@ -163,13 +164,18 @@ def empty_content_indices(es: Elasticsearch, index_names: list[str]) -> list[str
 
     Doc counts for every candidate are fetched in ONE es.indices.stats call rather than one
     es.count per index -- the N->1 batching this function exists to do. Falls back to the
-    original per-index es.count loop if the batched call 404s (a race where an index vanished
-    between `index_names` being listed and this call -- e.g. a concurrent prune run's own
-    orphan sweep -- since indices.stats, unlike count/search, has no per-request
-    ignore_unavailable to skip just the missing name)."""
+    per-index es.count loop (_empty_content_indices_fallback) in two cases: on Elastic Cloud
+    Serverless, where `_stats` is a stateful-only API rejected with a 410 api_not_available_exception
+    (so the batched call is skipped up front via is_serverless rather than issuing a
+    guaranteed-to-fail request), and if the batched call 404s on a stateful cluster (a race
+    where an index vanished between `index_names` being listed and this call -- e.g. a
+    concurrent prune run's own orphan sweep -- since indices.stats, unlike count/search, has
+    no per-request ignore_unavailable to skip just the missing name)."""
     candidates = [name for name in index_names if parse_index_name(name) is not None]
     if not candidates:
         return []
+    if is_serverless(es):
+        return _empty_content_indices_fallback(es, candidates)
     candidate_set = set(candidates)
     # Use wildcard patterns instead of a comma-joined list of all candidates to avoid
     # exceeding Elasticsearch's 4096-byte HTTP line limit when there are many indices.
@@ -191,9 +197,10 @@ def empty_content_indices(es: Elasticsearch, index_names: list[str]) -> list[str
 
 
 def _empty_content_indices_fallback(es: Elasticsearch, candidates: list[str]) -> list[str]:
-    """Per-index es.count fallback for empty_content_indices, used only when the batched
-    es.indices.stats call 404s. Reproduces the pre-batching behaviour exactly: an index that
-    vanished between listing and counting is simply skipped."""
+    """Per-index es.count fallback for empty_content_indices, used on Elastic Cloud Serverless
+    (where `_stats` is unavailable) and when the batched es.indices.stats call 404s on a
+    stateful cluster. Reproduces the pre-batching behaviour exactly: an index that vanished
+    between listing and counting is simply skipped."""
     out: list[str] = []
     for name in candidates:
         try:

@@ -25,6 +25,7 @@ import pytest
 # App packages
 from sourcerer.commands.index import git as gitmod
 from sourcerer.commands.index import runtime as runtimemod
+from sourcerer import utils as utilsmod
 
 
 def _run(*args: str, cwd: pathlib.Path | None = None) -> None:
@@ -267,7 +268,7 @@ class TestAccessDenied:
     def test_ls_remote_denial_is_not_retried(self, git_shim, monkeypatch):
         """The 3-attempt backoff exists for a flaky network; a refusal will be refused again."""
         git_shim.install(DENY)
-        monkeypatch.setattr(gitmod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(utilsmod.time, "sleep", lambda *_: None)
 
         with pytest.raises(gitmod.GitAccessDenied):
             gitmod.list_remote_refs("https://example.invalid/x.git", "heads")
@@ -275,7 +276,7 @@ class TestAccessDenied:
 
     def test_ls_remote_transient_failure_still_retries(self, git_shim, monkeypatch):
         git_shim.install('echo "fatal: unable to access: Could not resolve host: x" >&2; exit 128')
-        monkeypatch.setattr(gitmod.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(utilsmod.time, "sleep", lambda *_: None)
 
         assert gitmod.list_remote_refs("https://example.invalid/x.git", "heads") is None
         assert git_shim.call_count == 3
@@ -301,6 +302,51 @@ class TestAccessDenied:
                 pass
         assert (repo_dir / ".git").exists()
         assert _sha(repo_dir, "HEAD") == head_before
+
+
+class TestIsRetryableGitError:
+    """is_retryable_git_error classifies a plain GitError's stderr as transient-network or not;
+    GitAccessDenied and GitTimeout are never retried regardless of message."""
+
+    def _git_error(self, stderr: str) -> gitmod.GitError:
+        return gitmod.GitError(128, ["git", "fetch"], output=None, stderr=stderr)
+
+    @pytest.mark.parametrize("stderr", [
+        "fatal: unable to access 'https://x/': SSL_ERROR_SYSCALL in connection to x:443",
+        "fatal: the remote end hung up unexpectedly",
+        "error: RPC failed; curl 56 OpenSSL SSL_read: SSL_ERROR_SYSCALL, errno 54",
+        "fatal: early EOF",
+        "fatal: unexpected EOF while reading",
+        "fatal: Could not resolve host: github.com",
+        "ssh: connect to host github.com port 22: Connection refused",
+        "fatal: unable to access 'https://x/': Connection timed out",
+        "TLS error caused by: SSLError(EOF occurred in violation of protocol)",
+    ])
+    def test_transient_network_messages_are_retryable(self, stderr):
+        assert gitmod.is_retryable_git_error(self._git_error(stderr)) is True
+
+    @pytest.mark.parametrize("stderr", [
+        "fatal: couldn't find remote ref refs/heads/does-not-exist",
+        "fatal: bad object deadbeef",
+        "error: Your local changes would be overwritten by checkout",
+        "fatal: not a git repository",
+    ])
+    def test_permanent_messages_are_not_retryable(self, stderr):
+        assert gitmod.is_retryable_git_error(self._git_error(stderr)) is False
+
+    def test_access_denied_is_never_retried_even_with_transient_wording(self):
+        # Defense in depth: GitAccessDenied is a permanent classification regardless of stderr.
+        e = gitmod.GitAccessDenied(128, ["git", "fetch"], output=None,
+                                   stderr="fatal: Authentication failed (Connection reset)")
+        assert gitmod.is_retryable_git_error(e) is False
+
+    def test_timeout_is_never_retried(self):
+        e = gitmod.GitTimeout(124, ["git", "fetch"], output=None,
+                              stderr="git fetch timed out after 30m")
+        assert gitmod.is_retryable_git_error(e) is False
+
+    def test_non_git_exception_is_not_retryable(self):
+        assert gitmod.is_retryable_git_error(ValueError("not a git error")) is False
 
 
 class TestNonInteractiveEnvironment:

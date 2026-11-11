@@ -17,12 +17,12 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 # App packages
 from ...queries import _parse_dt
+from ...utils import retry_transient
 from .runtime import git_metadata_timeout, git_timeout
 
 
@@ -74,6 +74,35 @@ _ACCESS_DENIED_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Transient network failures, matched case-insensitively against stderr: a dropped TLS handshake
+# or connection reset/timeout mid-transfer. These are the git-side counterpart of the
+# TlsError/ConnectionError case in utils.is_retryable_es_error -- same failure mode (a blip in the
+# network path), different layer. Worth retrying with backoff rather than failing the ref/repo
+# outright. Deliberately narrow (not a catch-all for every non-zero exit) so a genuine, permanent
+# git error -- a bad ref, a merge conflict, a missing object -- fails fast instead of needlessly
+# paying 3 backoff delays first.
+_TRANSIENT_NETWORK_RE = re.compile(
+    "|".join((
+        r"ssl[_ ]error",
+        r"\btls\b",
+        r"early eof",
+        r"unexpected eof",
+        r"eof occurred",
+        r"connection reset",
+        r"connection refused",
+        r"connection timed out",
+        r"could not resolve host",
+        r"could not connect to",
+        r"the remote end hung up unexpectedly",
+        r"rpc failed",
+        r"unable to access",
+        r"gnutls_handshake\(\) failed",
+        r"recv failure",
+        r"send failure",
+    )),
+    re.IGNORECASE,
+)
+
 # Config injected into commands that talk to a remote: abort a transfer that has delivered less
 # than 1 KB/s for a minute rather than leaving it to sit until the (much longer) full timeout.
 # HTTP transports only; ssh relies on the timeout.
@@ -93,6 +122,20 @@ def _stderr_tail(raw: str | bytes | None, lines: int = 3) -> str:
     there, after any progress noise."""
     tail = [line.strip() for line in _as_text(raw).splitlines() if line.strip()]
     return "; ".join(tail[-lines:])
+
+
+def is_retryable_git_error(e: Exception) -> bool:
+    """True if `e` is a transient git network failure worth retrying with backoff.
+
+    Only a plain GitError (not GitAccessDenied, which is permanent for this run by definition --
+    see its docstring -- and not GitTimeout, which already represents a full --git-timeout budget
+    spent; retrying would just pay that timeout again) whose stderr matches a known transient
+    pattern is retried. Any other git failure (bad ref, local repo corruption reported as a
+    generic error, etc.) is not -- it would fail identically on retry, so failing fast is
+    correct."""
+    if not isinstance(e, GitError) or isinstance(e, (GitAccessDenied, GitTimeout)):
+        return False
+    return bool(_TRANSIENT_NETWORK_RE.search(_as_text(e.stderr)))
 
 
 def _git_env() -> dict[str, str]:
@@ -218,14 +261,17 @@ def _git_clone(url: str, repo_dir: pathlib.Path) -> None:
     reachable and checkoutable), but blobs are not downloaded up front -- git faults them in
     on demand the first time a commit touching them is checked out.
 
-    A timed-out clone was killed mid-write and had no chance to clean up after itself, so the
-    partial directory is removed here -- otherwise the next run would find a dir that is neither
-    absent nor a valid clone."""
-    try:
-        _run_git(["clone", "--filter=blob:none", url, str(repo_dir)], network=True)
-    except GitTimeout:
-        shutil.rmtree(repo_dir, ignore_errors=True)
-        raise
+    A timed-out or transient-network-failed clone was killed/aborted mid-write and had no chance
+    to clean up after itself, so the partial directory is removed before giving up (GitTimeout) or
+    before each retry (a transient failure, see is_retryable_git_error) -- otherwise the next
+    attempt would find a dir that is neither absent nor a valid clone."""
+    def _attempt() -> None:
+        try:
+            _run_git(["clone", "--filter=blob:none", url, str(repo_dir)], network=True)
+        except GitError:
+            shutil.rmtree(repo_dir, ignore_errors=True)
+            raise
+    retry_transient(_attempt, is_retryable=is_retryable_git_error)
 
 
 def _git_gc(repo_dir: pathlib.Path) -> None:
@@ -284,9 +330,12 @@ def clone_repo(
 
     if _is_clone_of(repo_dir, url):
         try:
-            _run_git(
-                ["-C", str(repo_dir), "fetch", "--prune", "--prune-tags", "--tags", "origin"],
-                network=True,
+            retry_transient(
+                lambda: _run_git(
+                    ["-C", str(repo_dir), "fetch", "--prune", "--prune-tags", "--tags", "origin"],
+                    network=True,
+                ),
+                is_retryable=is_retryable_git_error,
             )
             _git_gc(repo_dir)
         except (GitAccessDenied, GitTimeout):
@@ -294,7 +343,8 @@ def clone_repo(
             # (or time out) all over again, doubling the wall clock for no chance of recovery.
             raise
         except subprocess.CalledProcessError:
-            # Fetch failed (e.g. a corrupt object store) -- wipe and re-clone once.
+            # Fetch failed (e.g. a corrupt object store) and retry_transient already tried the
+            # transient-network case -- wipe and re-clone once.
             shutil.rmtree(repo_dir, ignore_errors=True)
             _git_clone(url, repo_dir)
     else:
@@ -340,8 +390,12 @@ def checkout_ref(repo_dir: pathlib.Path, ref: str) -> None:
     fetched remote tip rather than a (possibly stale) local branch.
 
     Counts as a network command: on a blobless clone, checkout faults this ref's blobs in from
-    the promisor remote."""
-    _run_git(["-C", str(repo_dir), "checkout", "--force", ref], network=True)
+    the promisor remote -- retried on a transient failure (e.g. a dropped TLS connection
+    mid-blob-fetch), since the checkout itself is otherwise idempotent to re-run."""
+    retry_transient(
+        lambda: _run_git(["-C", str(repo_dir), "checkout", "--force", ref], network=True),
+        is_retryable=is_retryable_git_error,
+    )
 
 
 def checkout_branch(repo_dir: pathlib.Path, branch: str) -> None:
@@ -350,10 +404,14 @@ def checkout_branch(repo_dir: pathlib.Path, branch: str) -> None:
     plain `git checkout <branch>` would land on the *stale* local branch, since `git fetch`
     advances `origin/<branch>` but not the local branch. `--force` discards leftover working-tree
     state. Works the same on a fresh clone (origin/<branch> already exists). Network: blobs
-    fault in from the promisor remote (see checkout_ref)."""
-    _run_git(
-        ["-C", str(repo_dir), "checkout", "--force", "-B", branch, f"origin/{branch}"],
-        network=True,
+    fault in from the promisor remote (see checkout_ref), retried the same way on a transient
+    failure."""
+    retry_transient(
+        lambda: _run_git(
+            ["-C", str(repo_dir), "checkout", "--force", "-B", branch, f"origin/{branch}"],
+            network=True,
+        ),
+        is_retryable=is_retryable_git_error,
     )
 
 
@@ -594,17 +652,24 @@ def _ls_remote(url: str, *patterns: str, flags: tuple[str, ...] = ()) -> str | N
     """
     Run `git ls-remote` against a remote without cloning. The URL must precede the ref
     patterns (HEAD/refs/...), so flags go before the URL and patterns after it. Returns
-    stdout, or None on a transient failure.
+    stdout, or None on a (non-retryable, or retry-exhausted) failure.
 
-    GitAccessDenied is *not* swallowed: a remote that refuses us will refuse us again, so it
-    propagates instead of masquerading as a transient failure that callers retry and then
-    silently skip. Metadata-only, so it uses the shorter metadata timeout.
+    A transient network failure (is_retryable_git_error) is retried with backoff in-place, so
+    every caller benefits uniformly -- this used to be duplicated as an inline 3-attempt loop in
+    list_remote_refs only, leaving resolve_remote's ls-remote calls one-shot. GitAccessDenied is
+    *not* swallowed or retried: a remote that refuses us will refuse us again, so it propagates
+    instead of masquerading as a transient failure. Metadata-only, so it uses the shorter
+    metadata timeout.
     """
     try:
-        result = _run_git(
-            ["ls-remote", *flags, url, *patterns],
-            network=True,
-            timeout=git_metadata_timeout(),
+        result = retry_transient(
+            lambda: _run_git(
+                ["ls-remote", *flags, url, *patterns],
+                network=True,
+                timeout=git_metadata_timeout(),
+            ),
+            is_retryable=is_retryable_git_error,
+            attempts=3,  # matches the original inline loop's 3-attempt, 1s/2s-backoff budget
         )
     except GitAccessDenied:
         raise
@@ -677,17 +742,12 @@ def list_remote_refs(url: str, kind: str) -> dict[str, str] | None:
     (suffixed with `^{}`). The peeled line wins so the SHA matches `git rev-parse HEAD` after
     checkout, matching the behaviour of `resolve_remote`.
 
-    Returns None on ls-remote failure after retries; returns {} when the remote has no refs of
-    that kind. A GitAccessDenied propagates out of the retry loop on the first attempt -- there
-    is nothing to back off for when the remote has refused us.
+    Returns None on ls-remote failure after retries (the retry-with-backoff is now inside
+    _ls_remote itself, shared with every other caller); returns {} when the remote has no refs of
+    that kind. A GitAccessDenied propagates immediately -- there is nothing to back off for when
+    the remote has refused us.
     """
-    out = None
-    for attempt in range(3):
-        out = _ls_remote(url, flags=(f"--{kind}",))
-        if out is not None:
-            break
-        if attempt < 2:
-            time.sleep(2 ** attempt)  # 1s, 2s backoff before retry
+    out = _ls_remote(url, flags=(f"--{kind}",))
     if out is None:
         return None
     prefix = f"refs/{kind}/"

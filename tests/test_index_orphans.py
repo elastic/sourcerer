@@ -233,6 +233,9 @@ class TestEmptyContentIndices:
         es.indices.stats.return_value = {
             "indices": {name: {"total": {"docs": {"count": count}}} for name, count in counts.items()}
         }
+        # Pin is_serverless's cached result to False so these stateful-path tests don't
+        # depend on (or trip) the MagicMock-returned es.info() probe.
+        es._sourcerer_serverless = False
         return es
 
     def test_returns_only_zero_doc_content_indices(self):
@@ -268,6 +271,7 @@ class TestEmptyContentIndices:
         # A race (an index vanished between listing and this call) 404s the whole batched
         # request -- fall back to the original per-index es.count loop.
         es = MagicMock()
+        es._sourcerer_serverless = False
         es.indices.stats.side_effect = _not_found()
 
         def fake_count(index):
@@ -281,3 +285,27 @@ class TestEmptyContentIndices:
             es, ["sourcerer-v3-files~github~acme~widgets", "sourcerer-v3-files~github~acme~gone"]
         )
         assert result == ["sourcerer-v3-files~github~acme~widgets"]
+
+    def test_serverless_skips_stats_and_uses_per_index_count(self):
+        # On Elastic Cloud Serverless, `_stats` is a stateful-only API that 410s --
+        # is_serverless gates the batched call so it's never issued at all.
+        es = MagicMock()
+        es._sourcerer_serverless = True
+
+        def fake_count(index):
+            counts = {
+                "sourcerer-v3-files~github~acme~widgets": 0,
+                "sourcerer-v3-files~github~acme~widgets^deploy": 5,
+            }
+            return {"count": counts[index]}
+
+        es.count.side_effect = fake_count
+        result = empty_content_indices(
+            es,
+            [
+                "sourcerer-v3-files~github~acme~widgets",
+                "sourcerer-v3-files~github~acme~widgets^deploy",
+            ],
+        )
+        assert result == ["sourcerer-v3-files~github~acme~widgets"]
+        es.indices.stats.assert_not_called()
