@@ -5,12 +5,13 @@ carry it into citation output. Parses the YAML and inspects the ESQL query text;
 # Standard packages
 import importlib.resources as resources
 import re
+from unittest.mock import MagicMock
 
 # Third-party packages
 import pytest
 import yaml
 
-from sourcerer.commands.setup.command import strip_esql_comments
+from sourcerer.commands.setup.command import load_agent_builder_tools, strip_esql_comments
 
 _TOOLS_DIR = resources.files("sourcerer") / "elastic" / "agent_builder_tools"
 
@@ -39,6 +40,29 @@ def test_git_host_filtered_before_git_org():
         # git.host must be filtered before git.org in the WHERE clause
         assert query.index("git.host") < query.index("git.org"), \
             f"{tid} filters git.org before git.host"
+
+
+@pytest.mark.parametrize("existing_status", [200, 404])
+def test_code_search_installs_optional_repository_exclusion(tmp_path, existing_status):
+    source = _TOOLS_DIR / "sourcerer.code.search.yml"
+    (tmp_path / source.name).write_text(source.read_text())
+    session = MagicMock()
+    session.get.return_value.status_code = existing_status
+
+    assert load_agent_builder_tools(session, "https://kibana.example", tmp_path) == [
+        "sourcerer.code.search",
+    ]
+
+    request = session.put if existing_status == 200 else session.post
+    configuration = request.call_args.kwargs["json"]["configuration"]
+    for param in ("excluded_host", "excluded_org", "excluded_repo"):
+        definition = configuration["params"][param]
+        assert definition["type"] == "string"
+        assert definition["optional"] is True
+        assert definition["defaultValue"] == ""
+    # Every named query parameter must reach Agent Builder with its definition,
+    # including empty defaults for callers that do not request exclusion.
+    assert set(re.findall(r"\?(\w+)", configuration["query"])) <= configuration["params"].keys()
 
 
 _CONTENT_TOOL_IDS = (

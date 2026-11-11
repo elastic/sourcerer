@@ -9,6 +9,11 @@ configuration:
     | WHERE git.host LIKE ?git_host
         AND git.org LIKE ?git_org
         AND git.repo LIKE ?git_repo
+        AND NOT (
+          git.host == ?excluded_host
+          AND git.org == ?excluded_org
+          AND git.repo == ?excluded_repo
+        )
         AND (
           // Resolve git_commit, git_ref, and git_ref_type against the small
           // sourcerer-refs index first, rather than evaluating the wildcard
@@ -86,6 +91,21 @@ configuration:
       description: Filter by git commit(s) (supports * wildcards)
       optional: true
       defaultValue: "*"
+    excluded_host:
+      type: string
+      description: Exact git host of the repository to exclude; supply with excluded_org and excluded_repo
+      optional: true
+      defaultValue: ""
+    excluded_org:
+      type: string
+      description: Exact git org of the repository to exclude; supply with excluded_host and excluded_repo
+      optional: true
+      defaultValue: ""
+    excluded_repo:
+      type: string
+      description: Exact git repo to exclude; supply with excluded_host and excluded_org
+      optional: true
+      defaultValue: ""
     git_ref:
       type: string
       description: Filter by ref name(s), e.g. "main" or "v1.*" (supports * and ? wildcards)
