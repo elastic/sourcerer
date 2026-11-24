@@ -57,7 +57,7 @@ def _tuning():
         bulk_queue_size=int(os.environ.get("ELASTICSEARCH_BULK_QUEUE_SIZE", str(bulk_threads * 2))),
         index_workers=int(os.environ.get("ELASTICSEARCH_INDEX_WORKERS", str(os.cpu_count() or 4))),
         index_worker_chunksize=int(os.environ.get("ELASTICSEARCH_INDEX_WORKER_CHUNKSIZE", "8")),
-        index_repo_concurrency=int(os.environ.get("INDEX_REPO_CONCURRENCY", "2")),
+        index_repo_concurrency=int(os.environ.get("INDEX_REPO_CONCURRENCY", "1")),
         resolve_concurrency=int(os.environ.get("RESOLVE_CONCURRENCY", "4")),
     )
 
