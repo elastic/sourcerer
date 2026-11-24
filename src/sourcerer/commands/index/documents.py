@@ -7,6 +7,7 @@
 import os
 import pathlib
 import signal
+import multiprocessing
 from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
@@ -21,6 +22,15 @@ from ...indices import files_index, lines_index
 from ...utils import make_doc_id
 from .git import get_symlink_paths, iter_tracked_files
 from .runtime import _aborted, _tuning
+
+
+# Worker pools must not use the Linux default `fork` start method. The pool is created lazily on
+# the first executor.submit(), which runs inside parallel_bulk's producer *thread*; forking a
+# multithreaded process can copy a lock that another thread holds into the child, which then
+# deadlocks forever (observed as hung runs holding the cron lock). `forkserver` starts workers
+# from a clean single-threaded helper process instead. Workers only depend on state passed via
+# the pool initializer, so they need nothing inherited from this process.
+_POOL_MP_CONTEXT = multiprocessing.get_context("forkserver")
 
 
 def decode_source_bytes(raw: bytes) -> str:
@@ -444,6 +454,7 @@ def index_repo(
     symlink_paths = get_symlink_paths(repo_dir)
     with ProcessPoolExecutor(
         max_workers=max(1, t.index_workers),
+        mp_context=_POOL_MP_CONTEXT,
         initializer=_init_worker,
         initargs=(host, org, repo, commit_sha, str(repo_dir), symlink_paths,
                   index_level, index_suffix),
@@ -545,6 +556,7 @@ def index_incremental_paths(
     paths = list(iter_tracked_files(repo_dir)) if rel_paths is None else list(rel_paths)
     with ProcessPoolExecutor(
         max_workers=max(1, t.index_workers),
+        mp_context=_POOL_MP_CONTEXT,
         initializer=_init_worker_incremental,
         initargs=(host, org, repo, ref_type, ref_pattern, str(repo_dir), symlink_paths, index_level, index_suffix),
     ) as executor:
